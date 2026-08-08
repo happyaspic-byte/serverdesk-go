@@ -6,3 +6,4 @@ config.local.json.tmp
 serverdesk
 cmd/serverdesk/serverdesk
 serverdesk.local.env
+dist/

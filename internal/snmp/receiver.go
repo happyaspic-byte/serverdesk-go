@@ -6,7 +6,6 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -77,13 +76,8 @@ func (r *TrapReceiver) Start(ctx context.Context) error {
 	r.mu.Unlock()
 
 	lc := net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
-			// SO_REUSEADDR 는 파이썬처럼 best-effort — 실패해도 바인드를 막지 않는다.
-			_ = c.Control(func(fd uintptr) {
-				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-			})
-			return nil
-		},
+		// SO_REUSEADDR 는 best-effort — 플랫폼별 구현은 reuseaddr_*.go(Windows 는 no-op).
+		Control: reuseaddrControl,
 	}
 	pc, err := lc.ListenPacket(ctx, "udp", net.JoinHostPort(r.bind, strconv.Itoa(r.port)))
 	if err != nil {

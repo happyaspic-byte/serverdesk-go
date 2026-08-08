@@ -99,7 +99,7 @@ func (c *Client) exec(ctx context.Context, command string, xmlMode bool) (string
 	args = append(args, strings.Fields(command)...)
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Bin, args...)
+	cmd := avcliCmd(ctx, c.Bin, args) // 플랫폼 래퍼 — cmdwrap_*.go(Windows 는 cmd /c 경유)
 	cmd.Stdin = nil // subprocess.DEVNULL 에 해당
 	// 타임아웃으로 죽인 래퍼 스크립트의 자식(java)이 stdout 파이프를 쥐고 남으면
 	// Wait 가 파이프 EOF 까지 블록된다 — WaitDelay 로 상한을 둔다.

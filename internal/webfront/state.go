@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -27,6 +26,7 @@ type stateFile struct {
 	mu       sync.Mutex
 }
 
+// flock 호출 자체는 flock_unix.go / flock_windows.go 에 있다(Windows 는 mutex 만).
 // lock 은 프로세스 내 mutex 와 프로세스 간 flock 을 함께 잡는다(cron 판 _state_file_lock
 // 하드닝). mutex 만으로는 같은 상태 파일을 여는 두 프로세스가 동시에 읽기-수정-쓰기를
 // 할 때 마지막 rename 이 앞선 운영자의 변경을 지운다. 별도 .lock inode 에 flock 을 걸어
@@ -37,12 +37,12 @@ func (sf *stateFile) lock() func() {
 	if err != nil {
 		return sf.mu.Unlock // 락 파일을 못 만들어도 프로세스 내 직렬화는 유지
 	}
-	if syscall.Flock(int(fd.Fd()), syscall.LOCK_EX) != nil {
+	if !lockFile(fd) {
 		fd.Close()
 		return sf.mu.Unlock
 	}
 	return func() {
-		syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
+		unlockFile(fd)
 		fd.Close()
 		sf.mu.Unlock()
 	}

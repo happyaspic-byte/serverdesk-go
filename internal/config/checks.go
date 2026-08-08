@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/user"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -14,6 +15,10 @@ import (
 // 느슨하면 nil 이 아닌 에러를 돌려주니 호출자가 warn 로그로 남기면 된다
 // (기동을 막지는 않는다 — poller.py 도 경고만 한다).
 func CheckPerms(path string) error {
+	// Windows 는 POSIX 권한 비트가 없어 Perm() 이 항상 느슨하게 보인다 — 점검 자체를 건너뛴다.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return nil
@@ -128,6 +133,10 @@ func evalArgvExposure(hidepid string, protected bool, others []string, allow boo
 // 반환: warn 은 기동은 가능하지만 남길 경고/정보 메시지, err 는 기동 거부 사유.
 // allow=true 면 위험 조건에서도 err 대신 warn 으로 돌려준다(--allow-argv-exposure).
 func CheckArgvExposure(allow bool) (warn string, err error) {
+	// /proc·/etc/passwd 기반 점검은 Unix 전용 — Windows 는 프로세스 모델이 달라 생략한다.
+	if runtime.GOOS == "windows" {
+		return "", nil
+	}
 	hp := procHidepid()
 	protected := hp == "2" || hp == "invisible" || hp == "ptraceable" || hp == "subset=pid"
 	return evalArgvExposure(hp, protected, otherLocalUsers(), allow)

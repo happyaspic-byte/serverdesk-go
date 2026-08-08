@@ -165,7 +165,7 @@ func (r *Runner) execSSH(ctx context.Context, host string, port int, user, passw
 	}
 	args = append(args, user+"@"+host, command)
 
-	cmd := exec.CommandContext(ctx, "setsid", args...)
+	cmd := sshCmd(ctx, args) // 플랫폼별 래퍼 — sshwrap_*.go(Windows 는 setsid 없이 직접 호출)
 	// Stdin nil = /dev/null(Python 의 stdin=DEVNULL). TTY 가 없어야 askpass 로 간다.
 	cmd.Stdin = nil
 	env := os.Environ()
