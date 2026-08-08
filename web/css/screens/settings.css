@@ -1,0 +1,291 @@
+/* css/screens/settings.css
+ * serverdesk — 설정 화면(Settings) 전용 스타일.
+ * REBUILD-SPEC.md §5.5: 자기 접두사(sc-set-)만 정의, 공용 클래스(.card/.btn/.field-input/.toggle-*
+ * .switch/.u-badge/.is-pos 등)는 재사용만 하고 재정의하지 않는다.
+ */
+
+.sc-set-wrap {
+  /* 좌측 축(x=150) 글로벌 통일 — 다른 9개 화면과 동일하게 --page-max 컨테이너를 중앙 배치해
+     좌변을 맞춘다. wrap 자체는 중앙정렬하지 않아 콘텐츠 좌변(x=150)이 다른 화면과 정렬된다. 760 단일
+     컬럼을 margin:0 auto 로 중앙정렬하면 제목/카드가 x=480 으로 튀어 좌축 통일이 깨지므로 도입 금지. */
+  max-width: var(--page-max);
+  margin: 0 auto;
+  /* 화면 루트 패딩은 각 화면이 소유한다(styles.css의 .screen은 패딩 없음, I1 통합 규약) */
+  padding: var(--page-pad);
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+}
+/* 제목 헤더는 좌변(x=150 축)에 붙이고 읽기 폭만 760 으로 제한한다. */
+.sc-set-head { max-width: 760px; box-sizing: border-box; margin-bottom: 2px; }
+
+/* E4: 카드는 masonry(멀티컬럼) — 2열 그리드의 행 정렬이 만들던 '알림' 아래 ~200px 공백을 없앤다.
+   카드가 열을 세로로 채우며 흐르므로 열 간 세로 공백이 카드 높이 차(수십 px)로 수렴한다.
+   break-inside:avoid 로 카드가 열 경계에서 쪼개지지 않게 하고, 좁은 뷰포트에선 단일 열로 접는다. */
+.sc-set-cards {
+  columns: 2;
+  column-gap: var(--sp-4);
+}
+.sc-set-cards > .sc-set-card {
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  width: 100%;
+  margin: 0 0 var(--sp-4);
+}
+.sc-set-card { background:var(--surface); box-shadow:none; }
+@media (max-width: 1100px) {
+  .sc-set-cards { columns: 1; }
+}
+
+.sc-set-title {
+  margin: 0 0 4px;
+  font-size: var(--h1);
+  font-weight:700;
+  letter-spacing: -.02em;
+  color: var(--ink);
+  line-height: 1.2;
+}
+.sc-set-sub { margin: 0; font-size:var(--fs-12); font-weight: 600; color: var(--muted); line-height: 1.5; }
+
+/* 카드 헤더 아이콘(장식용, currentColor 상속 → var(--ink2)) */
+.sc-set-card .card-head {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2px;
+}
+.sc-set-card-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink2);
+  flex-shrink: 0;
+}
+
+/* 행(라벨 + 컨트롤) 공통 */
+.sc-set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  flex-wrap: wrap;
+}
+.sc-set-row-label { min-width: 0; }
+.sc-set-row-name { font-size:var(--fs-13); font-weight: 700; color: var(--ink); }
+.sc-set-row-meta { font-size:var(--fs-12); color: var(--muted); margin-top: 2px; line-height: 1.5; max-width: 440px; }
+
+/* 제품 정보(About) 카드 — 연락처 값/링크 */
+.sc-set-about-val { font-size:var(--fs-13); color: var(--ink2); text-align: right; }
+.sc-set-about-link { color: var(--accent); text-decoration: none; }
+.sc-set-about-link:hover { text-decoration: underline; }
+
+/* 언어·테마·자동확인·에스컬레이션 행(전부 .sc-set-lang-row) — ≤560px 미디어쿼리가
+   .sc-set-seg{width:100%} 로 세로 쌓기를 의도하지만, 공용 .toggle-row 는 wrap 이 없어
+   라벨이 0폭으로 압착되고 가로 오버플로가 났다. 헤더 계약(공용 .toggle-* 재정의 금지)상
+   자기 접두사 클래스에 wrap 을 준다(.sc-set-token-row 의 wrap 전략과 동일). */
+.sc-set-lang-row { flex-wrap: wrap; }
+
+/* 언어 세그먼트 */
+.sc-set-seg {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius:var(--r-md);
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+.sc-set-seg-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size:var(--fs-12);
+  font-weight: 700;
+  padding: 8px 16px;
+  border-radius:var(--r-xs);
+  color: var(--ink2);
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.sc-set-seg-btn:hover { color: var(--ink); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-set-seg-btn:active { filter: brightness(.96); }
+/* 선택된 언어·테마·정책은 인터랙션 색으로만 구분한다. */
+.sc-set-seg-btn.is-active { background:var(--accent-soft); color:var(--accent-deep); box-shadow:none; }
+.sc-set-seg-btn.is-active:hover { background:var(--accent-soft); color:var(--accent-deep); }
+
+.sc-set-hint { margin: 2px 0 12px; font-size:var(--fs-12); color: var(--muted); line-height: 1.5; }
+
+/* 회사 색상 목록 */
+.sc-set-co-list { display: flex; flex-direction: column; }
+.sc-set-co-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.sc-set-co-row:first-child { border-top: none; padding-top: 0; }
+.sc-set-co-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sc-set-co-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius:var(--r-xs);
+  flex-shrink: 0;
+  box-shadow:var(--hairline-highlight);
+}
+.sc-set-co-name {
+  font-size:var(--fs-13);
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-set-co-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* S: 팔레트는 기본 접힘 — 회사별 '현재 색 + 변경'만 노출하고, is-expanded 에서만 8색+커스텀+리셋을 편다. */
+.sc-set-co-palette { display: none; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sc-set-co-row.is-expanded .sc-set-co-palette { display: flex; }
+.sc-set-co-change {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius:var(--r-xs);
+  cursor: pointer;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-12);
+  font-weight: 700;
+  color: var(--ink2);
+  flex-shrink: 0;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.sc-set-co-change:hover { border-color: var(--accent-deep); color: var(--accent-deep); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-set-co-change:active { filter: brightness(.96); }
+.sc-set-co-row.is-expanded .sc-set-co-change { color: var(--accent-deep); border-color: var(--accent-deep); }
+.sc-set-co-pal {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  padding: 0;
+  cursor: pointer;
+  border: 2px solid transparent;
+  box-shadow:var(--hairline-highlight);
+  transition: transform var(--dur) var(--ease);
+}
+/* 색상 스와치 자체 — filter 딤은 미리보기 색을 왜곡하므로 pressed dim 미적용(hover 리프트만) */
+.sc-set-co-pal:hover { transform: translateY(-1px); }
+.sc-set-co-pal.is-active {
+  border-color:var(--accent);
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+.sc-set-co-pal:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.sc-set-co-custom {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--muted);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.sc-set-co-custom-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: background var(--dur) var(--ease);
+}
+.sc-set-co-custom:hover .sc-set-co-custom-dot { background: var(--ink2); }
+.sc-set-co-custom input[type="color"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+  border: none;
+  padding: 0;
+}
+/* input 이 opacity:0 이라 전역 ::focus-visible 아웃라인이 보이지 않는다 — 보이는 라벨 박스에 그린다
+   (WCAG 2.4.7). 토큰·두께는 styles.css ::focus-visible 과 동일(포커스링 = --accent, DESIGN-TOKENS §1). */
+.sc-set-co-custom:focus-within { outline:2px solid var(--accent); outline-offset:2px; }
+.sc-set-co-reset {
+  margin-left: 2px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius:var(--r-xs);
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size:var(--fs-12);
+  font-weight: 700;
+  color: var(--ink2);
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.sc-set-co-reset:hover { border-color: var(--accent-deep); color: var(--accent-deep); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-set-co-reset:active { filter: brightness(.96); }
+.sc-set-wrap .field-input:read-only:not(:disabled),
+.sc-set-wrap .field-select:read-only:not(:disabled),
+.sc-set-wrap .field-textarea:read-only:not(:disabled){
+  background:var(--surface-2); color:var(--ink2); cursor:default;
+}
+.sc-set-wrap .field-input:disabled,
+.sc-set-wrap .field-select:disabled,
+.sc-set-wrap .field-textarea:disabled{
+  background:var(--surface-2); color:var(--muted); cursor:not-allowed;
+}
+
+/* Critical 웹훅 */
+.sc-set-hook-form { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.sc-set-hook-input { flex: 1 1 300px; min-width: 0; }
+.sc-set-hook-msg { margin-top: 8px; font-size:var(--fs-12); font-weight: 700; }
+
+/* 관리 API 토큰 — toggle-row 안의 입력 폼. 좁으면 폼이 라벨 아래로 접힌다(웹훅 폼과 같은 wrap 전략). */
+.sc-set-token-row { flex-wrap: wrap; }
+.sc-set-token-form { display: flex; gap: 8px; flex: 1 1 340px; flex-wrap: wrap; }
+.sc-set-token-input { flex: 1 1 200px; min-width: 0; }
+
+/* 알림 임계값(읽기전용) */
+.sc-set-thresh-row { padding: 12px 0; border-top: 1px solid var(--line); }
+.sc-set-thresh-row:first-child { border-top: none; padding-top: 0; }
+.sc-set-thresh-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.sc-set-thresh-label { font-size:var(--fs-12); font-weight: 700; color: var(--ink); }
+.sc-set-thresh-val { font-size:var(--fs-12); font-weight:700; font-variant-numeric: tabular-nums; }
+/* 중립 스케일 트랙 + 임계 위치 얇은 틱 마커. 예전엔 임계값까지 solid 로 채운 바였는데,
+   특히 심각(90%) 행이 제품 내 최대 red 색면(≈549×6px)이라 'red=실장애 전용' 신호를 희석했다.
+   틱(3×13px)만 남겨 red 색면을 ~99% 줄이고, 채도 높은 상태색을 라이브 장애에 예약한다. */
+.sc-set-thresh-track { position: relative; height: 6px; border-radius: 4px; background: var(--track); }
+.sc-set-thresh-fill {
+  position: absolute; top: 50%; left: 0; transform: translate(-50%, -50%);
+  width: 3px; height: 13px; border-radius: 2px;
+  background: var(--muted); transition: left var(--dur) var(--ease);
+}
+.sc-set-thresh-fill.is-warn { background: var(--warn); }
+.sc-set-thresh-fill.is-neg { background: var(--neg); }
+
+/* 좁은 화면 대응 (본문은 항상 자기 컨테이너 안에서만 스크롤) */
+@media (max-width: 560px) {
+  .sc-set-row { align-items: flex-start; }
+  .sc-set-seg { width: 100%; }
+  .sc-set-seg-btn { flex: 1; text-align: center; }
+  .sc-set-hook-input { flex-basis: 100%; }
+}
+
+/* 임계값 편집 폼 — 읽기전용 틱 아래의 warn/crit 입력 행 */
+.sc-set-th-form{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; padding-top:10px; border-top:1px solid var(--line2); }
+.sc-set-th-inlab{ font-size:var(--fs-12); color:var(--ink2); }
+.sc-set-th-in{ width:64px; }
+.sc-set-th-msg{ font-size:var(--fs-12); }
+.sc-set-th-msg.is-pos{ color:var(--pos-on-tint); }
+.sc-set-th-msg.is-neg{ color:var(--neg-on-tint); }
+
+/* 백업/복구 카드 버튼 행 */
+.sc-set-bk-btns{ flex-wrap:wrap; }
+.sc-set-bk-btns a.btn{ text-decoration:none; }

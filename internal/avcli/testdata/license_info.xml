@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<avance>
+  <license>
+    <name>eE_UNTRACKED_TRIAL</name>
+    <id>license:o647</id>
+    <type>trial</type>
+    <edition>Enterprise</edition>
+    <install-date>Mon Jul 06 07:35:25 UTC 2026</install-date>
+    <expire-date>Thu Sep 17 07:35:26 UTC 2026</expire-date>
+    <allow-features>true</allow-features>
+    <activated>true</activated>
+    <expires>true</expires>
+    <installed>true</installed>
+  </license>
+</avance>

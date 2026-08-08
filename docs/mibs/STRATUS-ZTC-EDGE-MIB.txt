@@ -1,0 +1,2654 @@
+-- ==========================================================================
+--
+--  COPYRIGHT (c) 2001-2018  Stratus Technologies Bermuda Ltd.
+--  All Rights Reserved.
+--
+-- ==========================================================================
+
+-- ==========================================================================
+--
+--   @File:
+--     STRATUS-ZTC-EDGE-MIB.txt
+--
+--   @Revision:
+--     3.0
+--
+--   @Description:
+--     This file defines the Stratus ztC Edge SNMP MIB.
+--     Definitions for ztC Edge agents appear here.
+--     Stratus MIB definitions for other agents are not in this file.
+--
+-- ==========================================================================
+
+STRATUS-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    enterprises         FROM RFC1155-SMI
+    OBJECT-TYPE         FROM RFC-1212
+    DisplayString       FROM RFC1213-MIB
+    TRAP-TYPE           FROM RFC-1215;
+
+
+    Boolean ::= INTEGER {
+            unknown(1),
+            false(2),
+            true(3)
+        }
+
+    ToggleState ::= INTEGER {
+            enabled(1),
+            disabled(2)
+        }
+
+    -- This data type is to indicate true or false.
+
+-- ==========================================================================
+-- Stratus Enterprise tree structure
+-- ==========================================================================
+-- stratus enterprise : 1.3.6.1.4.1.458
+--
+stratus         OBJECT IDENTIFIER ::= { enterprises 458 }
+
+
+-- ==========================================================================
+--  Major categories under the Stratus namespace.
+--  Note: Values less than 101 are not used to prevent collision with
+--  old products.
+-- ==========================================================================
+experimental    OBJECT IDENTIFIER ::= { stratus 101 }
+agentInfo       OBJECT IDENTIFIER ::= { stratus 102 }
+systemInfo      OBJECT IDENTIFIER ::= { stratus 103 }
+productIdent    OBJECT IDENTIFIER ::= { stratus 104 }
+ftServerOid     OBJECT IDENTIFIER ::= { stratus 105 }
+stcpOid         OBJECT IDENTIFIER ::= { stratus 106 }
+ftLinuxOid      OBJECT IDENTIFIER ::= { stratus 107 }
+avanceOid       OBJECT IDENTIFIER ::= { stratus 110 }
+everRunOid      OBJECT IDENTIFIER ::= { stratus 115 }
+ztCEdgeOid      OBJECT IDENTIFIER ::= { stratus 116 }
+
+
+-- ==========================================================================
+-- The Agent Information table is used to provide information about
+-- the capabilities of the SNMP agent.
+-- ==========================================================================
+sraAgentMibFamily  OBJECT-TYPE
+    SYNTAX      INTEGER  {
+                    stcp(1),
+                    ftServer(2),
+                    ftlinux(3),
+                    avance(4),
+                    everRun(5),
+                    ztCEdge(6)
+                }
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This variable indicates which OIDs are supported by the agent.
+             When support for variables and/or traps are removed from an
+             agent, a new family must be created."
+    ::= { agentInfo 1 }
+
+sraAgentMibRevision  OBJECT-TYPE
+    SYNTAX      INTEGER  {
+                    rev01(1)
+                }
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This variable indicates whether variables and/or traps have been
+             added to the MIB.  When a MIB family is created this is initially
+             one. When OIDs are added to those an agent supports, this integer
+             is incremented. Each time a MIB is published, the corresponding
+             Revision will be defined in the MIB."
+    ::= { agentInfo 2 }
+
+
+-- ==========================================================================
+--  The System Information table provides information about system as a
+--  whole.  These variables are platform independent.
+-- ==========================================================================
+sraSiSystemType OBJECT-TYPE
+    SYNTAX      OBJECT IDENTIFIER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "The authoritative identification of the hardware and software
+             in the entity.  This value provides an easy and unambiguous means
+             for determining `what kind of box' is being managed.  This value
+             is an OID that indicates the product family, operating system and
+             CPU architecture.  Values are enumerated in the
+             Product Identification (OID 104) table."
+    ::= { systemInfo 1 }
+
+sraSiManufacturer OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This value is a string to indicate the manufacturer of the system.
+             If unknown, the agent may return a null string."
+    ::= { systemInfo 2 }
+
+sraSiModel OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This value is a string to indicate the model of the system.
+             If unsupported the agent may return a null string."
+    ::= { systemInfo 3 }
+
+sraSiOverallSystemStatus OBJECT-TYPE
+    SYNTAX  INTEGER  {
+                unsupported(1),
+                noFaults(2),
+                systemFault(3),
+                systemDown(4)
+            }
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer indicates the overall status of the system."
+    ::= { systemInfo 4 }
+
+sraSiSystemName OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This value is a string representing the network name of the
+             system.  This is expected to be unique on a LAN but possibly
+             not globally unique.  If unsupported by the agent, a null
+             string may be returned.  When the OS is Windows, this is the
+             *computer name* portion of the network id, or the Lan Manager
+             name of the computer (e.g. PCAT). In contrast, the MIB-II
+             sysName is typically the fully-qualified domain name
+             (e.g. pcat.mno.stratus.com).  On VOS, this is the system and
+             module name (e.g. %sys#m1). On UNIX and Linux this is the
+             hostname."
+    ::= { systemInfo 5 }
+
+sraSiSystemSerialNumber OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This value is a string containing the serial number of the
+             system. If unsupported by the agent, a null string may be
+             returned."
+    ::= { systemInfo 6 }
+
+sraSiSiteID     OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This string value contains the SiteID.  SiteID is part of
+             the RSN/ASN service model."
+    ::= { systemInfo 7 }
+
+sraSiCpuFamily OBJECT-TYPE
+    SYNTAX      INTEGER  {
+                    unsupported(1),
+                    m68k(2),
+                    i860(3),
+                    hppa(4),
+                    ia32(5),
+                    ia64(6)
+                }
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This value is an integer that indicates the CPU architecture."
+    ::= { systemInfo 8 }
+
+sraSiOsType OBJECT-TYPE
+    SYNTAX      INTEGER  {
+                    unsupported(1),
+                    ftx(2),
+                    hpux(3),
+                    ftlinux(4),
+                    vos(5),
+                    windows(6),
+                    avance(7),
+                    everRun(8),
+                    ztCEdge(9)
+                }
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This value is an integer that indicates Operating System type."
+    ::= { systemInfo 9 }
+
+
+-- ==========================================================================
+-- The Product Identification table is used to identify specific Stratus
+-- products.  This table defines OIDs but there are no variables.  Where
+-- possible these will be used as the value of the RFC-1213 MIB-II
+-- system.sysObjectID variable. However, with a non-Stratus OS, like
+-- ftLinux and Windows, MIB-II system.sysObjectID is not under our control.
+-- Consequently these same values are reported in the Stratus variable
+-- sraSiSystemType.
+-- ==========================================================================
+osFTX                   OBJECT IDENTIFIER ::= { productIdent 1 }
+sraProductIdFtxJetta    OBJECT IDENTIFIER ::= { osFTX 1 }
+sraProductIdFtxPolo     OBJECT IDENTIFIER ::= { osFTX 2 }
+
+osHPUX                  OBJECT IDENTIFIER ::= { productIdent 2 }
+sraProductIdHpuxPolo    OBJECT IDENTIFIER ::= { osHPUX 1 }
+
+osftLinux               OBJECT IDENTIFIER ::= { productIdent 3 }
+sraProductIdLnxFtsIa32  OBJECT IDENTIFIER ::= { osftLinux 1 }
+
+osVOS                   OBJECT IDENTIFIER ::= { productIdent 4 }
+sraProductIdVos68k      OBJECT IDENTIFIER ::= { osVOS 1 }
+sraProductIdVosI860     OBJECT IDENTIFIER ::= { osVOS 2 }
+sraProductIdVosJetta    OBJECT IDENTIFIER ::= { osVOS 3 }
+sraProductIdVosIa32     OBJECT IDENTIFIER ::= { osVOS 4 }
+
+
+osWindowsFt             OBJECT IDENTIFIER ::= { productIdent 5 }
+sraProductIdWinFtsIa32  OBJECT IDENTIFIER ::= { osWindowsFt 1 }
+sraProductIdWinFtsIa64  OBJECT IDENTIFIER ::= { osWindowsFt 2 }
+
+osRadio                 OBJECT IDENTIFIER ::= { productIdent 6 }
+sraProductIdWinRadIa32  OBJECT IDENTIFIER ::= { osRadio 1 }
+
+osAvance                OBJECT IDENTIFIER ::= { productIdent 10 }
+sraProductIdAvance      OBJECT IDENTIFIER ::= { osAvance 1 }
+
+osEverRun                OBJECT IDENTIFIER ::= { productIdent 15 }
+sraProductIdEverRun      OBJECT IDENTIFIER ::= { osEverRun 1 }
+
+osZtCEdge                OBJECT IDENTIFIER ::= { productIdent 16 }
+sraProductIdZtCEdge      OBJECT IDENTIFIER ::= { osZtCEdge 1 }
+
+-- ==========================================================================
+-- The following table contains OIDs unique to the ztC Edge MIB.
+-- There are three groups of OIDs within this table:
+-- OIDs that identify GET/SET variables,
+-- OIDs that identify ztC Edge TRAPs, and
+-- OIDs used to identify variable fields in TRAP PDUs.
+-- ==========================================================================
+
+ztCEdgeVar                 OBJECT IDENTIFIER ::= { ztCEdgeOid 1 }
+ztCEdgeTrapId              OBJECT IDENTIFIER ::= { ztCEdgeOid 2 }
+ztCEdgeTrapData            OBJECT IDENTIFIER ::= { ztCEdgeOid 3 }
+
+
+    -- ztC Edge GET/SET variables
+
+ztCEdgeAvailableVirtualMemory OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the available virtual memory of the system
+             in gigabytes."
+    ::= { ztCEdgeVar 1 }
+
+ztCEdgeVirtualCPUsTotal OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the total number of virtual CPUs on the system."
+    ::= { ztCEdgeVar 2 }
+
+ztCEdgeVirtualCPUsInUse OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the number of virtual CPUs currently in use on
+             the system."
+    ::= { ztCEdgeVar 3 }
+
+ztCEdgeVirtualCPUsMaxPerVM OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the maximum number of virtual CPUs that can be
+             assigned to a virtual machine."
+    ::= { ztCEdgeVar 4 }
+
+-- ztCEdgeVirtualCPUsPercentageUsed OBJECT-TYPE
+--    SYNTAX      INTEGER
+--    ACCESS      read-only
+--    STATUS      mandatory
+--    DESCRIPTION
+--            "This integer contains the percentage of available virtual CPU capacity
+--             that is in use on the system."
+--    ::= { ztCEdgeVar 5 }
+
+ztCEdgeStorageTotal OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the total amount of storage on the system in gigabytes."
+    ::= { ztCEdgeVar 5 }
+
+ztCEdgeStorageUsed OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the amount of storage in use on the system in gigabytes."
+    ::= { ztCEdgeVar 6 }
+
+-- ztCEdgeStorageUsedByManagement OBJECT-TYPE
+--    SYNTAX      INTEGER
+--    ACCESS      read-only
+--    STATUS      mandatory
+--    DESCRIPTION
+--            "This integer contains the amount of storage in use by management on the system
+--             in gigabytes."
+--    ::= { ztCEdgeVar 7 }
+
+ztCEdgeStorageFree OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the amount of unused storage on the system in gigabytes."
+    ::= { ztCEdgeVar 7 }
+
+-- ztCEdgeDiskReadBytes OBJECT-TYPE
+--    SYNTAX      INTEGER
+--    ACCESS      read-only
+--    STATUS      mandatory
+--    DESCRIPTION
+--            "This integer contains the percentage of available disk throughput on the system that
+--             is being consumed by disk reads."
+--    ::= { ztCEdgeVar 10 }
+
+-- ztCEdgeDiskWriteBytes OBJECT-TYPE
+--     SYNTAX      INTEGER
+--     ACCESS      read-only
+--     STATUS      mandatory
+--     DESCRIPTION
+--             "This integer contains the percentage of available disk throughput on the system that
+--              is being consumed by disk writes."
+--     ::= { ztCEdgeVar 11 }
+
+ztCEdgeIPAddress OBJECT-TYPE
+    SYNTAX      IpAddress
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This IP address is the IP address of the system.  It corresponds to the
+             fully qualified domain name of the system."
+    ::= { ztCEdgeVar 8 }
+
+-- ztCEdgeNetworkReadBytes OBJECT-TYPE
+--     SYNTAX      INTEGER
+--     ACCESS      read-only
+--     STATUS      mandatory
+--     DESCRIPTION
+--             "This integer contains the percentage of available network bandwidth on the system that
+--              is being consumed by network reads."
+--    ::= { ztCEdgeVar 13 }
+
+-- ztCEdgeNetworkWriteBytes OBJECT-TYPE
+--     SYNTAX      INTEGER
+--     ACCESS      read-only
+--     STATUS      mandatory
+--     DESCRIPTION
+--             "This integer contains the percentage of available network bandwidth on the system that
+--              is being consumed by network writes."
+--     ::= { ztCEdgeVar 14 }
+
+ztCEdgeVMTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF ZtCEdgeVMEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+            "A table containing information on virtual machines that have been configured on the system."
+    ::= { ztCEdgeVar 17 }
+
+ztCEdgeVMEntry OBJECT-TYPE
+    SYNTAX      ZtCEdgeVMEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+            "The record for a single virtual machine."
+    INDEX      { ztCEdgeVMIndex }
+    ::= { ztCEdgeVMTable 1 }
+
+ZtCEdgeVMEntry ::= SEQUENCE
+{
+    ztCEdgeVMIndex           INTEGER,
+    ztCEdgeVMId              DisplayString,
+    ztCEdgeVMDisplayName     DisplayString,
+    ztCEdgeVMRunningNode     DisplayString,
+    ztCEdgeVMAvailability    DisplayString,
+    ztCEdgeVMStateNum        INTEGER
+}
+
+ztCEdgeVMIndex OBJECT-TYPE
+    SYNTAX      INTEGER(0..255)
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "This is the row index."
+    ::= { ztCEdgeVMEntry 1 }
+
+ztCEdgeVMId OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "this is the VM id in ztCEdge."
+    ::= { ztCEdgeVMEntry 2 }
+
+ztCEdgeVMDisplayName OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "Name for which VM is displaying."
+    ::= { ztCEdgeVMEntry 3 }
+
+ztCEdgeVMRunningNode OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "The node name which VM is running"
+    ::= { ztCEdgeVMEntry 4 }
+
+ztCEdgeVMAvailability OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "The availability of VM, it can be   HA, FT or Unprotected"
+    ::= { ztCEdgeVMEntry 5 }
+
+ztCEdgeVMStateNum OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "This value is a numerical of the node state."
+    ::= { ztCEdgeVMEntry 6 }
+
+ztCEdgeVMActivityNum OBJECT-TYPE
+   SYNTAX      INTEGER
+   ACCESS      read-only
+   STATUS      optional
+   DESCRIPTION
+           "This value is a numerical of the VM activity."
+   ::= { ztCEdgeVMEntry 7 }
+
+ztCEdgeVolumeTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF ZtCEdgeVolumeEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+            "A table containing information on volume that have been configured of VM."
+    ::= { ztCEdgeVar 18 }
+
+ztCEdgeVolumeEntry OBJECT-TYPE
+    SYNTAX      ZtCEdgeVolumeEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+            "The record for a single volume."
+    INDEX       { ztCEdgeVolumeIndex }
+    ::= { ztCEdgeVolumeTable 1 }
+
+ZtCEdgeVolumeEntry ::= SEQUENCE
+{
+    ztCEdgeVolumeIndex          INTEGER,
+    ztCEdgeVolumeId             DisplayString,
+    ztCEdgeVolumeDisplayName    DisplayString,
+    ztCEdgeVolumeSyncPercentage INTEGER,
+    ztCEdgeVolumeUsedBy         DisplayString,
+    ztCEdgeVolumeStateNum       INTEGER
+}
+
+ztCEdgeVolumeIndex OBJECT-TYPE
+    SYNTAX      INTEGER (0..500)
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "This is the row index."
+    ::= { ztCEdgeVolumeEntry 1 }
+
+ztCEdgeVolumeId OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "This is the volume id in ztCEdge."
+    ::= { ztCEdgeVolumeEntry 2 }
+
+ztCEdgeVolumeDisplayName OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "Name for which volume is displaying."
+    ::= { ztCEdgeVolumeEntry 3 }
+
+ztCEdgeVolumeSyncPercentage OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "This is the volume sync percentage"
+    ::= { ztCEdgeVolumeEntry 4 }
+
+ztCEdgeVolumeUsedBy OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+            "The VM name which the volume is associated"
+    ::= { ztCEdgeVolumeEntry 5 }
+
+ztCEdgeVolumeStateNum    OBJECT-TYPE
+   SYNTAX      INTEGER
+   ACCESS      read-only
+   STATUS      optional
+   DESCRIPTION
+           "This value is a numerical of the volume state"
+     ::= { ztCEdgeVolumeEntry 6 }
+
+ztCEdgeNodeTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF ZtCEdgeNodeEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+           "A table containing information of nodes that have been added on the system."
+    ::= { ztCEdgeVar 19 }
+
+ztCEdgeNodeEntry OBJECT-TYPE
+    SYNTAX      ZtCEdgeNodeEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+           "The record for a single node."
+    INDEX      { ztCEdgeNodeIndex }
+    ::= { ztCEdgeNodeTable 1 }
+
+ZtCEdgeNodeEntry ::= SEQUENCE
+{
+    ztCEdgeNodeIndex      INTEGER,
+    ztCEdgeNodeId      DisplayString,
+    ztCEdgeNodeDisplayName      DisplayString,
+    ztCEdgeNodeIsPrimary      Boolean,
+    ztCEdgeNodeStateNum      INTEGER,
+    ztCEdgeNodeActivityNum   INTEGER
+}
+
+ztCEdgeNodeIndex OBJECT-TYPE
+    SYNTAX      INTEGER (0..9)
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+           "This is the row index."
+    ::= { ztCEdgeNodeEntry 1 }
+
+ztCEdgeNodeId OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+           "This is the node id in ztCEdge."
+    ::= { ztCEdgeNodeEntry 2 }
+
+ztCEdgeNodeDisplayName OBJECT-TYPE
+    SYNTAX      DisplayString
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+           "Name for which node is displaying."
+    ::= { ztCEdgeNodeEntry 3 }
+
+ztCEdgeNodeIsPrimary OBJECT-TYPE
+    SYNTAX      Boolean
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+           "This boolean value indicates if the node is primary node"
+    ::= { ztCEdgeNodeEntry 4 }
+
+ztCEdgeNodeStateNum OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      optional
+    DESCRIPTION
+           "This value is a numerical of the node state."
+    ::= { ztCEdgeNodeEntry 5 }
+
+ztCEdgeNodeActivityNum OBJECT-TYPE
+    SYNTAX    INTEGER
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+           "This value is a numerical of the node activity."
+    ::= { ztCEdgeNodeEntry 6 }
+
+ZtCEdgeAlertEntry ::= SEQUENCE {
+    ztCEdgeAlertIndex        INTEGER,
+    ztCEdgeAlertSeverity     INTEGER,
+    ztCEdgeAlertType         DisplayString,
+    ztCEdgeAlertSource       DisplayString,
+    ztCEdgeAlertDateTime     DisplayString,
+    ztCEdgeAlertCallHomeSent Boolean,
+    ztCEdgeAlertEAlertSent   Boolean,
+    ztCEdgeAlertSNMPTrapSent Boolean,
+    ztCEdgeAlertInformation  DisplayString,
+    ztCEdgeAlertSNMPTrapOID  OBJECT IDENTIFIER,
+    ztCEdgeAlertSeverityNum  INTEGER }
+
+ztCEdgeAlertTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF ZtCEdgeAlertEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+            "This table contains an entry for each alert log that has been generated on this system."
+    ::= { ztCEdgeVar 10 }
+
+ztCEdgeAlertEntry OBJECT-TYPE
+    SYNTAX      ZtCEdgeAlertEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+            "This entry represents one alert in the ztCEdgeAlertTable table."
+    INDEX       { ztCEdgeAlertIndex }
+    ::= { ztCEdgeAlertTable 1 }
+
+ztCEdgeAlertNumber OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the number of entries in the ztCEdgeAlertTable table."
+    ::= { ztCEdgeVar 9 }
+
+ztCEdgeAlertIndex   OBJECT-TYPE
+    SYNTAX    INTEGER(0..65535)
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This index value uniquely identifies the alert represented by this entry."
+    ::= { ztCEdgeAlertEntry 1 }
+
+ztCEdgeAlertSeverity   OBJECT-TYPE
+    SYNTAX      INTEGER  {
+                    clear(0),
+                    informational(1),
+                    minor(2),
+                    major(3),
+                    serious(4),
+                    critical(5)
+                }
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This value represents the severity of the alert."
+    ::= { ztCEdgeAlertEntry 2 }
+
+ztCEdgeAlertType   OBJECT-TYPE
+    SYNTAX    DisplayString
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This value represents the type of the alert."
+    ::= { ztCEdgeAlertEntry 3 }
+
+ztCEdgeAlertSource   OBJECT-TYPE
+   SYNTAX    DisplayString
+   ACCESS    read-only
+   STATUS    optional
+   DESCRIPTION
+           "This string contains the source of the alert.  This could be a device or a node."
+   ::= { ztCEdgeAlertEntry 4 }
+
+ztCEdgeAlertDateTime   OBJECT-TYPE
+    SYNTAX    DisplayString
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This string contains the date and time that the alert was generated."
+    ::= { ztCEdgeAlertEntry 5 }
+
+ztCEdgeAlertCallHomeSent   OBJECT-TYPE
+    SYNTAX    Boolean
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This boolean value indicates whether or not a CallHome message was sent for this alert."
+    ::= { ztCEdgeAlertEntry 6 }
+
+ztCEdgeAlertEAlertSent   OBJECT-TYPE
+    SYNTAX    Boolean
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This boolean value indicates whether or not an eAlert was sent for this alert."
+    ::= { ztCEdgeAlertEntry 7 }
+
+ztCEdgeAlertSNMPTrapSent   OBJECT-TYPE
+    SYNTAX    Boolean
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This boolean value indicates whether or not an SNMP trap was sent for this alert."
+    ::= { ztCEdgeAlertEntry 8 }
+
+ztCEdgeAlertInformation   OBJECT-TYPE
+    SYNTAX    DisplayString
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This string contains explanatory text regarding the alert.  This can include more details regarding
+             the cause of the alert and the device/node that caused the alert to be generated."
+    ::= { ztCEdgeAlertEntry 9 }
+
+ztCEdgeAlertSNMPTrapOID   OBJECT-TYPE
+    SYNTAX    OBJECT IDENTIFIER
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This string contains the OID of the trap associated with this alert.  Even if the trap is not sent, this field will contain the OID of the trap that would have been sent."
+    ::= { ztCEdgeAlertEntry 10 }
+
+ztCEdgeAlertSeverityNum OBJECT-TYPE
+    SYNTAX    INTEGER
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This value is a numerical of the alert severity."
+    ::= { ztCEdgeAlertEntry 11 }
+
+ztCEdgeAuditNumber OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION
+            "This integer contains the number of entries in the ztCEdgeAuditTable table."
+    ::= { ztCEdgeVar 11 }
+
+ztCEdgeAuditTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF ZtCEdgeAuditEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+            "This table contains an entry for each audit that has been generated on this system."
+    ::= { ztCEdgeVar 12 }
+
+ztCEdgeAuditEntry OBJECT-TYPE
+    SYNTAX      ZtCEdgeAuditEntry
+    ACCESS      not-accessible
+    STATUS      optional
+    DESCRIPTION
+            "This entry represents one audit in the ztCEdgeAuditTable table."
+    INDEX       { ztCEdgeAuditIndex }
+    ::= { ztCEdgeAuditTable 1 }
+
+ZtCEdgeAuditEntry ::= SEQUENCE {
+    ztCEdgeAuditIndex        INTEGER,
+    ztCEdgeAuditDateTime     DisplayString,
+    ztCEdgeAuditUsername     DisplayString,
+    ztCEdgeAuditOriginatingHost  IpAddress,
+    ztCEdgeAuditAction       DisplayString
+}
+
+ztCEdgeAuditIndex   OBJECT-TYPE
+    SYNTAX    INTEGER(0..65535)
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This index value uniquely identifies the audit represented by this entry."
+    ::= { ztCEdgeAuditEntry 1 }
+
+ztCEdgeAuditDateTime   OBJECT-TYPE
+    SYNTAX    DisplayString
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This string contains the date and time that the audit was generated."
+    ::= { ztCEdgeAuditEntry 2 }
+
+ztCEdgeAuditUsername   OBJECT-TYPE
+    SYNTAX    DisplayString
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This string contains the username of the user that caused the audit to be generated."
+    ::= { ztCEdgeAuditEntry 3 }
+
+ztCEdgeAuditOriginatingHost   OBJECT-TYPE
+    SYNTAX    IpAddress
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This is the address of the host that originated the audit."
+    ::= { ztCEdgeAuditEntry 4 }
+
+ztCEdgeAuditAction   OBJECT-TYPE
+    SYNTAX    DisplayString
+    ACCESS    read-only
+    STATUS    optional
+    DESCRIPTION
+            "This string contains a description of the action being audited."
+    ::= { ztCEdgeAuditEntry 5 }
+
+
+    -- ztCEdge TRAP PDU Data Fields
+    -- This table contains variables that may be included in trap PDUs.
+
+ztCEdgeTrapDescription   OBJECT-TYPE
+    SYNTAX    DisplayString
+    ACCESS    read-only
+    STATUS    mandatory
+    DESCRIPTION
+            "This string contains descriptive data -- suitable for display -- about the trap."
+    ::= { ztCEdgeTrapData 1 }
+
+--ztCEdgeTrapObject   OBJECT-TYPE
+--    SYNTAX    OBJECT IDENTIFIER
+--    ACCESS    read-only
+--    STATUS    mandatory
+--    DESCRIPTION
+--            "This OID represents the object for which the trap is concerned."
+
+
+    -- ztCEdge Traps
+    --
+    -- All ztCEdge traps use *ztCEdgeTrapId* as the enterprise OID.
+    -- The traps are distinguished by a unique enterprise-specific TrapId.
+    -- The TrapId is the last token, following ::= in the TRAP-TYPE macro
+    -- invocation.
+    --
+
+ztCEdgeGenericTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Generic Trap."
+        ::= 1
+
+ztCEdgeGuestCrashedTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Guest Crashed Trap."
+        ::= 2
+
+ztCEdgeNodeUnreachableTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Unreachable Trap."
+        ::= 3
+
+ztCEdgeNodeMaintenanceTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Maintenance Trap."
+        ::= 4
+
+ztCEdgeDoubleFaultPredictionTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Double Fault Prediction Trap."
+        ::= 5
+
+ztCEdgePredictFaultOnSingleSystemNodeTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Predict Fault On Single System Node Trap."
+        ::= 6
+
+ztCEdgeDiskProblemTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Disk Problem Trap."
+        ::= 7
+
+ztCEdgeDetectionOfBadNetworkTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection Of Bad Network Trap."
+        ::= 8
+
+ztCEdgeDetectionOfBadSensorOnChassisTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection Of Bad Sensor On Chassis Trap."
+        ::= 9
+
+ztCEdgeNodeRebootedUnexpectedlyTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Rebooted Unexpectedly Trap."
+        ::= 10
+
+ztCEdgeNodeBlacklistTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Blacklist Trap."
+        ::= 11
+
+ztCEdgeVMBlacklistedTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VM Blacklisted Trap."
+        ::= 12
+
+ztCEdgeVMBootFailedTrap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VM Boot Failed Trap."
+        ::= 13
+
+
+unitPredictFaultOnSingleNodeUnit  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Predict Fault On Single System Node."
+        ::= 20
+
+unitNoQuorum  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Cannot establish quorum."
+        ::= 21
+
+unitCallHomeNotEnabled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Call Home Not Enabled."
+        ::= 22
+
+unitDialInNotEnabled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Dial-In Not Enabled."
+        ::= 23
+
+unitEAlertNotEnabled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "E-Alert Notification Not Enabled."
+        ::= 24
+
+unitSnmpTrapNotEnabled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "SNMP Trap Notification Not Enabled."
+        ::= 25
+
+unitNtpNotEnabled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "NTP Time Synchronization Not Enabled."
+        ::= 26
+
+vmBlacklist  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VMBlacklist."
+        ::= 27
+
+vmCrashed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Guest Crashed."
+        ::= 28
+
+vmBootFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VMBootFailed."
+        ::= 29
+
+nodeUnreachable  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Unreachable."
+        ::= 32
+
+nodeUnexpectedlyOff  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Unreachable."
+        ::= 33
+
+nodeFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Unreachable."
+        ::= 34
+
+nodeBlacklist  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "NodeBlacklist."
+        ::= 35
+
+nodeMaintenance  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Maintenance."
+        ::= 36
+
+nodeUnexpectedRebooted  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node rebooted unexpectedly."
+        ::= 37
+
+nodeVmxNotEnabled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM Does Not Have VMX Enabled."
+        ::= 38
+
+nodeNxMismatch  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM Setting For NX Mismatch."
+        ::= 39
+
+nodeBootOrderIsIncorrect  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM Boot Order Is Incorrect."
+        ::= 40
+
+nodeOldSoftwareVersionFault  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node requires upgrade."
+        ::= 41
+
+nodeRunningOnBattery  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "On Battery."
+        ::= 44
+
+nodeRunningOnLowBattery  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Low Battery - PM Shutdown."
+        ::= 45
+
+nodeLastNodeRunningOnLowBattery  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Low Battery - Unit Shutdown."
+        ::= 46
+
+nodeExiled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node Exiled."
+        ::= 47
+
+diskFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Disk problem."
+        ::= 48
+
+diskNotPresent  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Disk problem."
+        ::= 49
+
+diskIsMissing  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM Missing a Required Disk."
+        ::= 50
+
+diskIsTooSmall  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM Disk is Too Small."
+        ::= 51
+
+nodeSingleDiskNotRedundant  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM System Disk is Not Redundant."
+        ::= 52
+
+networkNoLink  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Bad Network."
+        ::= 53
+
+networkFailedPort  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Bad Network."
+        ::= 54
+
+networkBadConnectivity  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Bad Network."
+        ::= 55
+
+networkSlowBusiness  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Slow Business Network."
+        ::= 56
+
+networkSlowPrivate  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Slow Private Network."
+        ::= 57
+
+networkIsMissing  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM Does Not Have a Required Local Network."
+        ::= 58
+
+pdiskBroken  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Physical Disk Problem."
+        ::= 59
+
+pdiskNotPresent  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Physical Disk Problem."
+        ::= 60
+
+pdiskForeign  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Physical Disk Problem."
+        ::= 61
+
+pdiskPredictFault  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Physical Disk Problem."
+        ::= 62
+
+sensorMinor  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Bad Sensor on chassis."
+        ::= 63
+
+sensorModerate  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Bad Sensor on chassis."
+        ::= 64
+
+controllerBasicSupport  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Disk controller is not fully supported."
+        ::= 67
+
+nodePmModelNotSupported  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM is not a supported model."
+        ::= 68
+
+nodeSystemStorageNotRedundant  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "System Storage Not Redundant."
+        ::= 69
+
+unitProcIncompatVAPICSecondaryExec  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Processor Incompatibility - Secondary Exec Virtual APIC Access."
+        ::= 70
+
+unitWarningSwap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Warning Swap."
+        ::= 74
+
+unitFatalSwap  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Fatal Swap."
+        ::= 75
+
+unitSinglePM  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Single PM Detected."
+        ::= 77
+
+unitEalertFailure  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "E-Alert Failure Detected."
+        ::= 78
+
+unitLicenseExpired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "License Expired."
+        ::= 79
+
+unitLicenseAboutToExpire  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "License About to Expire."
+        ::= 80
+
+unitSnmpTrapFailure  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "SNMP Trap Failure Detected."
+        ::= 81
+
+unitCallHomeFailure  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Call-Home Failure Detected."
+        ::= 82
+
+controllerRAIDBatteryFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "RAID Battery Failed."
+        ::= 83
+
+controllerRAIDBatteryMissing  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "RAID Battery Missing."
+        ::= 84
+
+controllerRAIDBatteryDegraded  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "RAID Battery Degraded."
+        ::= 85
+
+nodeNoRAIDDevices  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "No RAID Devices."
+        ::= 86
+
+controllerRAIDDiskOnNonRAIDController  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "RAID Disk On Non-RAID Controller."
+        ::= 87
+
+controllerMultipleLogicalDisks  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Multiple Logical Disks."
+        ::= 88
+
+diskInvalidRAIDLevel  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Invalid RAID Level."
+        ::= 89
+
+controllerMultiDiskRAID0BootDevice  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "MultiDisk RAID-0 Boot Device."
+        ::= 90
+
+diskBootDiskTooLarge  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Boot Disk Too Large."
+        ::= 91
+
+nodeFirmwareNotSupported  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Firmware Not Supported."
+        ::= 92
+
+controllerRAIDCapacitorFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "RAID Capacitor Failed."
+        ::= 93
+
+controllerRAIDCapacitorMissing  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "RAID Capacitor Missing."
+        ::= 94
+
+controllerRAIDCapacitorDegraded  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "RAID Capacitor Degraded."
+        ::= 95
+
+nodeBmcConnectivity  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "BMC Connectivity."
+        ::= 96
+
+diskDegraded  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Logical Disk Is Degraded."
+        ::= 97
+
+networkMiswired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "A Shared Network is miswired."
+        ::= 98
+
+networkNoBizPeerPort  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "network_noBizPeerPort."
+        ::= 99
+
+unitNoFastSyncNetworkAvailable  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "All DRDB sync networks are broken."
+        ::= 100
+
+networkCannotAutoCreateSharedNetwork  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "network_cannot_auto_create_sharedNetwork."
+        ::= 101
+
+networkSlowSync  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "network_slowSync."
+        ::= 102
+
+nodeIncorrectVNICSetting  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_incorrectVNICSetting."
+        ::= 103
+
+nodeIncorrectIMMSetting  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_incorrectIMMSetting."
+        ::= 104
+
+unitLicenseSubscriptionExpired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseSubscriptionExpired."
+        ::= 105
+
+unitLicenseServiceExpired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseServiceExpired."
+        ::= 106
+
+unitLicenseAlasPollingFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseAlasPollingFailed."
+        ::= 107
+
+unitLicenseInvalidated  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseInvalidated."
+        ::= 108
+
+unitLicenseServiceExpiryUnknown  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseServiceExpiryUnknown."
+        ::= 109
+
+vmCannotRunLostDataAccess  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_cannot_run_no_data_access."
+        ::= 110
+
+unitLicenseUnsupportedPlatform  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseUnsupportedPlatform."
+        ::= 111
+
+nodeUserPowerCycleRequired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_userPowerCycleRequired."
+        ::= 112
+
+nodeUserPowerOffRequired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_userPowerOffRequired."
+        ::= 113
+
+nodeKernelDiagnosticPresent  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_kernelDiagnosticPresent."
+        ::= 114
+
+nodeReprovisionDom0NeedReboot  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Reprovision Dom0 Need Reboot."
+        ::= 115
+
+nodeImsSingleLogicalDisk  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "IMS System Disk is Not Redundant."
+        ::= 116
+
+unitIsSyncing  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_isSyncing."
+        ::= 117
+
+unitTestAlert  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_testAlert."
+        ::= 119
+
+unitUnbalancedLoad  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "The Unit is not well balanced."
+        ::= 120
+
+unitNoAltSyncNetworks  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_noAltSyncNetworks."
+        ::= 121
+
+unitNeedRepairStorage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_needRepairStorage."
+        ::= 122
+
+localvmBlacklist  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VMBlacklist."
+        ::= 123
+
+unitTooFew10GSyncLinks  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_tooFew10GSyncLinks."
+        ::= 124
+
+unitTooFew1GSyncLinks  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_tooFew1GSyncLinks."
+        ::= 125
+
+diskForeign  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "disk_foreign."
+        ::= 126
+
+nodeNeedAddStorage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_needAddStorage."
+        ::= 127
+
+nodeCannotUpgrade  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_cannotUpgrade."
+        ::= 128
+
+nodeCannotWorkOn  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_cannotWorkOn."
+        ::= 129
+
+nodeCannotWorkOff  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_cannotWorkOff."
+        ::= 130
+
+unitP2vFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_p2vFailed."
+        ::= 131
+
+nodeSingleSystemDisk  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_singleSystemDisk."
+        ::= 132
+
+diskHasBadBlocks  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "disk_hasBadBlocks."
+        ::= 133
+
+nodeVolumeFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_volumeFailed."
+        ::= 134
+
+unitVolumeFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_volumeFailed."
+        ::= 135
+
+vmFtUnsynchable  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_ft_unsyncable."
+        ::= 136
+
+nodeVolumeMissing  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_volumeMissing."
+        ::= 137
+
+unitVolumeMissing  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_volumeMissing."
+        ::= 138
+
+localvmCannotStart  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "localvm_cannot_start."
+        ::= 139
+
+unitQuorumServerOffline  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "quorum server offline."
+        ::= 140
+
+unitSimplexMode  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_simplexMode."
+        ::= 141
+
+unitSimplexModeNormal  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_simplexMode."
+        ::= 142
+
+diskOrphan  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "disk_orphan."
+        ::= 143
+
+unitSpineBroken  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_spineBroken."
+        ::= 144
+
+storagegroupNeedAddStorage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "storagegroup_needAddStorage."
+        ::= 145
+
+networkDegradedLinkCondition  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Degraded Network."
+        ::= 146
+
+networkDisconnectedLinkCondition  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Disconnected Network."
+        ::= 147
+
+snapshotStandingStateWarning  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VM Snapshot has single live disk."
+        ::= 148
+
+snapshotStandingStateBroken  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VM Snapshot has no live disk."
+        ::= 149
+
+unitLicenseOverProvisionedCpuSocketsInvalidated  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseOverProvisionedCpuSocketsInvalidated."
+        ::= 150
+
+vmCannotStartVmInstanceWasManuallyDisabled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_cannotStartVmInstanceWasManuallyDisabled."
+        ::= 151
+
+nodeUnlicensedRequireReactivation  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_unlicensedRequireReactivation."
+        ::= 152
+
+nodeUnlicensedSplitSiteMode  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_unlicensedSplitSiteMode."
+        ::= 153
+
+unitRequireUserAddedALinks  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_requireUserAddedALinks."
+        ::= 154
+
+unitLicenseUnregisteredTrial  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseUnregisteredTrial."
+        ::= 155
+
+unitLicenseServiceAboutToExpire1  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "License serviceability is about to expire."
+        ::= 156
+
+unitLicenseServiceAboutToExpire2  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "License serviceability is about to expire."
+        ::= 157
+
+unitLicenseServiceAboutToExpire3  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "License serviceability is about to expire."
+        ::= 158
+
+unitLicenseServiceAboutToExpire4  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "License serviceability is about to expire."
+        ::= 159
+
+networkIbiz1Disconnected  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Disconnected Network."
+        ::= 160
+
+diskImageOffline  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Disk problem."
+        ::= 161
+
+nicIsMissing  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "PM Does Not Have a Required NIC."
+        ::= 162
+
+unitCriticalRootDiskUsage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Critical Root Disk Usage."
+        ::= 163
+
+unitWarningDiagDataDiskUsage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Warning DiagData Disk Usage."
+        ::= 164
+
+unitCriticalSharedDiskUsage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Critical Shared Disk Usage."
+        ::= 165
+
+unitFatalRootDiskUsage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Fatal Root Disk Usage."
+        ::= 166
+
+unitFatalSharedDiskUsage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Fatal Shared Disk Usage."
+        ::= 167
+
+sensorCritical  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Bad Sensor on chassis."
+        ::= 168
+
+sensorFatal  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Bad Sensor on chassis."
+        ::= 169
+
+pvmAxconsError  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "pvm_axconsError."
+        ::= 170
+
+nodeCannotWorkOnWithVmMigrationFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node cannot workon with VM migration failed."
+        ::= 171
+
+unitVolumeInconsistent  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_volumeInconsistent."
+        ::= 172
+
+nodeMemoryMonitoringAlarm  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_memoryMonitoringAlarm."
+        ::= 173
+
+vmCpuMonitoringAlarm  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_cpuMonitoringAlarm."
+        ::= 174
+
+vmMemoryMonitoringAlarm  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_memoryMonitoringAlarm."
+        ::= 175
+
+vmDiskMonitoringAlarm  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_diskMonitoringAlarm."
+        ::= 176
+
+vmAppCpuMonitoringAlarm  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_appCpuMonitoringAlarm."
+        ::= 177
+
+vmAppMemoryMonitoringAlarm  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_appMemoryMonitoringAlarm."
+        ::= 178
+
+networkIbiz2Disconnected  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Disconnected Network."
+        ::= 179
+
+networkIbiz3Disconnected  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Disconnected Network."
+        ::= 180
+
+networkIbiz4Disconnected  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Disconnected Network."
+        ::= 181
+
+networkIbiz5Disconnected  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Detection of Disconnected Network."
+        ::= 182
+
+nodeSensorFatalIssueCannotWorkOnWithVmMigrationFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Sensor triggered putting PM into maintenance mode operation cannot be done because VM migration failed."
+        ::= 183
+
+nodeUnlicensedCannotWorkOnWithVmMigrationFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Unlicensed node cannot workon with VM migration failed."
+        ::= 184
+
+nodeUnitSimplexModeCannotWorkOnWithVmMigrationFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node cannot workon with VM migration failed in a single node licensed system."
+        ::= 185
+
+nodeImagingStateCannotWorkOnWithVmMigrationFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Node in imaging state cannot workon with VM migration failed."
+        ::= 186
+
+unitHeartbeat  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_heartbeat."
+        ::= 187
+
+nodeCpuMonitoringAlarm  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_cpuMonitoringAlarm."
+        ::= 188
+
+unitLicenseFeatureExpired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Expired License Feature."
+        ::= 189
+
+nodeUserPowerOnRequired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "node_userPowerOnRequired."
+        ::= 190
+
+unitLicenseAlasRegistrationRequired  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_licenseAlasRegistrationRequired."
+        ::= 191
+
+unitSimplexModePendingMulti  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_simplexModePendingMulti."
+        ::= 192
+
+vmDuplicateMacAddrRival  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_duplicate_mac_addr_rival."
+        ::= 193
+
+vmCannotBootDuplicateMacAddr  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "vm_cannotBoot_duplicate_mac_addr."
+        ::= 194
+
+unitSoftwareUpdateAvailable  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_software_update_available."
+        ::= 195
+
+unitNoInternetConnection  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_no_internet_connection."
+        ::= 196
+
+unitHasTwoKits  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_has_two_kits."
+        ::= 197
+
+vmStartupFailed  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VMStartupFailed."
+        ::= 198
+
+cmNoInternetConn  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "cm_noInternetConn."
+        ::= 199
+
+cmServiceUnavailable  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "cm_serviceUnavailable."
+        ::= 200
+
+cmMessageRejected  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "cm_messageRejected."
+        ::= 201
+
+unitCannotUpgradeOldProductCode  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "License Outdated."
+        ::= 202
+
+unitCannotUpgradeSerialNumberMismatch  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "License Outdated."
+        ::= 203
+
+unitCannotUpgradeLicenseNotStandardOrOEM  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Trial License."
+        ::= 204
+
+unitSwapMitigateNoAction  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_swapMitigateNoAction."
+        ::= 205
+
+unitSwapMitigateLVMRestart  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_swapMitigateLVMRestart."
+        ::= 206
+
+unitSwapMitigateLVMDisabled  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "unit_swapMitigateLVMDisabled."
+        ::= 207
+
+snapshotMissingVolume  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VM Snapshot volume missing on node."
+        ::= 208
+
+unitWarningSharedDiskUsage  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "Warning Shared Disk Usage."
+        ::= 209
+
+nodeSensorFatalSmartDiskError  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "The SMART Disk Error check sensor on the PM is reading as FAILING. To prevent potential system failure and data loss, save data and replace the node immediately.."
+        ::= 210
+
+vmBiosMismatch  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VMBiosMismatch."
+        ::= 211
+
+nodeSensorCriticalSmartDiskError  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "The SMART Disk Error check sensor on the PM is reading as FAILING. To prevent potential system failure and data loss, save data and replace the node immediately.."
+        ::= 212
+
+vmBackupFailedAutoCancel  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "VMBackupFailedAutoCancel."
+        ::= 213
+
+unreadableUsb  TRAP-TYPE
+        ENTERPRISE   ztCEdgeTrapId
+        VARIABLES    {
+                         ztCEdgeTrapDescription
+                     }
+        DESCRIPTION
+        "UnreadableUsb."
+        ::= 214
+
+
+
+
+-- End-of MIB(ztCEdge) Revision 1.
+
+
+-- ==========================================================================
+-- ==========================================================================
+
+END

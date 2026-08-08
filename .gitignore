@@ -1,0 +1,8 @@
+.toolchain/
+config.local.json
+config.local.json.bak
+config.local.json.tmp
+*.log
+serverdesk
+cmd/serverdesk/serverdesk
+serverdesk.local.env

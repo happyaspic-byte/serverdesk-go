@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<avance>
+  <node>
+    <name>node1</name>
+    <id>host:o1078</id>
+    <state>running</state>
+    <sub-state/>
+    <standing-state>normal</standing-state>
+    <mode>normal</mode>
+    <primary>false</primary>
+    <manufacturer>ECS</manufacturer>
+    <model>H110M4-C43</model>
+    <maintenance-allowed>true</maintenance-allowed>
+    <maintenance-guest-shutdown>false</maintenance-guest-shutdown>
+    <cpus>1</cpus>
+    <memory>16 GiB</memory>
+    <vulnerability>
+      <meltdown-patch-enabled>true</meltdown-patch-enabled>
+      <spectre-v2-patch-enabled>false</spectre-v2-patch-enabled>
+    </vulnerability>
+    <virtual-machines/>
+    <local-networks>
+      <local-network>
+        <ip-address>172.30.1.12</ip-address>
+        <gateway-address>172.30.1.254</gateway-address>
+        <dns>
+          <address>172.30.1.5</address>
+          <address>8.8.8.8</address>
+        </dns>
+      </local-network>
+    </local-networks>
+  </node>
+  <node>
+    <name>node0</name>
+    <id>host:o44</id>
+    <state>running</state>
+    <sub-state/>
+    <standing-state>normal</standing-state>
+    <mode>normal</mode>
+    <primary>true</primary>
+    <manufacturer>ECS</manufacturer>
+    <model>H110M4-C43</model>
+    <maintenance-allowed>true</maintenance-allowed>
+    <maintenance-guest-shutdown>true</maintenance-guest-shutdown>
+    <cpus>1</cpus>
+    <memory>16 GiB</memory>
+    <vulnerability>
+      <meltdown-patch-enabled>true</meltdown-patch-enabled>
+      <spectre-v2-patch-enabled>true</spectre-v2-patch-enabled>
+    </vulnerability>
+    <virtual-machines>
+      <virtual-machine>
+        <name>winsrv_2022</name>
+        <id>vm:o920</id>
+      </virtual-machine>
+    </virtual-machines>
+    <local-networks>
+      <local-network>
+        <ip-address>172.30.1.11</ip-address>
+        <gateway-address>172.30.1.254</gateway-address>
+        <dns>
+          <address>172.30.1.5</address>
+        </dns>
+      </local-network>
+    </local-networks>
+  </node>
+</avance>

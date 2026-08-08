@@ -1,0 +1,218 @@
+/* ============================================================
+   css/screens/incidents.css — S6: 경보(Incidents) 화면 전용 CSS
+   접두사 sc-inc- 만 정의한다. 공용 클래스(kpi·chip·u-*·card 등) 재정의 금지.
+   REBUILD-SPEC.md §1.6 / §5.5
+   Robodog 리스킨: DESIGN-TOKENS.md 계약 — 색은 var(--x)/rgba(var(--x-rgb),α)만 사용(하드코딩 hex 금지).
+   ============================================================ */
+
+.sc-inc-page{
+  padding:var(--page-pad);
+  max-width:var(--page-max);
+  width:100%;
+  margin:0 auto;
+  box-sizing:border-box;
+  display:flex;
+  flex-direction:column;
+  gap:20px;
+}
+
+/* ---- 헤더 ---- */
+.sc-inc-head{ display:flex; flex-direction:column; gap:4px; }
+.sc-inc-title{ font-size:var(--h1); font-weight:700; letter-spacing:-.02em; color:var(--ink); line-height:1.2; }
+.sc-inc-sub{ font-size:var(--fs-12); font-weight:600; color:var(--muted); }
+
+/* ---- 심각도 필터바(A1/A2) — 대형 KPI 4카드(다색 과분할)를 콤팩트 세그먼트 칩 한 줄로 축약.
+   카드/로그 두 뷰가 공유하는 단일 필터바로 탭 상단에 1회만 노출한다. 칩 자체가 클릭 필터.
+   색 규율: 총합·경고·정보 중립, '심각'만 red(JS chipTone) — 개요 규율과 일치. ---- */
+.sc-inc-kpis{ margin:0; }
+.sc-inc-kpi-ico{ display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; }
+.sc-inc-kpi{
+  text-align:left; cursor:pointer;
+  transition:border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.sc-inc-kpi:hover{ border-color:var(--accent); }
+.sc-inc-kpi:active{ transform:translateY(1px); }
+.sc-inc-kpi.is-active{
+  border-color:var(--accent);
+  background:var(--accent-soft);
+  color:var(--accent-deep);
+  box-shadow:0 0 0 3px rgba(var(--accent-rgb),.12);
+}
+
+/* ---- 칩(pill) 형태 — 양 뷰 공통(항상 slim). 라벨+수치를 한 줄 pill 로 압축한다. ---- */
+.sc-inc-kpis.sc-inc-kpis--slim{ display:flex; flex-wrap:wrap; gap:var(--sp-2); }
+.sc-inc-kpis--slim .kpi{
+  width:auto; flex-direction:row; align-items:center; gap:var(--sp-2);
+  padding:var(--sp-2) var(--sp-3); border-radius:var(--r-pill); box-shadow:none;
+}
+.sc-inc-kpis--slim .kpi .kpi-label{ font-size:var(--fs-12); }
+.sc-inc-kpis--slim .kpi .kpi-val{ font-size:var(--fs-16); line-height:1.1; }
+.sc-inc-kpis--slim .kpi .kpi-foot{ display:none; }
+
+/* ---- 뷰 토글(카드 ↔ 로그) + 로그 도구(검색·Live) ---- */
+.sc-inc-toolbar{ display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap; }
+.sc-inc-views{ flex-shrink:0; }
+.sc-inc-view{ display:inline-flex; align-items:center; gap:8px; }
+.sc-inc-view-ico{ display:inline-flex; align-items:center; }
+.sc-inc-logtools{ display:flex; align-items:center; gap:var(--sp-3); flex:1; min-width:220px; }
+.sc-inc-logtools[hidden]{ display:none; }
+.sc-inc-search{ flex:1; min-width:0; }
+.sc-inc-cardwrap[hidden],.sc-inc-logwrap[hidden]{ display:none; }
+
+/* ---- 상태 3분기: 배너/스켈레톤/빈상태/리스트 ---- */
+.sc-inc-body{ display:flex; flex-direction:column; gap:12px; min-width:0; }
+
+.sc-inc-banner{
+  display:flex; align-items:center; gap:10px;
+  padding:14px 16px; border-radius:var(--r-md);
+  background:var(--surface);
+  border:1px solid var(--line); border-left:3px solid var(--neg);
+  color:var(--ink);
+  font-size:var(--fs-12); font-weight:600;
+}
+.sc-inc-banner-ico{ flex-shrink:0; display:flex; color:var(--neg-on-tint); }
+.sc-inc-banner-text{ min-width:0; }
+
+.sc-inc-skeleton{ display:flex; flex-direction:column; gap:0; overflow:hidden; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); }
+.sc-inc-skel-row{
+  height:80px; border-radius:0;
+  background:var(--surface-2); border:0; border-bottom:1px solid var(--line2);
+  animation:pulse var(--dur-pulse-slow) ease-in-out infinite;
+}
+.sc-inc-skel-row:last-child{ border-bottom:0; }
+/* 로드 후 스켈레톤은 hidden(display:none) 이지만 pulse 애니가 요소에 남아 상시 애니 계측을 초과한다(C2).
+   컨테이너가 hidden 이면(=콘텐츠 로드 완료) 스켈레톤 행의 애니를 끈다 — 로딩 중(표시)에만 pulse. */
+.sc-inc-skeleton[hidden] .sc-inc-skel-row{ animation:none; }
+
+.sc-inc-empty{
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:10px; padding:48px 0; text-align:center; box-shadow:none;
+}
+.sc-inc-empty-ico{
+  width:48px; height:48px; border-radius:50%;
+  background:var(--surface-2); color:var(--muted);
+  display:flex; align-items:center; justify-content:center;
+}
+.sc-inc-empty-title{ font-size:var(--fs-13); font-weight:700; color:var(--ink); }
+
+/* ---- 리스트: 하나의 표면 안에서 얇은 구분선으로 이어지는 행 계층 ---- */
+.sc-inc-list{ display:flex; flex-direction:column; gap:0; overflow:hidden; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md); }
+
+/* '전체 N건 보기' — 기본 뷰(상위 30건)에서 나머지를 펼치는 풀폭 버튼(minor#4). */
+.sc-inc-more{
+  width:100%; margin-top:var(--sp-2);
+  padding:10px 14px; border-radius:var(--r-md);
+  border:1px solid var(--line); background:var(--surface);
+  color:var(--ink2); font-size:var(--fs-12); font-weight:700; cursor:pointer;
+  transition:background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.sc-inc-more:hover{ background:var(--line2); border-color:var(--line2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-inc-more:active{ filter:brightness(.96); }
+.sc-inc-more[hidden]{ display:none; }
+
+.sc-inc-row{
+  width:100%; text-align:left; cursor:pointer;
+  display:flex; gap:10px; align-items:flex-start;
+  padding:8px 12px; border:0; border-radius:0;
+  background:transparent;
+  transition:background var(--dur) var(--ease);
+}
+.sc-inc-row-wrap:not(:last-child){ border-bottom:1px solid var(--line2); }
+.sc-inc-row:hover{ background:var(--surface-2); }
+.sc-inc-row:active{ transform:translateY(1px); }
+.sc-inc-row:focus-visible{ outline:2px solid var(--accent); outline-offset:-2px; }
+
+/* 아이콘 칩 — 기본은 중립, 심각도 톤 클래스(is-pos/-warn/-neg/-info/-mut)로 배경 틴트+아이콘 색을
+   함께 바꿔 배지(u-badge)와 이중으로 상태를 표현한다(red↔amber 색각 대비 보강). */
+.sc-inc-row-ico{
+  margin-top:1px; width:28px; height:28px; flex-shrink:0;
+  border-radius:var(--r-xs); background:var(--line2); color:var(--muted);
+  display:flex; align-items:center; justify-content:center;
+}
+.sc-inc-row-ico.is-pos{ background:var(--status-pos-tint); color:var(--pos-on-tint); }
+.sc-inc-row-ico.is-warn{ background:var(--status-warn-tint); color:var(--warn-on-tint); }
+.sc-inc-row-ico.is-neg{ background:var(--status-neg-tint); color:var(--neg-on-tint); }
+.sc-inc-row-ico.is-info{ background:var(--status-info-tint); color:var(--blue-on-tint); }
+.sc-inc-row-ico.is-mut{ background:var(--line2); color:var(--muted); }
+
+.sc-inc-row-body{ min-width:0; flex:1; }
+.sc-inc-row-head{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.sc-inc-row-host{ font-size:var(--fs-13); font-weight:700; letter-spacing:-.01em; color:var(--ink); }
+
+/* 연속·동일 경보(같은 장비+심각도+메시지) 병합 배지 — 카드 2회 노출 대신 "×N" 하나로 표현 */
+.sc-inc-row-dup{ font-variant-numeric:tabular-nums; }
+
+.sc-inc-row-msg{ font-size:var(--fs-12); color:var(--ink2); margin-top:2px; line-height:1.4; }
+
+.sc-inc-row-arrow{ margin-top:4px; color:var(--muted); flex-shrink:0; display:flex; transform:rotate(-90deg); }
+
+/* ---- 반응형: 좁은 화면에서 KPI 그리드 자동 축소는 공용 kpi-grid가 처리 ---- */
+@media (max-width:560px){
+  .sc-inc-page{ padding:var(--sp-5) var(--sp-4) var(--sp-7); }
+  .sc-inc-row{ padding:12px; gap:10px; }
+}
+
+/* 시각 — 헤더 우측 정렬(마진 오토), 아이콘+텍스트 정렬 */
+.sc-inc-row-time{ margin-left:auto; display:inline-flex; align-items:center; gap:4px; font-size:var(--fs-12); flex-shrink:0; }
+
+/* ── 경보 확인(ack) ─────────────────────────────────────────────────
+   감사 지적: 활성 경보 31건이 10~41일째 쌓여만 있고 제품 안에서 지울 방법이 없어
+   '심각 9'가 행동으로 이어지지 않았다. 행 옆에 확인 버튼을 두어 큐를 비울 수 있게 한다.
+   확인해도 원본은 목록에 남는다 — 카운트·판정에서만 빠진다(데이터 손실 금지). */
+.sc-inc-row-wrap{ display:flex; align-items:stretch; gap:8px; }
+.sc-inc-row-wrap > .sc-inc-row{ flex:1; min-width:0; }
+.sc-inc-ack{ flex-shrink:0; align-self:center; padding:var(--sp-2) var(--sp-3); border-radius:var(--r-sm);
+  border:1px solid var(--line); background:var(--surface); color:var(--ink2);
+  font-size:var(--fs-12); font-weight:var(--fw-semi); cursor:pointer; white-space:nowrap;
+  transition:background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+.sc-inc-ack:hover{ background:var(--accent-soft); border-color:var(--accent); color:var(--accent-deep); }
+.sc-inc-ack.is-on{ background:var(--surface-2); color:var(--muted); }
+.sc-inc-ack:focus-visible,.sc-inc-bulk:focus-visible,.sc-inc-more:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px;
+}
+/* 확인된 행은 가라앉히되 읽을 수는 있게 — 완전히 흐리면 '왜 아직 있나'를 못 읽는다. */
+.sc-inc-row-wrap.is-acked > .sc-inc-row{ opacity:.62; }
+.sc-inc-row-wrap.is-maint > .sc-inc-row{ opacity:.62; }
+.sc-inc-row-wrap.is-acked > .sc-inc-row .sc-inc-row-ico{ filter:grayscale(1); }
+
+/* 일괄 조작 바 — 31건을 한 건씩 누르게 두면 실제로는 아무도 안 쓴다. */
+.sc-inc-bulkbar{ display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
+.sc-inc-bulk{ padding:var(--sp-2) var(--sp-3); border-radius:var(--r-sm); border:1px solid var(--line);
+  background:var(--surface); color:var(--ink2); font-size:var(--fs-12); font-weight:var(--fw-semi);
+  cursor:pointer; transition:background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+.sc-inc-bulk:hover{ background:var(--accent-soft); border-color:var(--accent); color:var(--accent-deep); }
+/* 장기 미확인 배지 — '9일 전' 같은 상대시각만으로는 방치 신호가 안 읽혔다. */
+.sc-inc-row-stale{ font-variant-numeric:tabular-nums; }
+
+/* ── 확인 버튼 반응형 ──────────────────────────────────────────────────
+   실측 결함: .sc-inc-row-wrap 이 행+버튼을 가로로 붙이는데, 좁은 화면에서는 자리가 없어
+   '확인' 버튼이 카드 밖으로 튀어나갔다(390px 에서 육안 확인). 뷰포트 가로 오버플로는 0 이라
+   계측만으로는 안 잡혔다 — 컴포넌트 내부에서 넘친 것이기 때문이다.
+   좁으면 세로로 쌓아 버튼이 행 안에 머물게 한다. */
+@media (max-width:720px){
+  .sc-inc-row-wrap{ flex-direction:column; align-items:stretch; gap:0; }
+  .sc-inc-row-wrap > .sc-inc-row{ border-bottom-left-radius:0; border-bottom-right-radius:0; }
+  .sc-inc-ack{
+    align-self:stretch; width:100%; text-align:center;
+    border-top:0; border-top-left-radius:0; border-top-right-radius:0;
+    /* 손가락 타깃 최소 크기 확보 — 데스크톱의 28px 는 터치에 좁다. */
+    min-height:40px;
+  }
+}
+
+/* ---- 통계 뷰(인사이트 + CSV/인쇄) ---- */
+.sc-inc-stattools{ display:flex; gap:var(--sp-2); justify-content:flex-end; margin-bottom:var(--sp-3); }
+.sc-inc-stats{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--sp-4); }
+.sc-inc-statcard{ box-shadow:none; }
+@media (max-width:1024px){ .sc-inc-stats{ grid-template-columns:minmax(0,1fr); } }
+.sc-inc-stat-h{ font-size:var(--fs-14); font-weight:var(--fw-semi); color:var(--ink); margin-bottom:var(--sp-3); }
+.sc-inc-stat-row{ padding:6px 0; }
+.sc-inc-stat-top{ display:flex; align-items:baseline; justify-content:space-between; gap:var(--sp-3); margin-bottom:3px; }
+.sc-inc-stat-lab{ font-size:var(--fs-13); color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.sc-inc-stat-val{ font-size:var(--fs-12); color:var(--muted); flex-shrink:0; }
+.sc-inc-stat-track{ height:6px; border-radius:var(--r-pill); background:var(--line2); overflow:hidden; }
+.sc-inc-stat-fill{ height:100%; border-radius:var(--r-pill); background:var(--blue); }
+.sc-inc-stat-empty{ font-size:var(--fs-13); padding:var(--sp-3) 0; }
+.sc-inc-stat-oldest{ display:flex; align-items:center; gap:var(--sp-2); margin-top:var(--sp-3); }
+.sc-inc-stat-oldestmsg{ font-size:var(--fs-13); color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<avance>
+  <name>172.30.1.10</name>
+  <id>supernova:o32</id>
+  <version>8.1.0.2-19</version>
+  <uuid>6a9f4614-1111-2222-3333-444444444444</uuid>
+  <configured>true</configured>
+  <syncing>false</syncing>
+  <address>172.30.1.10</address>
+  <netmask>255.255.255.0</netmask>
+  <ntp>
+    <address>172.30.1.5</address>
+  </ntp>
+  <resources>
+    <total-vcpus>6</total-vcpus>
+    <used-vcpus>3.00</used-vcpus>
+    <total-memory>16 GiB</total-memory>
+    <used-memory>8 GiB</used-memory>
+  </resources>
+  <shared-networks>
+    <shared-network>
+      <name>network0</name>
+      <id>sharednetwork:o87</id>
+      <fault-tolerant>ft</fault-tolerant>
+      <role>business</role>
+      <bandwidth>1 Gb/s</bandwidth>
+      <mtu>1500</mtu>
+    </shared-network>
+  </shared-networks>
+  <storage-groups>
+    <storage-group>
+      <name>StorageGroup1</name>
+      <id>storagegroup:o96</id>
+    </storage-group>
+  </storage-groups>
+  <virtual-machines>
+    <virtual-machine>
+      <name>winsrv_2022</name>
+      <id>vm:o920</id>
+      <fault-tolerant>ft</fault-tolerant>
+    </virtual-machine>
+  </virtual-machines>
+</avance>

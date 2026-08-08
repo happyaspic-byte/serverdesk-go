@@ -1,0 +1,538 @@
+// Package httpapi 는 everrun-poller 의 HTTP 표면(poller.py Handler)의 Go 포트다.
+//
+// 읽기 API 는 무인증 공개(폐쇄망 감시 계약), 쓰기 API(PUT/DELETE/POST)는
+// 루프백 가드 + webfront GateWrite(동일 출처) 이중 방어다.
+// 응답은 compact JSON(HTML 이스케이프 끔 — 한글 원문), Cache-Control: no-store,
+// 1KB 초과 시 gzip(클로이언트 수용 시), CORS 는 설정 allowlist 에만 부여한다.
+package httpapi
+
+import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"net"
+	"net/http"
+	"os"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"time"
+
+	"serverdesk/internal/config"
+	"serverdesk/internal/poller"
+	"serverdesk/internal/webfront"
+)
+
+// Logf 는 호스트 로거 연결 훅이다. 기본 no-op.
+var Logf = func(level, cluster, msg string) {}
+
+func logf(level, cluster, msg string) { Logf(level, cluster, msg) }
+
+// Server 는 /api 표면의 핸들러다.
+type Server struct {
+	Cache  *poller.FleetCache
+	States []*poller.ClusterState
+	Cfg    *config.Config
+	Store  *config.Store
+	Events *poller.EventLog
+	Avail  *poller.AvailTracker
+	Edge   *poller.EdgeManager
+	// Gate 는 쓰기 경로의 동일출처 검사에 쓰는 webfront 서버다(GateWrite).
+	Gate *webfront.Server
+
+	StartedAt time.Time
+	CORS      []string
+
+	// displayOverlay 는 클러스터 표시 메타의 실행 중 사본이다.
+	// config.ClusterConfig 에는 asset_tag/floor_pos 필드가 없어(읽기 전용 뷰 계약)
+	// 이 두 키와 PUT 즉시 반영분을 여기서 들고 있는다.
+	ovlMu          sync.Mutex
+	displayOverlay map[string]map[string]string
+}
+
+// New 는 /api 핸들러를 만든다. overlay 는 NewDisplayOverlay 로 만든 것을 넘긴다.
+func New(cache *poller.FleetCache, states []*poller.ClusterState, cfg *config.Config,
+	store *config.Store, events *poller.EventLog, avail *poller.AvailTracker,
+	edge *poller.EdgeManager, gate *webfront.Server, cors []string,
+	overlay map[string]map[string]string) *Server {
+	return &Server{
+		Cache: cache, States: states, Cfg: cfg, Store: store, Events: events,
+		Avail: avail, Edge: edge, Gate: gate, StartedAt: time.Now(),
+		CORS: cors, displayOverlay: overlay,
+	}
+}
+
+// NewDisplayOverlay 는 원본 config 파일에서 클러스터 표시 메타를 읽어 초기
+// 오버레이를 만든다. 구조체에 없는 asset_tag/floor_pos 도 여기서 복구된다.
+func NewDisplayOverlay(cfg *config.Config) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, c := range cfg.Clusters {
+		m := map[string]string{}
+		if c.Name != "" {
+			m["label"] = c.Name
+		}
+		if c.Site != "" {
+			m["site"] = c.Site
+		}
+		if c.Company != "" {
+			m["company"] = c.Company
+		}
+		if c.Factory != "" {
+			m["factory"] = c.Factory
+		}
+		out[c.Key] = m
+	}
+	// 구조체가 버리는 표시 키(asset_tag/floor_pos)를 원본 파일에서 복구한다.
+	if cfg.Path != "" {
+		if data, err := readFileQuiet(cfg.Path); err == nil {
+			var doc map[string]json.RawMessage
+			if json.Unmarshal(data, &doc) == nil {
+				var arr []map[string]any
+				if raw, ok := doc["clusters"]; ok && json.Unmarshal(raw, &arr) == nil {
+					for _, e := range arr {
+						key, _ := e["key"].(string)
+						m := out[key]
+						if m == nil {
+							continue
+						}
+						for _, k := range []string{"asset_tag", "floor_pos"} {
+							if v, ok := e[k].(string); ok && v != "" {
+								m[k] = v
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func readFileQuiet(path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
+// readCapped 는 요청 본문을 cap 까지 읽는다. cap 초과면 오류.
+func readCapped(r *http.Request, cap int64) ([]byte, error) {
+	if r.ContentLength < 0 {
+		return io.ReadAll(io.LimitReader(r.Body, cap))
+	}
+	if r.ContentLength > cap {
+		_, _ = io.Copy(io.Discard, r.Body)
+		return nil, fmt.Errorf("본문이 너무 큼(%dB 초과)", cap)
+	}
+	return io.ReadAll(io.LimitReader(r.Body, cap+1))
+}
+
+// DisplayCfg 는 /api/devices 변환용 클러스터 표시 메타 맵이다
+// (poller.py _display_cfg 포트 — 자격증명 제외, 표시 필드만).
+func (s *Server) DisplayCfg() map[string]poller.DisplayMeta {
+	s.ovlMu.Lock()
+	defer s.ovlMu.Unlock()
+	out := map[string]poller.DisplayMeta{}
+	for key, m := range s.displayOverlay {
+		out[key] = poller.DisplayMeta{
+			Label:    m["label"],
+			Company:  m["company"],
+			Factory:  m["factory"],
+			Site:     m["site"],
+			AssetTag: m["asset_tag"],
+			FloorPos: m["floor_pos"],
+		}
+	}
+	return out
+}
+
+// refreshSec 은 프런트 stale 임계(refreshSec*3) 산출용이다 — 가장 빠른 fast 주기.
+// (poller.py _refresh_sec)
+func (s *Server) refreshSec() int {
+	best := 0
+	for _, st := range s.States {
+		v := st.Cfg.Intervals.Fast
+		if best == 0 || v < best {
+			best = v
+		}
+	}
+	if best == 0 {
+		return 30
+	}
+	return best
+}
+
+// --- 응답 공통 ---------------------------------------------------------------
+
+// corsHeaders 는 요청 Origin 이 allowlist 에 있을 때만 그 출처를 반향한다.
+// 와일드카드 무조건 부착은 임의 웹사이트 JS 의 드라이브바이 읽기를 허용하므로 금지.
+func (s *Server) corsHeaders(r *http.Request, h http.Header) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return
+	}
+	allowed := false
+	for _, o := range s.CORS {
+		if o == "*" || o == origin {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return
+	}
+	h.Set("Access-Control-Allow-Origin", origin)
+	h.Set("Vary", "Origin")
+	h.Set("Access-Control-Allow-Headers", "*")
+	h.Set("Access-Control-Allow-Methods", "GET, PUT, DELETE, POST, OPTIONS")
+}
+
+// send 는 compact JSON 응답을 본낸다(Python _send 포트).
+// HTML 이스케이프를 끈다(한글 원문, ensure_ascii=False 에 해당).
+func (s *Server) send(w http.ResponseWriter, r *http.Request, code int, payload any) {
+	var body []byte
+	switch p := payload.(type) {
+	case []byte:
+		body = p
+	default:
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(payload); err != nil {
+			body = []byte(`{"error":"marshal"}`)
+			code = 500
+		} else {
+			body = bytes.TrimRight(buf.Bytes(), "\n")
+		}
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	s.corsHeaders(r, h)
+	if len(body) > 1024 && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		var buf bytes.Buffer
+		gz, _ := gzip.NewWriterLevel(&buf, 6)
+		_, _ = gz.Write(body)
+		_ = gz.Close()
+		body = buf.Bytes()
+		h.Set("Content-Encoding", "gzip")
+	}
+	h.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(code)
+	_, _ = w.Write(body)
+}
+
+// isLoopback — 루프백 여부만 판정한다. 쓰기 신뢰 경계는 writeGate(프록시 시대의
+// 루프백 강제가 아니라, 통합 서버에서는 동일출처+토큰 게이트가 원격 경로를 담당).
+func isLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
+
+// writeGate 는 쓰기 공통 가드다.
+//
+// Python 시대에는 serve.py(같은 호스트)가 루프백으로 폴섭에 프록시했기 때문에 폴섭의
+// 루프백 검사가 곧 신뢰 경계였다. Go 통합 서버는 프런트와 API 가 같은 프로세스라,
+// 이 검사를 그대로 두면 원격 브라우저의 정상 UI 쓰기까지 전부 403 이 된다(실제 보고된
+// 장애: 원격 콘솔에서 장비 제거 불가). 그래서 경계를 옮긴다:
+//   - 루프백: 허용(로컬 curl/스크립트·기존 운영 도구 경로).
+//   - 원격: GateWrite — 동일출처(Origin/Referer) 확인 + SERVERDESK_TOKEN 설정 시 토큰 일치.
+func (s *Server) writeGate(w http.ResponseWriter, r *http.Request) bool {
+	if isLoopback(r) {
+		return true
+	}
+	if s.Gate != nil {
+		return s.Gate.GateWrite(w, r) // 응답은 GateWrite 가 작성
+	}
+	s.send(w, r, 403, map[string]any{"error": "원격 쓰기는 비활성화되어 있습니다"})
+	return false
+}
+
+// readJSONBody 는 최대 64KB 의 JSON 객체 본문을 읽는다(Python _read_json_body).
+func (s *Server) readJSONBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
+	body, err := readCapped(r, 64*1024)
+	if err != nil {
+		s.send(w, r, 400, map[string]any{"error": "JSON 본문이 필요합니다"})
+		return nil, false
+	}
+	if len(body) == 0 {
+		return nil, true // 본문 없음 — Python 의 None 과 같게 호출부에서 400 처리
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, true // 파싱 실패도 None 취급(Python 동일)
+	}
+	return m, true
+}
+
+// ServeHTTP 는 /api 라우팅이다. 패닉은 500 으로 변환한다(Python do_GET 의
+// 맨 바깥 except 와 같은 격리).
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			logf("error", "http", fmt.Sprintf("HTTP 핸들러 예외: %v\n%s", rec, debug.Stack()))
+			s.send(w, r, 500, map[string]any{"error": "internal"})
+		}
+	}()
+	path := strings.TrimRight(r.URL.Path, "/")
+	if path == "" {
+		path = "/"
+	}
+
+	switch r.Method {
+	case http.MethodOptions:
+		s.send(w, r, 204, []byte{})
+		return
+	case http.MethodGet:
+		s.doGet(w, r, path, r.URL.Query())
+		return
+	case http.MethodPut:
+		s.doPut(w, r, path)
+		return
+	case http.MethodDelete:
+		s.doDelete(w, r, path)
+		return
+	case http.MethodPost:
+		s.doPost(w, r, path)
+		return
+	default:
+		s.send(w, r, 404, map[string]any{"error": "not found", "path": path})
+	}
+}
+
+// doGet 은 읽기 라우팅이다.
+func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs map[string][]string) {
+	fleet, topo, ts := s.Cache.Snapshot()
+	switch path {
+	case "/api/fleet", "/api/fleet.json", "/api/devices":
+		if fleet == nil {
+			s.send(w, r, 503, map[string]any{
+				"error": "no data yet", "stale": true,
+				"clusters": []any{}, "devices": []any{},
+				"generated_at": time.Now().Unix()})
+			return
+		}
+		fmtQ := ""
+		if v := qs["format"]; len(v) > 0 {
+			fmtQ = lowerASCII(v[0])
+		}
+		if path == "/api/devices" || fmtQ == "devices" || fmtQ == "device" || fmtQ == "serverdesk" {
+			out := poller.BuildDevices(fleet, s.DisplayCfg(), s.refreshSec())
+			// 실 엣지 디바이스 — FT 클러스터 바로 뒤에 append.
+			devices := []map[string]any{}
+			for _, dv := range listAny(out["devices"]) {
+				if dm, ok := dv.(map[string]any); ok {
+					devices = append(devices, dm)
+				}
+			}
+			if s.Edge != nil {
+				devices = append(devices, s.Edge.Latest()...)
+			}
+			// 실측 가용성 주입(관측 충분한 장비만 명목값 대체).
+			if s.Avail != nil {
+				s.Avail.Apply(devices)
+			}
+			// ztC Endurance 데모 장비 — sim_devices > 0 이면 4모델 세트를 붙인다
+			// (Python sim_devices.py 계승, 실장비 스키마와 동일하게 생성).
+			sims := []map[string]any{}
+			if s.Cfg != nil && s.Cfg.SimDevices > 0 {
+				sims = poller.EnduranceSimDevices(nowFloat())
+				devices = append(devices, sims...)
+			}
+			out["devices"] = devices
+			out["count"] = len(devices)
+			warnT, critT := poller.UsageThresholds()
+			out["thresholds"] = map[string]any{"warn": warnT, "crit": critT}
+			if len(sims) > 0 {
+				out["sim_devices"] = len(sims)
+			}
+			if s.Events != nil {
+				out["events"] = s.Events.List(150)
+			}
+			out["cache_age_secs"] = round1(nowFloat() - ts)
+			s.send(w, r, 200, out)
+			return
+		}
+		// 캐시가 오래됐어도 stale 플래그만 덧붙여 그대로 제공(빈 응답 금지).
+		out := shallowCopy(fleet)
+		out["cache_age_secs"] = round1(nowFloat() - ts)
+		s.send(w, r, 200, out)
+	case "/api/topology", "/api/topology/full":
+		wantFull := strings.HasSuffix(path, "/full")
+		if v := qs["model"]; len(v) > 0 && (lowerASCII(v[0]) == "full" || lowerASCII(v[0]) == "detail") {
+			wantFull = true
+		}
+		if wantFull {
+			full, fts := s.Cache.SnapshotFull()
+			if full == nil {
+				s.send(w, r, 503, map[string]any{
+					"error": "detailed topology unavailable",
+					"hint":  "topology.py 로드 실패 또는 아직 수집 전",
+					"nodes": []any{}, "edges": []any{}})
+				return
+			}
+			out := shallowCopy(full)
+			out["cache_age_secs"] = round1(nowFloat() - fts)
+			s.send(w, r, 200, out)
+			return
+		}
+		if topo == nil {
+			s.send(w, r, 503, map[string]any{"error": "no data yet", "clusters": []any{}})
+			return
+		}
+		out := shallowCopy(topo)
+		out["cache_age_secs"] = round1(nowFloat() - ts)
+		s.send(w, r, 200, out)
+	case "/api/admin/config/export":
+		s.handleConfigExport(w, r)
+	case "/api/availability.csv":
+		s.handleAvailabilityCSV(w, r)
+	case "/api/health":
+		s.send(w, r, 200, s.health(fleet, ts))
+	case "/api", "/":
+		// Python 폴러는 / 에서 엔드포인트 인덱스를 줬다. 병합 바이너리에서는
+		// / 가 프런트(index.html)에 할당되므로 인덱스는 /api 로 옮긴다.
+		s.send(w, r, 200, map[string]any{
+			"service": "everrun-poller", "version": poller.Version,
+			"endpoints": []string{"/api/fleet", "/api/devices",
+				"/api/fleet?format=devices", "/api/topology",
+				"/api/topology?model=full", "/api/health"}})
+	default:
+		s.send(w, r, 404, map[string]any{"error": "not found", "path": path})
+	}
+}
+
+// health 는 /api/health 응답이다(poller.py _health 포트).
+// 감시 도구가 폴러하는 엔드포인트 — 'fast 가 한 번이라도 성공했나'만이 아니라
+// 티어 오류와 신선도(fast 주기 x3)를 함께 본다.
+func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
+	clusters := []any{}
+	worst := "ok"
+	rank := map[string]int{"ok": 0, "degraded": 1, "down": 2}
+	bump := func(cstat string) {
+		if rank[cstat] > rank[worst] {
+			worst = cstat
+		}
+	}
+	for _, st := range s.States {
+		fastIV := st.Cfg.Intervals.Fast
+		limit := float64(fastIV * 3)
+		tiers := map[string]any{}
+		var fastAge *float64
+		errs := map[string]string{}
+		for _, t := range []string{"fast", "slow", "static"} {
+			age := st.Age(t)
+			errStr := st.TierErr(t)
+			var errVal any
+			if errStr != "" {
+				errVal = errStr
+				errs[t] = errStr
+			}
+			tiers[t] = map[string]any{"age_secs": age, "error": errVal}
+			if t == "fast" {
+				fastAge = age
+			}
+		}
+		var cstat, why string
+		if fastAge == nil {
+			cstat, why = "down", "fast 티어가 한 번도 성공하지 못함"
+		} else if *fastAge > limit {
+			cstat = "degraded"
+			why = fmt.Sprintf("fast 티어 %.0fs 경과(임계 %ds)", *fastAge, int64(limit))
+		} else if len(errs) > 0 {
+			cstat = "degraded"
+			parts := []string{}
+			for _, t := range []string{"fast", "slow", "static"} {
+				if v, ok := errs[t]; ok {
+					parts = append(parts, t+"="+v)
+				}
+			}
+			why = "수집 오류: " + strings.Join(parts, "; ")
+		} else {
+			cstat = "ok"
+		}
+		bump(cstat)
+		nodes, vms := st.NodeCounts()
+		var whyVal any
+		if why != "" {
+			whyVal = why
+		}
+		clusters = append(clusters, map[string]any{
+			"key":                  st.Key,
+			"platform":             platformOr(st.GetPlatform(), "unknown"),
+			"status":               cstat,
+			"reason":               whyVal,
+			"stale_threshold_secs": int64(limit),
+			"tiers":                tiers,
+			"nodes_seen":           nodes,
+			"vms_seen":             vms,
+			"os_metrics":           osMetricsMap(st.OSReachable()),
+		})
+	}
+	if fleet == nil {
+		worst = "down"
+	}
+	var cacheAge any
+	if ts != 0 {
+		cacheAge = round1(nowFloat() - ts)
+	}
+	return map[string]any{
+		"status":         worst,
+		"version":        poller.Version,
+		"uptime_secs":    int64(time.Since(s.StartedAt).Seconds()),
+		"cache_age_secs": cacheAge,
+		"clusters":       clusters,
+		// Endurance 데모 세트는 sim_devices > 0 일 때 4대 고정.
+		"simDevices": simCount(s.Cfg),
+	}
+}
+
+func simCount(cfg *config.Config) int {
+	if cfg != nil && cfg.SimDevices > 0 {
+		return len(poller.EnduranceSimDevices(0))
+	}
+	return 0
+}
+
+func platformOr(p, def string) string {
+	if p == "" {
+		return def
+	}
+	return p
+}
+
+func osMetricsMap(m map[string]bool) map[string]any {
+	out := map[string]any{}
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func shallowCopy(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func listAny(v any) []any {
+	l, _ := v.([]any)
+	return l
+}
+
+func lowerASCII(s string) string { return strings.ToLower(s) }
+
+func nowFloat() float64 { return float64(time.Now().UnixNano()) / 1e9 }
+
+func round1(x float64) float64 {
+	return math.RoundToEven(x*10) / 10
+}

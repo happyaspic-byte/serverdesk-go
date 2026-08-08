@@ -1,0 +1,323 @@
+/* ============================================================
+   css/screens/clusters.css — 화면 clusters 전용 스타일.
+   접두사 sc-cl- 만 정의한다. 공용 클래스(card/table/chip/u-*)는
+   js/screens/clusters.js가 재사용만 하며 여기서 재정의하지 않는다.
+   REBUILD-SPEC.md §5.5
+   ============================================================ */
+
+.sc-cl-root{
+  padding:var(--page-pad);
+  display:flex;
+  flex-direction:column;
+  gap:var(--sp-6);
+  max-width:var(--page-max);
+  width:100%;
+  margin:0 auto;
+  box-sizing:border-box;
+}
+
+/* 애니메이션 절제(minor#6) — 상태 도트는 정적(색+상태 배지로 relief 충족). 모션은 레일 라이브 1개.
+   행 dot 은 row.anim(pulse/blink) 클래스도 함께 붙으므로 화면 범위 override 로 정지시킨다. */
+.sc-cl-root .u-dot.is-warn,
+.sc-cl-root .u-dot.is-neg{ animation:none; }
+
+/* ── 헤더 ── */
+.sc-cl-head{
+  display:flex;
+  align-items:flex-end;
+  justify-content:space-between;
+  gap:var(--sp-4);
+  flex-wrap:wrap;
+}
+.sc-cl-head-main{
+  display:flex;
+  flex-direction:column;
+  gap:var(--sp-1);
+  min-width:0;
+}
+.sc-cl-title{
+  font-size:var(--h1);
+  font-weight:700;
+  letter-spacing:-.02em;
+  color:var(--ink);
+  line-height:1.2;   /* 공용 .page-title 표준과 통일 */
+}
+.sc-cl-sub{
+  font-size:var(--fs-12);
+  font-weight:600;
+  color:var(--muted);
+}
+
+/* ── 상태 필터 칩 ── */
+.sc-cl-filters{
+  display:flex;
+  gap:var(--sp-2);
+  flex-wrap:wrap;
+}
+.sc-cl-chip{
+  display:inline-flex;
+}
+
+/* ── 테이블 ── */
+/* .sc-cl-table-wrap 은 공용 .table-wrap(styles.css)에 overflow-x:auto 가 있어 별도 선언 불필요 */
+.sc-cl-table{
+  min-width:900px;
+}
+
+.sc-cl-status-label{
+  font-size:var(--fs-12);
+  font-weight:700;
+}
+
+.sc-cl-type-ico{
+  color:var(--ink2);
+  flex-shrink:0;
+}
+.sc-cl-name{
+  font-size:var(--fs-12);
+  font-weight:700;
+  line-height:1.3;
+}
+.sc-cl-host{
+  font-size:var(--fs-12);
+  line-height:1.3;
+}
+
+.sc-cl-site{
+  color:var(--ink2);
+  font-size:var(--fs-12);
+}
+
+/* CPU/MEM 미니 바 (게이지 — 트랙은 --track 전용, DESIGN-TOKENS §1.7) */
+.sc-cl-bar-wrap{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:var(--sp-2);
+  min-width:98px;
+}
+.sc-cl-bar{
+  width:56px;
+  height:6px;
+  border-radius:var(--r-pill);
+  background:var(--track);
+  overflow:hidden;
+  flex-shrink:0;
+}
+.sc-cl-bar-fill{
+  height:100%;
+  border-radius:var(--r-pill);
+  width:0%;
+  background:var(--muted);
+  transition:width var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+/* 필(fill) 색은 JS 가 인라인 style.background(fmt.allocFill)로 지정 — 톤 클래스 규칙 없음 */
+.sc-cl-bar-val{
+  /* G12: 표 본문 값은 12px 통일(11은 메타/헤더 전용) — nodes 와 동일 규칙. */
+  font-size:var(--fs-12);
+  font-weight:700;
+  min-width:34px;
+  text-align:right;
+  flex-shrink:0;
+}
+
+.sc-cl-sync-label{
+  font-size:var(--fs-12);
+  font-weight:700;
+}
+
+.sc-cl-vms,
+.sc-cl-ver{
+  font-size:var(--fs-12);
+}
+.sc-cl-ver{
+  color:var(--ink2);
+}
+
+/* ── 빈 상태 ── */
+.sc-cl-empty{
+  margin-top:4px;
+}
+
+/* ============================================================
+   소수 장비(6대 미만) 카드형 — "FT(내결함성) 관점".
+   클러스터당 큰 카드: 상태 · 이중화 노드 페어 · sync(락스텝) · VM · 라이선스 · 가용성,
+   하단에 부차적인 CPU/MEM 미니바. 공용 .card/.u-* 상속(재정의 없음), 색은 토큰 경유.
+   ============================================================ */
+.sc-cl-cards{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+  gap:var(--sp-5);
+  align-items:start;
+}
+/* [hidden] UA display:none < author display:grid 이므로 명시적으로 끈다 */
+.sc-cl-cards[hidden],
+.sc-cl-table-wrap[hidden]{ display:none; }
+
+.sc-cl-card{
+  cursor:pointer;
+  transition:border-color var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.card.sc-cl-card[role="button"]:hover{
+  border-color:rgba(var(--accent-rgb), .5);
+  transform:translateY(-1px);
+}
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-cl-card:active{
+  filter:brightness(.93);
+}
+.sc-cl-card:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+
+.sc-cl-card-head{
+  display:flex;
+  align-items:center;
+  gap:var(--sp-3);
+}
+.sc-cl-card-type-ico{
+  display:inline-flex;
+  align-items:center;
+  color:var(--ink2);
+  flex-shrink:0;
+}
+.sc-cl-card-id{ flex:1; min-width:0; gap:2px; }
+.sc-cl-card-name{
+  font-size:var(--fs-13);
+  font-weight:700;
+  letter-spacing:-.01em;
+  color:var(--ink);
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.sc-cl-card-host{
+  font-size:var(--fs-12);
+  font-weight:600;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.sc-cl-card-st{ flex-shrink:0; }
+
+/* FT 이중화 hero 패널(이 화면의 주역) — 중첩 surface */
+.sc-cl-ft{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:var(--sp-4);
+  flex-wrap:wrap;
+  padding:var(--sp-3) var(--sp-4);
+  background:var(--surface-2);
+  border:1px solid var(--line2);
+  border-radius:var(--r-md);
+}
+.sc-cl-ft-redun{
+  display:flex;
+  align-items:center;
+  gap:var(--sp-3);
+  min-width:0;
+}
+.sc-cl-ft-nodes{
+  display:flex;
+  gap:4px;
+  flex-shrink:0;
+}
+/* 이중화 노드 칩 — 라운드 스퀘어로 "유닛"을 표현(둥근 상태도트와 구분). 색은 클러스터 status 톤 */
+.sc-cl-ft-node{
+  width:11px;
+  height:16px;
+  border-radius:3px;
+  background:var(--muted);
+  display:inline-block;
+}
+.sc-cl-ft-node.is-pos{ background:var(--pos-bright); }
+.sc-cl-ft-node.is-warn{ background:var(--warn-bright); }
+.sc-cl-ft-node.is-neg{ background:var(--neg); }
+.sc-cl-ft-redun-txt{ gap:1px; min-width:0; }
+/* FT 이중화 타이틀은 h2 로 렌더된다(스크린리더 문서 구조). UA 기본 margin/line-height 리셋은
+   별도의 h2.클 선택자 규칙이 아니라 이 클래스 규칙 안에 둔다 — 별도 규칙(특이도 0,1,1)은
+   아래 명시값을 덮어 노트(12px/600)보다 얇은 14px 레귤러로 렌더되는 cascade 버그였다
+   (.card-title 패턴, styles.css). */
+.sc-cl-ft-title{
+  font-size:var(--fs-12);
+  font-weight:700;
+  color:var(--ink);
+  margin:0;
+  line-height:inherit;
+}
+.sc-cl-ft-title.is-pos{ color:var(--pos-on-tint); }
+.sc-cl-ft-title.is-warn{ color:var(--warn-on-tint); }
+.sc-cl-ft-title.is-neg{ color:var(--neg-on-tint); }
+.sc-cl-ft-note{
+  font-size:var(--fs-12);
+  font-weight:600;
+  color:var(--muted);
+}
+.sc-cl-ft-sync{
+  display:inline-flex;
+  align-items:center;
+  gap:var(--sp-1);
+  font-size:var(--fs-12);
+  font-weight:700;
+  flex-shrink:0;
+}
+.sc-cl-ft-sync-ico{ display:inline-flex; align-items:center; }
+
+/* VM / 라이선스 / 가용성 타일 */
+.sc-cl-tiles{
+  display:grid;
+  grid-template-columns:repeat(3, 1fr);
+  gap:var(--sp-3);
+}
+.sc-cl-tile{
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  min-width:0;
+}
+.sc-cl-tile-label{
+  font-size:var(--fs-12);
+  font-weight:700;
+  color:var(--muted);
+}
+.sc-cl-tile-val{
+  font-size:var(--fs-16);
+  font-weight:700;
+  letter-spacing:-.02em;
+  color:var(--ink);
+}
+.sc-cl-tile-badge{ align-self:flex-start; }
+
+/* 하단 CPU/MEM 미니바(부차) */
+.sc-cl-load{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:var(--sp-4);
+  border-top:1px solid var(--line);
+  padding-top:var(--sp-3);
+}
+.sc-cl-load-item{
+  display:flex;
+  align-items:center;
+  gap:var(--sp-2);
+  min-width:0;
+}
+.sc-cl-load-label{
+  font-size:var(--fs-12);
+  font-weight:700;
+  letter-spacing:.02em;
+  color:var(--muted);
+  flex-shrink:0;
+}
+.sc-cl-load-item .sc-cl-bar{ flex:1; width:auto; }
+
+/* ── 좁은 화면 대응 ── */
+@media (max-width:720px){
+  .sc-cl-root{ padding:var(--sp-4) var(--sp-4) var(--sp-7); }
+  .sc-cl-head{ align-items:flex-start; }
+}
+
+/* (다크 잉크바 우회 블록 제거 — 2026-07-24 TDS 심사 반영: fmt.barColor/allocFill 이
+   중립 채움을 토스 블루로 내므로 다크 저대비 우회가 사문화됨. 블루는 양 테마 공용.) */

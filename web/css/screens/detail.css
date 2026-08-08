@@ -1,0 +1,442 @@
+/* ============================================================
+   css/screens/detail.css — S10: 서버 상세(드릴다운) 화면 전용
+   REBUILD-SPEC §1.10 / §5.4 / §5.5  ·  Robodog 리스킨(DESIGN-TOKENS 계약)
+
+   규약
+   - 자기 접두사 `sc-dtl-` 클래스만 정의한다. 공용(.card·.btn·.kpi·.u-*·.is-*)은 재사용만, 재정의 금지.
+   - 색은 반드시 토큰 경유(var(--x) / rgba(var(--x-rgb),α)). 하드코딩 hex 금지.
+   - Robodog: 순백 플레인 + 헤어라인 + 옅은 그림자. 강조는 인디고(--accent)/상태색 + 투명 틴트.
+     · 다크 필(--ink-fill)은 primary CTA·활성 세그먼트 전용 — 이 화면 자체 서피스엔 쓰지 않는다.
+     · 표면 위계: 카드(흰+shadow-md) > 주 서브패널(흰+헤어라인) > 유틸 인셋 타일(--line2, 보더 없음).
+     · status 색은 항상 아이콘/라벨 동반(red↔amber 색만으로 구분 불가).
+   ============================================================ */
+
+.sc-dtl{
+  padding:var(--page-pad);
+  max-width:var(--page-max);
+  width:100%;
+  margin:0 auto;
+  box-sizing:border-box;
+  display:flex;
+  flex-direction:column;
+  gap:var(--sp-5);
+}
+
+/* ── 상단 액션 바 ─────────────────────────────────────────── */
+.sc-dtl-actions{ display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
+
+/* 점검 모드 드롭다운 — 액션 바 버튼에 붙는 미니 메뉴. is-on = 활성 창 존재(묵음 진행 중). */
+.sc-dtl-maintwrap{ position:relative; }
+.sc-dtl-maintbtn.is-on{ color:var(--warn); border-color:var(--warn); font-weight:var(--fw-semi); }
+.sc-dtl-maintmenu{ position:absolute; top:calc(100% + 6px); left:0; z-index:40; min-width:140px;
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md);
+  box-shadow:var(--shadow-md); padding:6px; display:flex; flex-direction:column; gap:2px; }
+.sc-dtl-maintopt{ text-align:left; padding:8px 12px; border-radius:var(--r-sm); font-size:var(--fs-13);
+  color:var(--ink); background:none; border:0; cursor:pointer; }
+.sc-dtl-maintopt:hover{ background:var(--line2); }
+.sc-dtl-maintopt--clear{ color:var(--neg); border-top:1px solid var(--line2); border-radius:0 0 var(--r-sm) var(--r-sm); }
+.sc-dtl-back .sc-dtl-bico{ transform:rotate(90deg); }
+.sc-dtl-bico{ display:inline-flex; align-items:center; flex-shrink:0; }
+.sc-dtl-ico-x{ display:inline-block; width:1em; height:1em; border-radius:50%; border:1px solid currentColor; opacity:.4; }
+
+/* ── 헤더 ─────────────────────────────────────────────────── */
+.sc-dtl-head{
+  display:flex; align-items:flex-start; justify-content:space-between;
+  gap:var(--sp-5); flex-wrap:wrap;
+}
+.sc-dtl-headmain{ display:flex; align-items:center; gap:var(--sp-4); min-width:0; }
+/* 디바이스 아이덴티티 타일 — 옅은 액센트 워시 + 인디고 아이콘(순백 위 아이덴티티, 헤더 로고 그라디언트와 위계 구분) */
+.sc-dtl-avatar{
+  width:52px; height:52px; border-radius:var(--r-lg); flex-shrink:0;
+  background:var(--accent-soft); color:var(--accent-deep);
+  display:flex; align-items:center; justify-content:center;
+}
+.sc-dtl-headtxt{ min-width:0; }
+.sc-dtl-titlerow{ display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap; }
+.sc-dtl-host{ font-size:var(--h1); font-weight:700; letter-spacing:-.02em; line-height:1.2; }
+/* 장애 상세에서 상태 도트 무한 점멸 금지 — 정적 red/앰버·배너·링이 이미 상태를 진술한다(애니 예산 ≤3). */
+.sc-dtl .u-dot.is-warn,
+.sc-dtl .u-dot.is-neg{ animation:none; }
+.sc-dtl-stbadge{ font-size:var(--fs-12); }
+/* 상태 뱃지 사유(minor#15) — 뱃지 옆 근거 텍스트. 뱃지보다 낮은 위계(muted) + 좌측 마진 축소로 뱃지에 붙인다. */
+.sc-dtl-streason{ font-size:var(--fs-12); font-weight:600; color:var(--muted); margin-left:-6px; }
+
+.sc-dtl-meta{
+  display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap;
+  font-size:var(--fs-13); color:var(--ink2); margin-top:6px;
+}
+.sc-dtl-mitem{ display:inline-flex; align-items:center; gap:4px; min-width:0; }
+.sc-dtl-msep{ color:var(--muted); }
+.sc-dtl-kico{ display:inline-flex; align-items:center; color:var(--muted); flex-shrink:0; }
+.sc-dtl-link{ font-weight:700; transition:color var(--dur) var(--ease); }
+a.sc-dtl-link:hover{ color:var(--accent-deep); text-decoration:underline; }
+
+/* 헤더 우측 요약 지표 — 순백 미니 kpi 칩(헤어라인 + 미세 그림자) */
+.sc-dtl-stats{ display:flex; gap:var(--sp-3); flex-shrink:0; }
+.sc-dtl-stat{
+  text-align:right; padding:10px 16px; border-radius:var(--r-lg);
+  background:var(--surface-2); border:1px solid var(--line);
+  min-width:104px;
+}
+.sc-dtl-stat-v{ font-size:var(--fs-16); font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+.sc-dtl-stat-k{ font-size:var(--fs-12); margin-top:1px; }
+
+/* ── 타일 4개(공용 .card 위 kpi급 레이아웃) ───────────────── */
+/* 타일 수는 variant 별로 다르다(대부분 4개, ft 는 CPU/MEM 를 노드 페어 카드로 넘겨 2개 — minor#1).
+   auto-fit 로 개수에 맞춰 균형 있게 채운다(4개면 4열, 2개면 2열). */
+.sc-dtl-tiles{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:var(--sp-4); }
+.sc-dtl-tile{ gap:var(--sp-2); padding:16px 18px; }
+.sc-dtl-tile-lab{ font-size:var(--fs-12); font-weight:700; gap:8px; min-width:0; word-break:keep-all; }
+.sc-dtl-tile-delta{ font-size:var(--fs-12); font-weight:700; max-width:58%; text-align:right; }
+.sc-dtl-tile-val{
+  font-size:var(--kpi); font-weight:700; letter-spacing:-.03em; line-height:1.05;
+  margin-top:var(--sp-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  font-variant-numeric:tabular-nums;
+}
+.sc-dtl-tile-val.is-spark{ margin-top:4px; }
+.sc-dtl-tile.is-long .sc-dtl-tile-val{ font-size:var(--fs-16); letter-spacing:-.01em; }
+.sc-dtl-tile-unit{ font-size:var(--fs-12); font-weight:700; margin-left:3px; }
+.sc-dtl-spark{ display:flex; margin-top:4px; min-height:30px; }
+
+/* ── 알림 배너 — 중립 면 + 상태 경계·아이콘·텍스트 ─────────── */
+.sc-dtl-notices{ display:flex; flex-direction:column; gap:var(--sp-2); }
+.sc-dtl-notices:empty{ display:none; }
+.sc-dtl-notice{
+  display:flex; align-items:center; gap:8px;
+  padding:11px 14px; border:1px solid var(--line); border-left:3px solid var(--warn);
+  border-radius:var(--r-md); font-size:var(--fs-13); background:var(--surface-2); color:var(--ink2);
+}
+.sc-dtl-notice.is-neg{ border-left-color:var(--neg); }
+.sc-dtl-notice.is-info{ border-left-color:var(--accent); }
+.sc-dtl-notice.is-pos{ border-left-color:var(--pos); }
+.sc-dtl-nico{ display:inline-flex; flex-shrink:0; color:var(--warn); }
+.sc-dtl-notice.is-neg .sc-dtl-nico{ color:var(--neg); }
+.sc-dtl-notice.is-info .sc-dtl-nico{ color:var(--accent); }
+.sc-dtl-notice.is-pos .sc-dtl-nico{ color:var(--pos); }
+.sc-dtl-ntext{ min-width:0; }
+.sc-dtl-ntext b{ font-weight:700; }
+
+/* ── 카드 그리드 ──────────────────────────────────────────── */
+.sc-dtl-cards{ display:flex; flex-direction:column; gap:var(--sp-4); }
+.sc-dtl-g2{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr); gap:var(--sp-4); align-items:start; }
+.sc-dtl-g11{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:var(--sp-4); align-items:start; }
+.sc-dtl-stack{ display:flex; flex-direction:column; gap:var(--sp-4); min-width:0; }
+.sc-dtl-hico{ display:inline-flex; color:var(--ink2); flex-shrink:0; }
+.sc-dtl-rbadge{ margin-left:auto; }
+
+/* ── 공용 조각: kv / bar / sub ────────────────────────────── */
+.sc-dtl-kvlist{ display:flex; flex-direction:column; }
+.sc-dtl-kv{
+  display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3);
+  font-size:var(--fs-13); padding:6px 0; border-bottom:1px solid var(--line2); min-width:0;
+}
+.sc-dtl-kv:last-child{ border-bottom:0; }
+.sc-dtl-kv-k{ display:inline-flex; align-items:center; gap:7px; min-width:0; }
+.sc-dtl-kv-v{ font-weight:700; text-align:right; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+.sc-dtl-barrow{ display:flex; flex-direction:column; gap:4px; }
+.sc-dtl-barrow.is-inline{ margin-bottom:5px; }
+.sc-dtl-bar-head{ display:flex; align-items:baseline; justify-content:space-between; gap:var(--sp-2); font-size:var(--fs-13); }
+.sc-dtl-bar-k{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sc-dtl-bar-val{ font-size:var(--fs-13); font-weight:700; flex-shrink:0; font-variant-numeric:tabular-nums; }
+.sc-dtl-bar-track{ height:5px; border-radius:4px; background:var(--track); overflow:hidden; }
+.sc-dtl-bar-track.is-empty{ opacity:.5; }
+/* 기본 진행값은 보통 메트릭이므로 브랜드 블루를 쓴다. 상태 판정은 아래 is-* 변형만 사용한다. */
+.sc-dtl-bar-fill{ height:100%; border-radius:4px; width:0; background:var(--accent); transition:width var(--dur) var(--ease); }
+.sc-dtl-bar-fill.is-pos{ background:var(--pos-bright); }
+.sc-dtl-bar-fill.is-usage{ background:var(--accent); }
+/* 노드 카드 사용률 % 텍스트 — 게이지 단일 임계 규칙(§1.35): 정상 중립, ≥78 앰버, ≥90 레드.
+   (구 '무조건 중립' 강제는 바=앰버/텍스트=중립 불일치를 만들어 재심사에서 감점 — 제거.) */
+.sc-dtl-node .sc-dtl-bar-val:not(.is-warn):not(.is-neg){ color:var(--ink2); }
+.sc-dtl-node .sc-dtl-bar-val.is-warn{ color:var(--warn-on-tint); }
+.sc-dtl-node .sc-dtl-bar-val.is-neg{ color:var(--neg-on-tint); }
+.sc-dtl-bar-fill.is-warn{ background:var(--warn-bright); }
+.sc-dtl-bar-fill.is-neg{ background:var(--neg); }
+.sc-dtl-bar-fill.is-info{ background:var(--blue); }
+.sc-dtl-bar-fill.is-mut{ background:var(--muted); }
+
+.sc-dtl-sub{ display:flex; flex-direction:column; gap:7px; padding-top:11px; margin-top:4px; border-top:1px solid var(--line); }
+.sc-dtl-sub:empty{ display:none; }
+.sc-dtl-subtitle{ font-size:var(--fs-12); font-weight:700; color:var(--ink2); }
+.sc-dtl-listempty{ font-size:var(--fs-12); padding:8px 2px; }
+.sc-dtl-hint{ font-size:var(--fs-12); line-height:1.5; margin-top:10px; }
+
+/* ── PairCard / EnclosureCard ─────────────────────────────── */
+.sc-dtl-c-pair .card-body,
+.sc-dtl-c-encl .card-body{ display:flex; flex-direction:column; gap:var(--sp-4); }
+
+/* 이중화 상태 히어로 — 면은 중립, 실제 상태는 좌측 경계·아이콘·텍스트로 전달한다. */
+.sc-dtl-hero{
+  display:flex; align-items:center; gap:var(--sp-3);
+  padding:14px 16px; border-radius:var(--r-md);
+  background:var(--surface-2); border:1px solid var(--line); border-left:3px solid var(--pos);
+}
+.sc-dtl-hero.is-neg{ border-left-color:var(--neg); }
+.sc-dtl-hero.is-warn{ border-left-color:var(--warn); }
+.sc-dtl-hero.is-mut{ border-left-color:var(--muted); }
+.sc-dtl-heroico{ display:inline-flex; flex-shrink:0; }
+.sc-dtl-herot{ font-size:var(--fs-13); font-weight:700; letter-spacing:-.01em; }
+.sc-dtl-heros{ font-size:var(--fs-12); margin-top:2px; }
+
+.sc-dtl-pair{ display:flex; align-items:stretch; }
+.sc-dtl-encl{ display:flex; align-items:stretch; gap:var(--sp-3); }
+/* 주 서브패널(node) — 순백 + 헤어라인(카드 인 카드, 그림자 없음) */
+.sc-dtl-node{
+  flex:1 1 0; min-width:0;
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md); padding:15px 16px;
+  display:flex; flex-direction:column; gap:4px;
+}
+/* 오프라인 노드 카드 — red 면적 축소(C1): 상단 critical 배너 + 상태 칩 + 대형 '오프라인' 라벨 +
+   코너 도트로 이미 4중 진술하므로, 카드 배경 틴트는 걷어내 중립(순백)으로 낮춘다. red 는 배너·칩·
+   라벨·도트에만 남기고, 카드 식별은 미세 red 헤어라인 보더로만 유지한다. */
+.sc-dtl-node.is-neg{ border-color:rgba(var(--neg-rgb),.25); background:var(--surface); }
+.sc-dtl-node.is-warn{ border-color:rgba(var(--warn-bright-rgb),.4); background:var(--surface); }
+.sc-dtl-nhead{ gap:7px; flex-wrap:wrap; min-width:0; }
+.sc-dtl-nname{ font-size:var(--fs-13); font-weight:700; white-space:nowrap; }
+.sc-dtl-nbadge{ font-size:var(--fs-12); letter-spacing:.04em; }
+.sc-dtl-nrole{ font-size:var(--fs-12); }
+.sc-dtl-nstate{ font-size:var(--fs-20); font-weight:700; letter-spacing:-.02em; margin-top:var(--sp-2); }
+.sc-dtl-solo{ align-self:flex-start; margin-top:4px; font-size:var(--fs-12); }
+.sc-dtl-nmetrics{
+  display:flex; flex-direction:column; gap:8px;
+  margin-top:10px; padding-top:11px; border-top:1px solid var(--line);
+}
+
+/* FT 미러 링크 표시 — 상태색 라인 + 중립 노드 */
+.sc-dtl-linkcol{ position:relative; width:88px; flex-shrink:0; align-self:stretch; color:var(--pos); }
+.sc-dtl-linkcol.is-neg{ color:var(--neg); }
+.sc-dtl-linkcol.is-warn{ color:var(--warn); }
+.sc-dtl-linkcol.is-mut{ color:var(--muted); }
+.sc-dtl-linkline{
+  position:absolute; top:50%; left:-1px; right:-1px;
+  border-top:2px solid currentColor; transform:translateY(-50%);
+}
+.sc-dtl-linkcol.is-neg .sc-dtl-linkline,
+.sc-dtl-linkcol.is-mut .sc-dtl-linkline{ border-top-style:dashed; }
+.sc-dtl-linkdot{
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  width:40px; height:40px; border-radius:50%;
+  background:var(--surface); border:2px solid currentColor;
+  display:flex; align-items:center; justify-content:center;
+}
+.sc-dtl-linkico{ display:inline-flex; }
+.sc-dtl-linklab{
+  position:absolute; top:calc(50% + 28px); left:50%; transform:translateX(-50%);
+  font-size:var(--fs-12); font-weight:700; letter-spacing:.06em; white-space:nowrap;
+}
+
+/* 스위치오버 방향 타일 — 유틸 인셋(--line2) */
+.sc-dtl-switches{ display:flex; gap:var(--sp-3); }
+.sc-dtl-switch{ flex:1 1 0; min-width:0; padding:11px 14px; background:var(--line2); border-radius:var(--r-md); }
+.sc-dtl-swlab{ font-size:var(--fs-12); gap:8px; min-width:0; }
+.sc-dtl-flow{ font-size:var(--fs-13); font-weight:700; white-space:nowrap; }
+.sc-dtl-swts{ font-size:var(--fs-13); font-weight:700; margin-top:4px; }
+
+.sc-dtl-mods{ display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-top:9px; padding-top:9px; border-top:1px solid var(--line); }
+.sc-dtl-mods:empty{ display:none; }
+.sc-dtl-mod{ font-size:var(--fs-13); font-weight:700; gap:4px; min-width:0; }
+
+/* 마지막 전환 기록 푸터 — 유틸 인셋(--line2) */
+.sc-dtl-ftfoot{
+  display:flex; align-items:center; gap:var(--sp-3);
+  padding:12px 15px; border-radius:var(--r-md); background:var(--line2);
+}
+.sc-dtl-fttitle{ font-size:var(--fs-13); font-weight:700; }
+.sc-dtl-ftsub{ font-size:var(--fs-12); margin-top:2px; }
+
+/* ── ChartCard ────────────────────────────────────────────── */
+.sc-dtl-chsub{ font-size:var(--fs-12); line-height:1.5; }
+.sc-dtl-c-chart .card-body{ display:flex; flex-direction:column; gap:var(--sp-4); }
+.sc-dtl-chlegend{ display:flex; align-items:center; gap:16px; font-size:var(--fs-12); margin-bottom:6px; }
+.sc-dtl-lseg{ width:10px; height:2px; border-radius:1px; background:var(--muted); display:inline-block; }
+.sc-dtl-lseg.is-pos{ background:var(--accent); }
+.sc-dtl-chtrend{ margin-left:auto; font-size:var(--fs-12); }
+.sc-dtl-chline svg{ display:block; width:100%; }
+.sc-dtl-chempty{ font-size:var(--fs-12); padding:6px 0 2px; }
+.sc-dtl-res{ display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4); padding-top:14px; border-top:1px solid var(--line); }
+
+/* ── VmTable ──────────────────────────────────────────────── */
+.sc-dtl-vmwrap{ overflow-x:auto; }
+.sc-dtl-vmgrid{ min-width:430px; }
+.sc-dtl-vmhead,
+.sc-dtl-vmrow{
+  display:grid; grid-template-columns:minmax(0,1.5fr) .9fr .7fr .7fr .9fr;
+  gap:var(--sp-2); align-items:center;
+}
+.sc-dtl-vmhead{
+  font-size:var(--fs-12); letter-spacing:.05em; text-transform:uppercase;
+  color:var(--muted); padding:0 4px 8px; border-bottom:1px solid var(--line);
+}
+.sc-dtl-vmhead .is-num,
+.sc-dtl-vmrow .is-num{ text-align:right; }
+.sc-dtl-vmrow{ position:relative; padding:8px 4px; border-bottom:1px solid var(--line2); }
+.sc-dtl-vmrow:last-child{ border-bottom:0; }
+.sc-dtl-vmcell{ min-width:0; }
+.sc-dtl-vmcell .u-row{ gap:8px; flex-wrap:wrap; }
+.sc-dtl-vmname{ font-size:var(--fs-13); font-weight:700; }
+.sc-dtl-vmos{ font-size:var(--fs-13); margin-top:2px; }
+.sc-dtl-vmnode{ font-size:var(--fs-13); color:var(--ink2); }
+.sc-dtl-vmst{ display:flex; justify-content:flex-end; }
+/* 인라인 VM 제어 — 행 hover 시 우측에 떠서 노출(비호버 시 숨김). 기존 위임 버튼(btn)을 축소해 담는다. */
+.sc-dtl-vmacts{
+  position:absolute; right:4px; top:50%; transform:translateY(-50%);
+  display:flex; align-items:center; gap:8px;
+  padding:3px 5px; border-radius:var(--r-pill);
+  background:var(--surface); border:1px solid var(--line); box-shadow:var(--shadow-sm);
+  opacity:0; pointer-events:none; transition:opacity var(--dur) var(--ease); z-index:2;
+}
+.sc-dtl-vmacts:empty{ display:none; }
+.sc-dtl-vmrow:hover .sc-dtl-vmacts,
+.sc-dtl-vmacts:focus-within{ opacity:1; pointer-events:auto; }
+.sc-dtl-vmacts .btn{ padding:4px 11px; font-size:var(--fs-12); }
+
+/* 터치 기기에는 hover가 없으므로 VM 제어를 행 하단의 일반 흐름으로 노출한다. */
+@media (hover:none), (pointer:coarse){
+  .sc-dtl-vmacts{
+    position:static; grid-column:1 / -1; justify-content:flex-end;
+    transform:none; opacity:1; pointer-events:auto;
+    padding:0; border:0; box-shadow:none; background:transparent;
+  }
+}
+
+/* ── LicenseCard ──────────────────────────────────────────── */
+.sc-dtl-licgrid{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:var(--sp-4); }
+.sc-dtl-lick{ font-size:var(--fs-12); text-transform:uppercase; letter-spacing:.05em; }
+.sc-dtl-licv{ font-size:var(--fs-13); font-weight:700; margin-top:3px; }
+
+/* ── HwCard ───────────────────────────────────────────────── */
+.sc-dtl-hwlist{ display:flex; flex-direction:column; }
+.sc-dtl-hwrow{ display:flex; align-items:center; gap:var(--sp-3); padding:9px 2px; border-bottom:1px solid var(--line2); }
+.sc-dtl-hwrow:last-child{ border-bottom:0; }
+.sc-dtl-hwico{ display:inline-flex; color:var(--muted); width:18px; flex-shrink:0; }
+.sc-dtl-hwlab{ font-size:var(--fs-13); font-weight:700; }
+.sc-dtl-hwdet{ font-size:var(--fs-13); margin-top:1px; word-break:break-word; }
+.sc-dtl-hwval{ font-size:var(--fs-13); font-weight:700; flex-shrink:0; }
+
+/* ── Alerts / Traps ───────────────────────────────────────── */
+.sc-dtl-alist{ display:flex; flex-direction:column; }
+.sc-dtl-arow{ display:flex; align-items:flex-start; gap:var(--sp-3); padding:8px 2px; border-bottom:1px solid var(--line2); }
+.sc-dtl-arow:last-child{ border-bottom:0; }
+.sc-dtl-arow .u-dot{ margin-top:4px; }
+.sc-dtl-adesc{ font-size:var(--fs-13); }
+/* 트랩 심각도 텍스트 라벨(ERROR/WARN/INFO) — 고정폭 정렬, 색은 도트가 운반하므로 텍스트는 중립(ink2). */
+.sc-dtl-traplvl{ flex-shrink:0; width:44px; margin-top:1px; font-size:var(--fs-13); font-weight:700; letter-spacing:.03em; color:var(--ink2); }
+.sc-dtl-aago{ font-size:var(--fs-12); margin-top:2px; }
+.sc-dtl-more{ margin-left:auto; padding:4px 8px; }
+.sc-dtl-nvmrow{ gap:8px; padding:8px 2px; border-bottom:1px solid var(--line2); }
+.sc-dtl-nvmrow:last-child{ border-bottom:0; }
+
+/* ── ControlsCard ─────────────────────────────────────────── */
+.sc-dtl-ctlnote{ font-size:var(--fs-12); color:var(--muted); }
+.sc-dtl-ctlrows{ display:flex; flex-direction:column; }
+.sc-dtl-ctlrow{ display:flex; align-items:center; gap:var(--sp-3); padding:10px 2px; border-top:1px solid var(--line2); flex-wrap:wrap; }
+.sc-dtl-ctlname{ font-size:var(--fs-13); font-weight:700; }
+.sc-dtl-ctlsub{ font-size:var(--fs-12); margin-top:1px; }
+.sc-dtl-ctlbtns{ flex-shrink:0; gap:7px; }
+/* 실행 결과 — 중립 면에 상태 경계와 성공/실패 문자로 결과를 전달한다. */
+.sc-dtl-ctlres{
+  margin-top:10px; padding:10px 13px; border:1px solid var(--line); border-left:3px solid var(--muted);
+  border-radius:var(--r-md); font-size:var(--fs-13); font-weight:700; background:var(--surface-2); color:var(--ink2);
+}
+.sc-dtl-ctlres.is-pos{ border-left-color:var(--pos); }
+.sc-dtl-ctlres.is-neg{ border-left-color:var(--neg); }
+.sc-dtl-conseq{ font-size:var(--fs-13); line-height:1.55; }
+
+/* ── ServerCard / BmcCard ─────────────────────────────────── */
+.sc-dtl-c-srv .card-body{ display:flex; flex-direction:column; gap:var(--sp-3); }
+.sc-dtl-srvstate{ gap:var(--sp-3); flex-wrap:wrap; align-items:baseline; }
+.sc-dtl-c-srv .sc-dtl-nstate{ margin-top:0; }
+.sc-dtl-hwline{ font-size:var(--fs-13); }
+.sc-dtl-pcrows{ display:grid; grid-template-columns:auto 1fr; gap:3px 12px; font-size:var(--fs-13); }
+.sc-dtl-pcv{ text-align:right; word-break:break-all; }
+.sc-dtl-srvbars{ display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4); padding-top:12px; border-top:1px solid var(--line); }
+.sc-dtl-c-bmc .card-body{ display:flex; flex-direction:column; gap:8px; align-items:flex-start; }
+.sc-dtl-bmcip{ font-size:var(--fs-13); font-weight:700; }
+.sc-dtl-bmcdesc{ font-size:var(--fs-12); }
+.sc-dtl-c-bmc .btn{ margin-top:var(--sp-2); }
+
+/* ── Printer ──────────────────────────────────────────────── */
+.sc-dtl-c-printer .card-body{ display:flex; flex-direction:column; gap:12px; }
+.sc-dtl-prinfo{ gap:18px; flex-wrap:wrap; font-size:var(--fs-13); padding-top:8px; border-top:1px solid var(--line); }
+.sc-dtl-prerrs{ gap:8px; flex-wrap:wrap; }
+
+/* ── PLC 카드 ─────────────────────────────────────────────── */
+.sc-dtl-plcrun{ font-size:var(--kpi); font-weight:700; letter-spacing:-.03em; line-height:1; font-variant-numeric:tabular-nums; }
+.sc-dtl-plcsub{ font-size:var(--fs-12); margin-top:7px; margin-bottom:6px; }
+.sc-dtl-c-plcmain .card-body{ display:flex; flex-direction:column; gap:var(--sp-3); }
+.sc-dtl-c-plcclock.is-warnbg,
+.sc-dtl-c-plcsd.is-warnbg{ background:var(--surface); border-color:rgba(var(--warn-rgb),.3); }
+.sc-dtl-plcclock{ font-size:var(--fs-13); }
+.sc-dtl-vargrid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:12px; }
+/* PLC 변수 타일 — 유틸 인셋(--line2) */
+.sc-dtl-var{ background:var(--line2); border-radius:var(--r-md); padding:11px 13px; min-width:0; }
+.sc-dtl-varlab{ font-size:var(--fs-12); margin-bottom:4px; display:flex; align-items:baseline; gap:8px; min-width:0; }
+.sc-dtl-varname{ font-size:var(--fs-12); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sc-dtl-varval{ font-size:var(--fs-16); font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+.sc-dtl-varunit{ font-size:var(--fs-12); margin-left:4px; }
+
+/* ── 반응형(최소 1280px 셸 기준의 축약) ───────────────────── */
+@media (max-width:1439px){
+  .sc-dtl{ padding:var(--sp-5) var(--sp-5) var(--sp-7); }
+  .sc-dtl-tiles{ gap:var(--sp-3); }
+  .sc-dtl-linkcol{ width:64px; }
+}
+@media (max-width:1279px){
+  .sc-dtl-tiles{ grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .sc-dtl-g2,.sc-dtl-g11{ grid-template-columns:minmax(0,1fr); }
+  .sc-dtl-licgrid{ grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (max-width:560px){
+  .sc-dtl-pair{ flex-direction:column; gap:var(--sp-2); }
+  .sc-dtl-linkcol{ width:auto; height:48px; flex-shrink:0; }
+  .sc-dtl-linkline{ top:50%; left:16px; right:16px; }
+  .sc-dtl-linkdot{ width:32px; height:32px; }
+  .sc-dtl-linklab{ top:calc(50% + 20px); }
+}
+
+/* ── 프린터 토너 게이지 — 토너 실색(CMYK) 채움. 임계 신호(is-warn/is-neg)가 우선. ── */
+.sc-dtl-toner--c .sc-dtl-bar-fill:not(.is-warn):not(.is-neg){ background:var(--teal); }
+.sc-dtl-toner--m .sc-dtl-bar-fill:not(.is-warn):not(.is-neg){ background:var(--purple); }
+.sc-dtl-toner--y .sc-dtl-bar-fill:not(.is-warn):not(.is-neg){ background:var(--warn-bright); }
+/* 블랙 토너는 잉크 토큰(--ink) — 라이트 진회흑/다크 밝은 잉크 자동 반전.
+   (--ink-fill 은 TDS 개편으로 토스 블루가 됐다 — K 토너에 쓰면 파랑이 되므로 금지.) */
+.sc-dtl-toner--k .sc-dtl-bar-fill:not(.is-warn):not(.is-neg){ background:var(--ink); }
+
+/* 틴트 히어로 블록 위에서는 --muted 가 4.24 로 AA 미달이었다(합성 배경 기준 실측).
+   틴트가 배경을 밝혀 대비가 깎이므로 이 스코프 안에서만 한 단 진한 --ink2 를 쓴다. */
+.sc-dtl-hero .u-muted,
+.sc-dtl-hero .sc-dtl-heros{ color:var(--ink2); }
+
+/* VM 보호 상실 배지 — 보호 '방식'(FT/HA) 배지와 나란히 놓되, 이건 '지금 깨졌다'는 상태다.
+   톤만으로 구분하면 색맹·빠른 스캔에서 놓치므로 어느 다리가 끊겼는지 문자로 쓴다. */
+.sc-dtl-vmprot{ font-size:var(--fs-11); font-weight:var(--fw-bold); letter-spacing:.01em; }
+
+/* 장비 메모(인수인계) 카드 */
+.sc-dtl-notes .sc-dtl-notehead{ display:flex; align-items:baseline; justify-content:space-between; gap:var(--sp-3); margin-bottom:var(--sp-2); }
+.sc-dtl-notemeta{ font-size:var(--fs-12); }
+.sc-dtl-noteta{ width:100%; box-sizing:border-box; resize:vertical; min-height:64px;
+  border:1px solid var(--line); border-radius:var(--r-md); padding:10px 12px;
+  font:inherit; font-size:var(--fs-13); color:var(--ink); background:var(--surface); }
+.sc-dtl-noteta:focus{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(var(--accent-rgb),.14); }
+.sc-dtl-noteactions{ display:flex; gap:var(--sp-2); justify-content:flex-end; margin-top:var(--sp-2); }
+
+/* EnduranceCard (END) — ztC Endurance 단일 2U 섀시 구성 */
+.sc-dtl-endu-roles{ display:grid; gap:6px; }
+.sc-dtl-endu-role{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.sc-dtl-endu-rd{ font-size:var(--fs-13); }
+.sc-dtl-endu-sect{ font-size:var(--fs-13); font-weight:var(--fw-semi); color:var(--ink2); margin:14px 0 6px; }
+.sc-dtl-endu-ips{ display:grid; }
+.sc-dtl-endu-ip{ display:grid; grid-template-columns:150px 56px 1fr auto; gap:8px; align-items:center; padding:5px 4px; border-bottom:1px solid var(--line2); }
+.sc-dtl-endu-ip:last-child{ border-bottom:0; }
+.sc-dtl-endu-g{ font-size:var(--fs-13); font-weight:var(--fw-semi); }
+.sc-dtl-endu-a{ font-size:var(--fs-13); }
+.sc-dtl-endu-s{ gap:6px; }
+.sc-dtl-endu-sum{ margin-top:6px; font-size:var(--fs-12); }
+.sc-dtl-endu-subs{ display:grid; gap:2px; }
+.sc-dtl-endu-sub{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:4px; }
+.sc-dtl-endu-sub .sc-dtl-endu-g{ min-width:110px; }
+.sc-dtl-endu-foot{ margin-top:10px; font-size:var(--fs-12); }
+@media (max-width:560px){
+  .sc-dtl-endu-ip{ grid-template-columns:1fr auto; }
+  .sc-dtl-endu-ip .u-mono:not(.sc-dtl-endu-a){ display:none; }
+}

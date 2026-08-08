@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<avance>
+  <alert>
+    <name>Node rebooted unexpectedly</name>
+    <id>alert:11728</id>
+    <time>2026-07-14 16:02:24</time>
+    <description>Node node0 rebooted unexpectedly</description>
+    <severity>0</severity>
+  </alert>
+  <alert>
+    <name>Node Unreachable</name>
+    <id>alert:11800</id>
+    <time>2026-07-20 09:00:00</time>
+    <description>Node node1 is unreachable</description>
+    <severity>1</severity>
+  </alert>
+  <alert>
+    <name>unit_tooFew10GSyncLinks</name>
+    <id>alert:11750</id>
+    <time>2026-07-19 12:00:00</time>
+    <description>Unit has too few 10G sync links</description>
+    <severity>2</severity>
+  </alert>
+</avance>

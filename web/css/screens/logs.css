@@ -1,0 +1,217 @@
+/* ============================================================
+   css/screens/logs.css — S6 경보·로그 화면의 로그 뷰 공용 콘솔 스타일 (sc-log-*)
+   독립 'logs' 화면은 incidents 로 통합돼, 이 파일은 incidents.js 의 로그 뷰
+   (검색·Live/Pause·콘솔 tail·행)에만 공급된다. 공용 클래스(styles.css) 재정의 금지.
+   TDS 리스킨(DESIGN-TOKENS.md 계약): 서피스는 --surface-grad(grey50 상한 — 순백 금지),
+   강조는 인디고/민트 상태색 + 투명 틴트. 다크 필은 쓰지 않는다(primary CTA/활성 세그먼트 없음).
+   mono 는 로그 원문 tail(.sc-log-row) 단 한 곳만 허용(단일 패밀리 원칙).
+   ============================================================ */
+
+/* Live/Pause 토글 — 인터랙션 상태는 브랜드 블루, 실제 스트림 상태는 콘솔의 상태 도트로 전달 */
+.sc-log-live-btn{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  /* 인터랙티브 컨트롤은 블루(모노블루 재심사 반영) — '라이브' 상태 신호는 내부 그린 펄스 도트가 담당. */
+  border:1px solid rgba(var(--accent-rgb),.28);
+  background:rgba(var(--accent-rgb),.08);
+  border-radius:var(--r-pill);
+  padding:9px 16px;
+  font-size:var(--fs-12);
+  font-weight:700;
+  color:var(--accent-deep);
+  cursor:pointer;
+  flex-shrink:0;
+  transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease);
+}
+.sc-log-live-btn:hover{ background:rgba(var(--accent-rgb),.14); border-color:rgba(var(--accent-rgb),.42); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-log-live-btn:active{ filter:brightness(.96); }
+.sc-log-live-btn.is-paused{
+  border-color:var(--line);
+  background:var(--surface-2);
+  color:var(--ink2);
+}
+.sc-log-live-btn.is-paused:hover{ background:var(--accent-soft); border-color:var(--accent); color:var(--accent-deep); }
+.sc-log-live-ico{ display:inline-flex; align-items:center; }
+
+.sc-log-search{
+  flex:1;
+  min-width:220px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  height:38px;
+  padding:0 13px;
+  border:1px solid var(--line);
+  border-radius:var(--r-md);
+  background:var(--surface);
+  transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease);
+}
+.sc-log-search:focus-within{
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px rgba(var(--accent-rgb),.14);
+}
+.sc-log-search-input{
+  flex:1;
+  min-width:0;
+  border:0;
+  background:transparent;
+  outline:none;
+  font:inherit;
+  font-size:var(--fs-12);
+  color:var(--ink);
+}
+.sc-log-search-input::placeholder{ color:var(--muted); }
+.sc-log-search-clear{
+  flex-shrink:0;
+  width:18px;
+  height:18px;
+  border-radius:50%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--muted);
+  font-size:var(--fs-13);
+  line-height:1;
+  cursor:pointer;
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.sc-log-search-clear:hover{ background:var(--line2); color:var(--ink2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-log-search-clear:active{ filter:brightness(.96); }
+
+/* ── 콘솔 패널: 카드보다 한 단계 깊은 캔버스 역할을 모든 테마에서 단일 규칙으로 사용 ── */
+.sc-log-console{
+  background:var(--canvas);
+  border:1px solid var(--line);
+  border-radius:var(--r-xl);
+  box-shadow:none;
+  padding:18px 20px 20px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  min-width:0;
+}
+
+.sc-log-console-head{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding-bottom:12px;
+  border-bottom:1px solid var(--line);
+  flex-shrink:0;
+}
+.sc-log-live-dot{
+  width:8px;
+  height:8px;
+  border-radius:50%;
+  background:var(--pos-bright);
+  flex-shrink:0;
+}
+.sc-log-live-dot.is-live{ animation:pulse var(--dur-pulse) infinite; }
+.sc-log-live-dot.is-paused{ background:var(--muted); animation:none; }
+.sc-log-status{
+  font-size:var(--fs-12);
+  font-weight:700;
+  color:var(--muted);
+}
+.sc-log-count{
+  margin-left:auto;
+  font-size:var(--fs-12);
+  font-weight:700;
+  color:var(--ink2);
+  background:var(--line2);
+  border-radius:var(--r-pill);
+  padding:3px 9px;
+}
+
+.sc-log-list{
+  display:flex;
+  flex-direction:column;
+  gap:1px;
+  max-height:560px;
+  overflow-y:auto;
+  font-size:var(--fs-12);
+  line-height:1.7;
+}
+.sc-log-row{
+  display:flex;
+  align-items:baseline;
+  gap:16px;
+  padding:4px 8px;
+  border-radius:var(--r-xs);
+  white-space:nowrap;
+  cursor:pointer;
+  /* 로그 원문 tail 은 콘솔 유일의 모노스페이스 허용 구역(재심사 반영 — 그 외 전부 본문 패밀리+tabular). */
+  font-family:var(--font-mono);
+  transition:background var(--dur) var(--ease);
+}
+.sc-log-row:hover{ background:var(--surface-2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-log-row:active{ filter:brightness(.96); }
+/* 키보드 포커스 링(#32 — role=button 화된 로그 행) — nodes/clusters 카드와 같은 링 규약.
+   styles.css 의 전역 ::focus-visible 과 같은 값이지만, 행 단위 명시로 회귀를 막는다. */
+.sc-log-row:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+.sc-log-live-btn:focus-visible,.sc-log-search-clear:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+.sc-log-row.is-trap .sc-log-msg{ color:var(--ink2); }
+.sc-log-time{
+  flex-shrink:0;
+  width:84px;
+  color:var(--muted);
+}
+.sc-log-host{
+  flex-shrink:0;
+  /* G29: 150px 은 'ztC Edge · 172.30.1.70'(mono)이 여유 0 으로 딱 맞아 1x/광폭 폰트에서
+     4px 넘쳐 말단 옥텟이 잘렸다. +12px 로 여유폭>8% 확보(광폭 mono 흡수). */
+  width:162px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  color:var(--ink2);
+}
+.sc-log-level{
+  flex-shrink:0;
+  width:62px;
+  font-weight:700;
+  letter-spacing:.03em;
+}
+/* ERROR 레벨: 밀도 높은 tail 에서 red 텍스트 반복이 유일한 노이즈원이었다 — red 는 앞 도트(형태토큰)로
+   옮기고 텍스트는 중립. 레벨은 색이 아니라 형태(도트)+텍스트로 구분(WARN/INFO 는 이미 중립). */
+.sc-log-level.is-neg{ color:var(--ink2); }
+.sc-log-level.is-neg::before{
+  content:''; display:inline-block; width:6px; height:6px; border-radius:50%;
+  background:var(--neg); margin-right:6px; vertical-align:1px;
+}
+/* WARN 도 동일 형태 채널(앰버 도트) — ERROR 만 도트가 있어 좌측 레일 심각도 스캔이 끊기던 것 보완(심사 반영). */
+.sc-log-level.is-warn{ color:var(--ink2); }
+.sc-log-level.is-warn::before{
+  content:''; display:inline-block; width:6px; height:6px; border-radius:50%;
+  background:var(--warn-bright); margin-right:6px; vertical-align:1px;
+}
+.sc-log-msg{
+  flex:1;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  color:var(--ink);
+}
+
+.sc-log-empty{ padding:40px 20px; }
+
+/* ── 반응형 ── */
+@media (max-width:1439px){
+  .sc-log-host{ width:122px; }
+}
+/* 390px 프로브 실측: 고정폭 컬럼(time 84+host 122+level 62+gap 16×3)이 msg 만 줄어드는 flex 에서
+   행 총폭 > 콘텐츠 폭 → level 우측 이탈. 터미널 tail 관례대로 콘솔 가로 스크롤로 해소. */
+@media (max-width:767px){
+  .sc-log-console{ overflow-x:auto; }
+  .sc-log-row{ width:max-content; min-width:100%; }
+  .sc-log-host{ width:90px; }
+}

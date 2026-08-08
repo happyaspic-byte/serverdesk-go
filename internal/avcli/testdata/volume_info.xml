@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<avance>
+  <volume>
+    <name>winsrv_2022_en_EVAL_01_boot</name>
+    <id>volume:o891</id>
+    <size>50 GiB</size>
+    <sector-size>512 B</sector-size>
+    <bootable>true</bootable>
+    <storage-group>
+      <name>StorageGroup1</name>
+      <id>storagegroup:o96</id>
+    </storage-group>
+  </volume>
+  <volume>
+    <name>en-us_windows_server_2022_EVAL</name>
+    <id>volume:o774</id>
+    <size>6 GiB</size>
+    <bootable>false</bootable>
+    <storage-group>
+      <name>StorageGroup1</name>
+      <id>storagegroup:o96</id>
+    </storage-group>
+  </volume>
+</avance>

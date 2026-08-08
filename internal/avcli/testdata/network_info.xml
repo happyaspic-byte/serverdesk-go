@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<avance>
+  <shared-network>
+    <name>priv0</name>
+    <id>sharednetwork:o88</id>
+    <fault-tolerant>ft</fault-tolerant>
+    <role>a-link</role>
+    <bandwidth>1 Gb/s</bandwidth>
+    <mtu>9000</mtu>
+  </shared-network>
+  <shared-network>
+    <name>net_82</name>
+    <id>sharednetwork:o467</id>
+    <fault-tolerant>ft</fault-tolerant>
+    <role>a-link</role>
+    <bandwidth>1 Gb/s</bandwidth>
+    <mtu>9000</mtu>
+  </shared-network>
+  <shared-network>
+    <name>network0</name>
+    <id>sharednetwork:o87</id>
+    <fault-tolerant>ft</fault-tolerant>
+    <role>business</role>
+    <bandwidth>1 Gb/s</bandwidth>
+    <mtu>1500</mtu>
+  </shared-network>
+</avance>

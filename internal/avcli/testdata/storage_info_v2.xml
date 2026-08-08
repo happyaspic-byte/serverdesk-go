@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<avance>
+  <storage-group>
+    <name>StorageGroup1</name>
+    <id>storagegroup:o96</id>
+    <description>main pool</description>
+    <size>100 GiB</size>
+    <size-used>85.5 GiB</size-used>
+    <logical-sector-size>512 B</logical-sector-size>
+    <physical-sector-size>512 B</physical-sector-size>
+    <disk-type>512n</disk-type>
+    <disks>
+      <disk>
+        <name>Logical Disk - 0</name>
+        <id>disk:o50</id>
+        <size>100 GiB</size>
+        <used-size>85.5 GiB</used-size>
+        <standing-state>normal</standing-state>
+        <node>node0</node>
+      </disk>
+      <disk>
+        <name>Logical Disk - 0</name>
+        <id>disk:o1084</id>
+        <size>100 GiB</size>
+        <used-size>85.5 GiB</used-size>
+        <standing-state>broken</standing-state>
+        <node>node1</node>
+      </disk>
+    </disks>
+    <volumes>
+      <volume>
+        <name>root</name>
+        <size>10 GiB</size>
+        <volume-sector-size>512 B</volume-sector-size>
+      </volume>
+      <volume>
+        <name>shared.fs</name>
+        <size>5 GiB</size>
+        <volume-sector-size>512 B</volume-sector-size>
+      </volume>
+    </volumes>
+  </storage-group>
+</avance>

@@ -1,0 +1,60 @@
+{
+  "_comment": "테스트 픽스처 — 가짜 자격증명만 사용한다(실제 비밀 없음).",
+
+  "listen": "0.0.0.0:9890",
+  "avcli_timeout": 45,
+  "snmp_enabled": false,
+  "snmp_community": "fake-community",
+
+  "trap_port": 162,
+  "trap_community": "fake-trap-community",
+
+  "intervals": { "fast": 30 },
+
+  "clusters": [
+    {
+      "key": "everrun",
+      "name": "everRun 8.1",
+      "mgmt_ip": "10.0.0.10",
+      "admin_user": "admin",
+      "admin_password": "fake-admin-password-1",
+      "node_root_password": "fake-node-root-password-1",
+      "tz_offset_secs": 32400,
+      "site": "본사",
+      "company": "가짜사",
+      "factory": "1공장",
+      "_cluster_note": "재작성 후에도 살아있어야 할 미지의 키",
+      "nic_network_map": {
+        "node0": { "ibiz0": "network0" },
+        "node1": { "ibiz0": "network0" }
+      },
+      "intervals": { "slow": 600 },
+      "nodes": [
+        { "name": "node0", "ip": "10.0.0.11", "root_user": "root", "root_password": "fake-node0-password" },
+        { "name": "node1", "ip": "10.0.0.12", "ssh_user": "root", "root_password": "fake-node1-password" }
+      ]
+    },
+    {
+      "key": "ztcedge",
+      "mgmt_ip": "10.0.0.70",
+      "admin_password": "fake-edge-admin-pw",
+      "snmp_enabled": true,
+      "platform": "ztcedge"
+    }
+  ],
+
+  "edge_devices": [
+    { "key": "printer-1", "kind": "printer", "name": "복합기", "ip": "10.0.0.113",
+      "community": "public", "web_user": "admin", "web_password": "fake-printer-web-pw",
+      "vendor": "Samsung", "_note": "모르는 키는 무시" },
+    { "key": "nas-1", "kind": "nas", "name": "백업 NAS", "ip": "10.0.0.99",
+      "community": "fake-nas-community", "extra_ips": ["10.0.0.98"] },
+    { "key": "plc-1", "kind": "plc", "name": "라인 PLC", "ip": "192.168.250.1",
+      "fins_port": 9600, "fins_src_node": 84 },
+    { "key": "pve-1", "kind": "proxmox", "name": "Proxmox node1", "ip": "10.0.0.21",
+      "user": "root@pam", "password": "fake-pve-password" },
+    { "key": "srv-1", "type": "server", "name": "HPE DL380", "ip": "10.0.0.31",
+      "community": "public", "bmc_ip": "10.0.0.131", "bmc_user": "Administrator",
+      "bmc_password": "fake-bmc-password", "vendor": "HPE" }
+  ]
+}

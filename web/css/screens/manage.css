@@ -1,0 +1,276 @@
+/* =============================================================================
+ * css/screens/manage.css — 장비 관리(Manage) 전용 스타일 · Robodog 리스킨
+ * 접두사 sc-mng- 만 정의한다. 공용 클래스(card/btn/field-/modal-/u-*)는 재사용만.
+ * 색은 전부 var(--*) 토큰 경유 — 하드코딩 hex·다크 필 금지. 틴트는 rgba(var(--x-rgb),α).
+ * 방향: 쿨그레이 서피스 계층 · 절제된 경계 · 인터랙션 블루 · 실제 상태 민트/앰버.
+ * ========================================================================== */
+
+.sc-mng{ display:flex; flex-direction:column; gap:var(--sp-4); padding:var(--page-pad); max-width:var(--page-max); width:100%; margin:0 auto; box-sizing:border-box; min-height:100%; }
+
+/* ── 헤더 ─────────────────────────────────────────────────────────────── */
+.sc-mng-head{ display:flex; align-items:flex-end; gap:var(--sp-4); flex-wrap:wrap; }
+.sc-mng-h1{ font-size:var(--h1); font-weight:var(--fw-bold); letter-spacing:-.02em; color:var(--ink); line-height:1.2; }
+.sc-mng-sub{ font-size:var(--fs-12); font-weight:var(--fw-semi); color:var(--muted); margin-top:5px; }
+.sc-mng-plus{ font-size:var(--fs-16); font-weight:var(--fw-bold); line-height:1; }
+.sc-mng-banner{ border:1px solid rgba(var(--neg-rgb),.28); border-radius:var(--r-md); }
+
+/* ── 트리 ─────────────────────────────────────────────────────────────── */
+.sc-mng-tree{
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r-xl);
+  padding:var(--sp-3);
+  display:flex; flex-direction:column; gap:var(--sp-2); min-width:0;
+}
+
+.sc-mng-caret{ display:flex; color:var(--muted); flex-shrink:0; transition:transform var(--dur) var(--ease); }
+.sc-mng-co.is-collapsed > .sc-mng-co-head > .sc-mng-caret,
+.sc-mng-fa.is-collapsed > .sc-mng-fa-head > .sc-mng-caret{ transform:rotate(-90deg); }
+
+/* 회사 그룹 */
+.sc-mng-co{ border-radius:var(--r-lg); }
+.sc-mng-co-head{
+  display:flex; align-items:center; gap:var(--sp-2); padding:10px var(--sp-3);
+  border-radius:var(--r-md); cursor:pointer; user-select:none;
+  transition:background var(--dur) var(--ease);
+}
+.sc-mng-co-head:hover{ background:var(--line2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-mng-co-head:active{ filter:brightness(.93); }
+.sc-mng-co-ico{ display:flex; color:var(--ink2); flex-shrink:0; }
+.sc-mng-co-name{ font-size:var(--fs-13); font-weight:var(--fw-bold); letter-spacing:-.01em; }
+.sc-mng-co-body{ display:flex; flex-direction:column; gap:var(--sp-2); padding:2px 0 var(--sp-2); }
+
+/* 공장 그룹 (인셋 필 헤더의 중첩 패널) */
+.sc-mng-fa{ border:1px solid var(--line); border-radius:var(--r-lg); overflow:hidden; margin-left:var(--sp-4); }
+/* 회사가 1개뿐이라 회사 헤더를 접었을 때 — 공장 헤더가 최상위로 승격되므로 들여쓰기 제거. */
+.sc-mng-fa--top{ margin-left:0; }
+.sc-mng-fa-head{
+  display:flex; align-items:center; gap:var(--sp-2); padding:var(--sp-2) var(--sp-3);
+  background:var(--line2); cursor:pointer; user-select:none;
+  transition:background var(--dur) var(--ease);
+}
+.sc-mng-fa-head:hover{ background:var(--line); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-mng-fa-head:active{ filter:brightness(.93); }
+.sc-mng-fa-ico{ display:flex; color:var(--muted); flex-shrink:0; }
+.sc-mng-fa-name{ font-size:var(--fs-12); font-weight:var(--fw-bold); color:var(--ink2); }
+.sc-mng-fa-body{ display:flex; flex-direction:column; }
+
+/* ── 장비 행 ──────────────────────────────────────────────────────────── */
+.sc-mng-row{
+  display:flex; align-items:center; gap:var(--sp-3); padding:10px var(--sp-4);
+  border-top:1px solid var(--line); cursor:pointer; background:transparent; min-width:0;
+  transition:background var(--dur) var(--ease);
+}
+.sc-mng-row:hover{ background:var(--line2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-mng-row:active{ filter:brightness(.93); }
+
+.sc-mng-mark{
+  position:relative; width:32px; height:32px; flex-shrink:0; border-radius:var(--r-sm);
+  background:var(--line2); border:1px solid var(--line);
+  display:flex; align-items:center; justify-content:center; color:var(--ink2);
+}
+/* 상태는 우측 텍스트(sc-mng-stat)와 아이콘 코너 도트로 이중 표기. (주석 미종결로 아래
+   기본 규칙이 통째로 죽어 있던 버그 수정 — 2026-07-23) */
+.sc-mng-mark-dot{
+  position:absolute; right:-3px; bottom:-3px; width:10px; height:10px; border-radius:50%;
+  background:var(--muted); border:2px solid var(--surface);
+}
+/* 순수 상태 도트 → bright 팝(민트/앰버/red). 상태는 색+행 라벨(sc-mng-stat)로 relief 충족.
+   애니 절제(minor#6): 장치 상태 도트·그룹헤더 도트 전부 정적 — 모션은 라이브 인디케이터 1개(레일)에만. */
+.sc-mng-mark-dot.is-pos{ background:var(--pos-bright); }
+.sc-mng-mark-dot.is-warn{ background:var(--warn-bright); }
+.sc-mng-mark-dot.is-neg{ background:var(--neg); }
+/* 회사/공장 그룹헤더의 공용 .u-dot(styles.css 무한 pulse/blink)도 이 화면에선 정지. */
+.sc-mng .u-dot.is-warn,
+.sc-mng .u-dot.is-neg{ animation:none; }
+
+.sc-mng-idb{ flex:1; min-width:0; display:flex; align-items:baseline; gap:var(--sp-2); flex-wrap:wrap; }
+.sc-mng-name{ font-size:var(--fs-12); font-weight:var(--fw-bold); }
+/* 플랫폼·관리 IP(예: 'ztC Edge · 10.21.11.22')는 관리자가 스캔하는 '기능적 식별자'다 —
+   장식 힌트(--muted 3.2:1, WCAG AA 미달)가 아니라 보조 텍스트(--ink2 6.6:1)로 올려 대비를 확보한다.
+   (--muted 전역은 그대로 두고 이 식별자 메타만 --ink2 로 승격.) */
+.sc-mng-meta{ font-size:var(--fs-12); color:var(--ink2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* 상태 뱃지 — 공용 .u-badge + .is-* 매핑(저하=앰버) 그대로 사용. 여기선 정렬만 담당. */
+.sc-mng-stat{ flex-shrink:0; white-space:nowrap; }
+
+.sc-mng-acts{ display:flex; gap:var(--sp-1); flex-shrink:0; }
+.sc-mng-act{
+  width:28px; height:28px; border-radius:var(--r-sm); display:flex; align-items:center; justify-content:center;
+  border:1px solid var(--line); background:transparent; color:var(--ink2); flex-shrink:0;
+  transition:border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.sc-mng-act:hover{ border-color:var(--accent); background:var(--accent-soft); color:var(--accent-deep); }
+.sc-mng-act--del:hover{ border-color:var(--accent); background:var(--accent-soft); color:var(--accent-deep); }
+
+/* ── 장비 관리 카드 ──────────────────────────────────────────────────── */
+.sc-mng-tree--cards{ background:transparent; border:0; box-shadow:none; padding:0; gap:0;
+  flex:1 1 auto; display:flex; flex-direction:column; justify-content:center; }
+/* 다수(트리) 모드에선 정상 흐름 유지 — 위 flex 중앙정렬을 쓰지 않는다. */
+.sc-mng-cards{ display:grid; grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr)); gap:var(--sp-4); }
+
+.sc-mng-card{
+  display:flex; flex-direction:column; gap:var(--sp-4); min-width:0; cursor:pointer;
+  padding:var(--sp-5); border:1px solid var(--line); border-radius:var(--r-lg);
+  background:var(--surface);
+  transition:border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.sc-mng-card:hover{ border-color:var(--accent); background:var(--surface-2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-mng-card:active{ filter:brightness(.93); }
+
+.sc-mng-card-top{ display:flex; align-items:flex-start; gap:var(--sp-3); }
+.sc-mng-card-top .sc-mng-idb{ flex:1; flex-direction:column; align-items:flex-start; gap:3px; }
+.sc-mng-card-top .sc-mng-name{ font-size:var(--fs-13); }
+.sc-mng-card-top .sc-mng-stat{ width:auto; text-align:right; padding-top:1px; }
+
+.sc-mng-card-metrics{ display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4) var(--sp-4); }
+/* 관리 메타(가동시간·VM·가용성·동기화) 라벨/값 페어 — 실시간 CPU/MEM 은 넣지 않는다(중복 회피). */
+.sc-mng-mv{ display:flex; flex-direction:column; gap:3px; min-width:0; }
+.sc-mng-mv-lab{ font-size:var(--fs-12); font-weight:var(--fw-bold); letter-spacing:.03em; }
+.sc-mng-mv-val{ font-size:var(--fs-13); font-weight:var(--fw-bold); letter-spacing:-.01em; font-variant-numeric:tabular-nums; }
+
+.sc-mng-card-foot{
+  display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+  padding-top:var(--sp-3); border-top:1px dashed var(--line);
+  font-size:var(--fs-12); color:var(--muted);
+}
+.sc-mng-card-acts{ margin-left:auto; }
+.sc-mng-chip{ display:inline-flex; align-items:center; }
+.sc-mng-chip.is-pos{ color:var(--pos-on-tint); font-weight:var(--fw-bold); }
+.sc-mng-chip.is-warn{ color:var(--warn-on-tint); font-weight:var(--fw-bold); }
+.sc-mng-chip.is-neg{ color:var(--neg-on-tint); font-weight:var(--fw-bold); }
+
+/* ── 모달 공통 ────────────────────────────────────────────────────────── */
+.sc-mng-modal{ max-height:90vh; }
+.sc-mng-hint{ font-size:var(--fs-12); color:var(--muted); line-height:1.5; }
+.sc-mng-err{
+  padding:9px var(--sp-3); border-radius:var(--r-md); font-size:var(--fs-12); font-weight:var(--fw-bold);
+  background:var(--status-neg-tint); border:1px solid rgba(var(--neg-rgb),.28); color:var(--neg-on-tint);
+}
+.sc-mng-note{
+  padding:11px 13px; border-radius:var(--r-md); font-size:var(--fs-12); color:var(--ink2);
+  background:var(--surface-2); border:1px solid var(--line);
+}
+.sc-mng-secttl{
+  font-size:var(--fs-12); font-weight:var(--fw-bold); color:var(--muted);
+  text-transform:uppercase; letter-spacing:.05em;
+}
+
+.sc-mng-grid{ display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-4); align-items:start; }
+.sc-mng-full{ grid-column:1 / -1; }
+
+/* ── 위저드 스텝 바 (원형/라인은 공용 .modal-step*, 여기선 라벨·완료라인 색만) ── */
+.sc-mng-steps{ width:100%; }
+.sc-mng-step{ display:flex; align-items:center; gap:7px; background:none; border:0; padding:0; }
+.sc-mng-step:disabled{ cursor:default; }
+.sc-mng-step-lab{ font-size:var(--fs-12); font-weight:var(--fw-semi); color:var(--muted); white-space:nowrap; }
+.sc-mng-step-lab.is-cur{ font-weight:var(--fw-bold); color:var(--accent-deep); }
+.sc-mng-line-done{ background:var(--accent); }
+
+/* ── 타입 카드 (칩 그리드 · 선택=인디고 아웃라인+옅은 틴트+링) ──────────────── */
+.sc-mng-types{ display:grid; grid-template-columns:repeat(auto-fill,minmax(148px,1fr)); gap:var(--sp-3); margin-top:var(--sp-2); }
+.sc-mng-type{
+  display:flex; align-items:center; gap:var(--sp-3); padding:11px var(--sp-3); text-align:left;
+  border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); min-width:0;
+  transition:border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.sc-mng-type:hover{ border-color:var(--accent); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-mng-type:active{ filter:brightness(.93); }
+.sc-mng-type.is-sel{
+  border-color:var(--accent); background:var(--accent-soft);
+}
+.sc-mng-type-ico{
+  width:30px; height:30px; flex-shrink:0; border-radius:var(--r-sm);
+  display:flex; align-items:center; justify-content:center;
+  background:var(--line2); border:1px solid var(--line); color:var(--ink2);
+  transition:background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.sc-mng-type.is-sel .sc-mng-type-ico,
+.sc-mng-type-ico.is-sel{ background:var(--accent-deep); border-color:var(--accent-deep); color:var(--accent-ink); }
+.sc-mng-type-lab{ font-size:var(--fs-12); font-weight:var(--fw-bold); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+.sc-mng-typechip{
+  display:inline-flex; align-items:center; gap:var(--sp-2); padding:5px var(--sp-3) 5px 5px;
+  border-radius:var(--r-md); background:var(--line2); border:1px solid var(--line);
+  font-size:var(--fs-12); font-weight:var(--fw-bold);
+}
+
+/* ── 필드 보조 ────────────────────────────────────────────────────────── */
+.sc-mng-req,.sc-mng-opt{ margin-left:6px; font-size:var(--fs-12); font-weight:var(--fw-bold); }
+.sc-mng-req{ color:var(--accent-deep); }
+.sc-mng-opt{ color:var(--muted); }
+.sc-mng-keep{
+  border:1px solid var(--line); border-radius:var(--r-md); padding:9px var(--sp-3);
+  background:var(--surface-2); color:var(--ink2); font-size:var(--fs-12);
+  white-space:nowrap; overflow:hidden;
+}
+
+.sc-mng-nodes{ display:flex; flex-direction:column; gap:var(--sp-2); }
+.sc-mng-node{
+  display:grid; grid-template-columns:1.2fr 1fr 1.4fr; gap:10px;
+  padding:10px var(--sp-3); background:var(--surface-2); border-radius:var(--r-md);
+}
+
+.sc-mng-vmrow{ display:grid; grid-template-columns:1fr 1fr auto; gap:var(--sp-2); margin-bottom:6px; }
+.sc-mng-vmadd{ margin-top:2px; }
+
+/* ── ④ 확인 요약 ─────────────────────────────────────────────────────── */
+.sc-mng-summary{
+  display:grid; grid-template-columns:auto 1fr; gap:var(--sp-2) var(--sp-4); align-items:center;
+  padding:14px var(--sp-4); border-radius:var(--r-lg); background:var(--surface-2); border:1px solid var(--line);
+  font-size:var(--fs-12);
+}
+.sc-mng-summary > span:nth-child(even){ font-weight:var(--fw-bold); font-variant-numeric:tabular-nums; }
+
+/* ── 연결 테스트 결과 ─────────────────────────────────────────────────── */
+.sc-mng-test{
+  display:flex; flex-direction:column; gap:8px;
+  padding:14px var(--sp-4); border-radius:var(--r-lg); background:var(--surface-2); border:1px solid var(--line);
+}
+.sc-mng-testrow{ flex-wrap:wrap; gap:7px; }
+.sc-mng-testgrid{ display:flex; flex-direction:column; gap:3px; }
+.sc-mng-testline{ display:grid; grid-template-columns:1.3fr .8fr 1fr .6fr; gap:var(--sp-2); font-size:var(--fs-12); font-variant-numeric:tabular-nums; }
+.sc-mng-warn{ font-size:var(--fs-12); color:var(--warn-on-tint); font-weight:var(--fw-bold); display:flex; flex-direction:column; gap:2px; }
+.sc-mng-modal .field-input:read-only:not(:disabled),
+.sc-mng-modal .field-select:read-only:not(:disabled),
+.sc-mng-modal .field-textarea:read-only:not(:disabled){
+  background:var(--surface-2); color:var(--ink2); cursor:default;
+}
+.sc-mng-modal .field-input:disabled,
+.sc-mng-modal .field-select:disabled,
+.sc-mng-modal .field-textarea:disabled{
+  background:var(--surface-2); color:var(--muted); cursor:not-allowed;
+}
+
+/* ── 고밀도 / 반응형 ──────────────────────────────────────────────────── */
+body.is-dense .sc-mng{ padding:var(--sp-4) var(--sp-4) var(--sp-8); gap:10px; }
+body.is-dense .sc-mng-row{ padding:6px var(--sp-3); }
+body.is-dense .sc-mng-mark{ width:26px; height:26px; border-radius:var(--r-xs); }
+
+@media (max-width:820px){
+  .sc-mng-grid{ grid-template-columns:1fr; }
+  .sc-mng-node{ grid-template-columns:1fr; }
+  /* 상태 배지(.sc-mng-stat)를 여기서 숨기지 않는다 — patchRow 가 상태를 이 배지 한 곳에만
+     진술(코너 도트는 항상 숨김)하므로, 숨기면 모바일에서 down/deg/점검 구분이 소실된다(#36). */
+  .sc-mng-cards{ grid-template-columns:1fr; }
+  .sc-mng-card-metrics{ grid-template-columns:1fr; }
+}
+
+/* 모달 섹션 제목을 h3 로 승격(스크린리더 구조) — 필요한 UA 기본값 억제는 margin 리셋뿐이다.
+   font-size·font-weight·line-height 를 inherit 으로 덮으면 클래스 규칙(:173, fs-12/700)이
+   묵력화돼 부모(body 14px/400)가 상속된다 — h3 의 UA 기본 크기·굵기는 더 구체적인
+   .sc-mng-secttl 클래스 규칙이 이미 이기므로 별도 리셋이 필요 없다(#550). */
+h3.sc-mng-secttl{ margin:0; }
+
+/* ── 행 폭 상한 ────────────────────────────────────────────────────────
+   실측 문제: 트리가 컨테이너 전폭(≈1300px)을 먹는데 내용은 왼쪽 300px 에만 있고
+   편집/삭제 버튼은 오른쪽 끝(x≈1400)에 붙어 있었다. 장비명을 읽고 버튼까지
+   1140px 를 이동해야 한다 — Fitts 법칙 정면 위반이고, 화면의 93%가 빈 공간이었다(잉크 7.2%).
+   읽기 시작점과 조작 지점을 한 시야에 두도록 폭을 묶는다. 리스트형 화면의 표준 처리다. */
+.sc-mng-tree,
+.sc-mng-head{ max-width:980px; }
+/* 헤더(제목 + '장비 추가')도 같은 폭에 묶는다 — 트리만 줄이면 주 액션이 콘텐츠와 따로 논다.
+   좌측 정렬은 유지한다. 가운데로 띄우면 레일과의 시선 흐름이 끊긴다. */

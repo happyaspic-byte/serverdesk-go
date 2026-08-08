@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<avance>
+  <image-container>
+    <name>winsrv_2022_en_EVAL_01_boot_9f8e7d6c</name>
+    <id>imagecontainer:o871</id>
+    <hasFileSystem>true</hasFileSystem>
+    <isLocal>false</isLocal>
+    <size>50 GiB</size>
+    <size-used>25 GiB</size-used>
+    <storage-group>
+      <name>StorageGroup1</name>
+      <id>storagegroup:o96</id>
+    </storage-group>
+  </image-container>
+  <image-container>
+    <name>root_11111111</name>
+    <id>imagecontainer:o900</id>
+    <hasFileSystem>true</hasFileSystem>
+    <isLocal>true</isLocal>
+    <size>10 GiB</size>
+    <size-used>2 GiB</size-used>
+    <storage-group>
+      <name>StorageGroup1</name>
+      <id>storagegroup:o96</id>
+    </storage-group>
+  </image-container>
+</avance>

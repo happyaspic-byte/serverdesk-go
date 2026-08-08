@@ -1,0 +1,159 @@
+/* ============================================================
+   css/screens/capacity.css — S4: capacity 화면 전용 스타일
+   접두사 sc-cap- 만 정의한다. 공용 클래스(card/kpi/chip/empty/u-* 등)는
+   css/styles.css(F5) 것을 그대로 재사용하며 이 파일에서 재정의하지 않는다.
+   채움색은 JS의 공용 barColor/allocFill 임계 규칙과 CSS 토큰을 사용해 테마별로 해석한다.
+   임계값(사용률) 기반 채움/글자색은 js/screens/capacity.js가 fmt.barColor(pct)로 계산해 인라인
+   background/color로 직접 칠한다(78%+=warn·90%+=neg·그 외 brand blue — 도넛·랭킹·헤드룸 공통 단일 규칙).
+   여기 CSS는 그 인라인 값이 앉을 트랙/레이아웃만 정의하고 별도 톤 클래스는 두지 않는다.
+   ============================================================ */
+
+/* ---- 레이아웃 뼈대 ---- */
+.sc-cap{
+  display:flex; flex-direction:column; gap:16px;
+  padding:var(--page-pad); max-width:var(--page-max); margin:0 auto; width:100%; box-sizing:border-box;
+}
+
+.sc-cap-head{ display:flex; align-items:flex-end; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.sc-cap-head-text{ display:flex; flex-direction:column; gap:3px; }
+.sc-cap-title{ margin:0; font-size:var(--h1); font-weight:700; letter-spacing:-.02em; color:var(--ink); line-height:1.2; }
+.sc-cap-sub{ margin:0; font-size:var(--fs-12); color:var(--muted); font-weight:600; }
+
+/* ---- 요약 카드(게이지 + KPI) ---- */
+/* 개요 화면의 자원/VM 카드와 수치가 겹치는 블록이라 의도적으로 축소:
+   게이지는 148x80(원래 174x94)으로 눌러 "앵커 참고용"으로만 두고, KPI도 이 화면 고유 지표 2종만 남긴다. */
+.sc-cap-summary-body{
+  display:flex; align-items:center; gap:24px; flex-wrap:wrap;
+}
+.sc-cap-gauge{
+  display:flex; flex-direction:column; align-items:center; gap:8px; flex-shrink:0;
+}
+.sc-cap-gauge svg{ width:148px; height:80px; display:block; }
+.sc-cap-gauge-caption{ font-size:var(--fs-12); white-space:nowrap; }
+.sc-cap-kpis{ flex:0 1 auto; min-width:200px; }
+.sc-cap-kpis .kpi{ min-width:180px; }
+/* 원격측정 커버리지 — 대형 KPI 타일에서 강등된 헤더 소형 뱃지(minor#7). */
+.sc-cap-cov{ margin-left:auto; align-self:flex-start; }
+/* G16: '플릿 합계' 서브라벨을 제목 옆(좌측)으로 도킹 — 공용 .card-sub 의 margin-left:auto 가
+   커버리지 뱃지의 auto 와 공간을 양분해 라벨이 빈 우측 공간 위 중앙에 고립돼 보였다. */
+.sc-cap-summary .card-sub{ margin-left:0; }
+/* G16: 긴장 클러스터 KPI 를 남는 우측 폭까지 늘여 카드 좌측 45% 쏠림을 해소(도넛=고정, KPI=유동). */
+.sc-cap-summary .sc-cap-kpis{ flex:1 1 auto; }
+/* 카드 안 KPI 는 인셋 surface로만 한 단계 낮춰 중첩 카드·그림자 인상을 없앤다. */
+.sc-cap-summary .sc-cap-kpis .kpi{ width:100%; box-sizing:border-box; border:0; box-shadow:none; background:var(--surface-2); }
+/* 정적 정보 패널은 명도 계층을 우선하고, 공용 카드보다 얕은 elevation만 사용한다. */
+.sc-cap-summary,
+.sc-cap-rankcard,
+.sc-cap-hdcard,
+.sc-cap-vmcard{ background:var(--surface); box-shadow:var(--elev-1); }
+
+/* ---- 2열 그리드(부하 랭킹 | 자원 헤드룸) ---- */
+.sc-cap-grid{
+  display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; align-items:start;
+}
+
+/* ---- 카드 공용 본문(랭킹/헤드룸/VM 카드가 공유) ---- */
+.sc-cap-card-body{ display:flex; flex-direction:column; min-width:0; }
+
+/* ---- 탭(CPU/MEM) — 선택은 브랜드 블루, 비선택은 공용 세그먼트 표면을 유지한다. ---- */
+.sc-cap-tabs{ flex-shrink:0; }
+.sc-cap-tabs .seg-btn.is-active{ background:var(--accent); color:var(--accent-ink); box-shadow:none; }
+
+/* ---- 랭킹 리스트 ---- */
+.sc-cap-ranklist{
+  display:flex; flex-direction:column; max-height:440px; overflow-y:auto;
+}
+.sc-cap-rank-row{
+  /* 이름 열에 1.5fr — 1280px에서 호스트명이 바 열에 밀려 잘리던 배분 교정. */
+  display:grid; grid-template-columns:18px 22px minmax(0,1.5fr) minmax(56px,1fr) 44px;
+  align-items:center; gap:var(--sp-3); padding:var(--sp-2) var(--sp-2); border-bottom:1px solid var(--line2);
+  border-radius:var(--r-sm); cursor:pointer;
+  transition:background var(--dur) var(--ease);
+}
+.sc-cap-rank-row:last-child{ border-bottom:0; }
+.sc-cap-rank-row:hover{ background:var(--surface-2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-cap-rank-row:active{ filter:brightness(.96); }
+.sc-cap-rank-num{ font-size:var(--fs-12); text-align:right; }
+.sc-cap-rank-ico{
+  width:22px; height:22px; border-radius:7px; background:var(--surface-2); color:var(--ink2);
+  display:flex; align-items:center; justify-content:center; flex-shrink:0;
+}
+/* 호스트+타입을 2행으로 쌓지 않고 한 줄로(타입 아이콘이 이미 옆에 있어 중복 라벨 무게를 줄인다). */
+.sc-cap-rank-name{ display:flex; flex-direction:row; align-items:baseline; gap:var(--sp-2); min-width:0; }
+.sc-cap-rank-host{ font-size:var(--fs-12); font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sc-cap-rank-type{ font-size:var(--fs-12); flex-shrink:0; }
+.sc-cap-rank-val{ font-size:var(--fs-12); font-weight:700; text-align:right; font-variant-numeric:tabular-nums; }
+
+/* ---- 헤드룸 리스트 ---- */
+.sc-cap-hdlist{
+  display:flex; flex-direction:column; max-height:440px; overflow-y:auto;
+}
+.sc-cap-hd-row{
+  display:flex; flex-direction:column; gap:var(--sp-2); padding:var(--sp-3); margin:0 -4px;
+  border-bottom:1px solid var(--line2); border-radius:var(--r-sm); cursor:pointer;
+  transition:background-color var(--dur) var(--ease);
+}
+.sc-cap-hd-row:last-child{ border-bottom:0; }
+.sc-cap-hd-row:hover{ background:var(--surface-2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-cap-hd-row:active{ filter:brightness(.96); }
+/* A2: 좌측 red 코너아크(.is-tight 스트라이프) 제거 — ≥90% 긴장은 바의 neg 구간이
+   동일 정보를 이미 표기하므로 긴장 신호를 바 팁으로 일원화한다(이중 인코딩 해소). */
+.sc-cap-hd-head{ display:flex; align-items:baseline; justify-content:space-between; gap:var(--sp-3); }
+.sc-cap-hd-host{ font-size:var(--fs-12); font-weight:700; }
+.sc-cap-hd-type{ font-size:var(--fs-12); flex-shrink:0; }
+
+.sc-cap-metric{ display:flex; flex-direction:column; gap:4px; }
+.sc-cap-metric-top{ display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+.sc-cap-metric-label{ font-size:var(--fs-12); font-weight:700; letter-spacing:.04em; }
+.sc-cap-metric-val{ font-size:var(--fs-12); font-weight:700; color:var(--ink2); font-variant-numeric:tabular-nums; }
+
+/* ---- VM 분포 리스트(전체 폭 카드) ---- */
+.sc-cap-vmlist{
+  display:flex; flex-direction:column; max-height:320px; overflow-y:auto;
+}
+.sc-cap-vm-row{
+  display:grid; grid-template-columns:minmax(0,1fr) minmax(80px,1fr) 58px;
+  align-items:center; gap:var(--sp-3); padding:var(--sp-2) var(--sp-2); border-bottom:1px solid var(--line2);
+  border-radius:var(--r-sm); cursor:pointer;
+  transition:background var(--dur) var(--ease);
+}
+.sc-cap-vm-row:last-child{ border-bottom:0; }
+.sc-cap-vm-row:hover{ background:var(--surface-2); }
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-cap-vm-row:active{ filter:brightness(.96); }
+/* 균일(전부 실행) 노드는 바를 접어 '이름 … 카운트' 카운트 라인으로만 둔다(변별력 없는 풀폭 바 제거, C3). */
+
+/* (is-uniform 바 접기 폐기 — 전 행 동일 트랙+채움, 재심사 반영) */
+.sc-cap-vm-name{ display:flex; flex-direction:column; gap:1px; min-width:0; }
+.sc-cap-vm-host{ font-size:var(--fs-12); font-weight:700; }
+.sc-cap-vm-node{ font-size:var(--fs-12); }
+
+/* ---- 바 트랙 + 채움(값 patch 시 트랜지션 유지 — width/색 전환) ---- */
+.sc-cap-bar{
+  position:relative; flex:1; height:6px; min-width:36px; border-radius:4px;
+  background:var(--track); overflow:hidden;
+  box-shadow:var(--inset-shadow);
+}
+/* --sm 게이지 바는 헤드룸 메트릭(flex 세로 컬럼) 안에서만 쓰인다. 베이스의 flex:1 이
+   세로 컬럼에서 basis:0 으로 높이를 0 으로 접어 바가 안 보였다 → flex:none 으로 5px 높이 확보. */
+.sc-cap-bar--sm{ height:5px; flex:none; width:100%; }
+.sc-cap-fill{
+  height:100%; width:0%; border-radius:4px; background:var(--accent);
+  transition:width var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+/* 임계색은 fmt.barColor(pct) 단일 규칙(78%+=warn·90%+=neg·그 외 brand blue)으로 JS가 인라인 background를 직접
+   칠한다(도넛·랭킹·헤드룸 전부 동일 함수 — 자체 톤 클래스 매핑 없음). 기본 채움도 중립 메트릭의
+   브랜드 블루이며, 값이 없거나 NA인 항목은 폭 0%여서 트랙만 남는다. */
+/* VM 분포 바 — 실행비율은 임계 게이지가 아니라 배치 상태: 전부 실행=블루, 부분=앰버, 전무=레드(배지 톤 동일). */
+.sc-cap-fill--vm{ background:var(--accent); }
+.sc-cap-fill--vm.is-warn{ background:var(--warn-bright); }
+.sc-cap-fill--vm.is-neg{ background:var(--neg); }
+
+/* ---- 반응형: 좁은 화면에서 2열 → 1열 ---- */
+@media (max-width:1180px){
+  .sc-cap-grid{ grid-template-columns:1fr; }
+  .sc-cap-summary-body{ flex-direction:column; align-items:flex-start; }
+  .sc-cap-kpis{ width:100%; min-width:0; }
+}

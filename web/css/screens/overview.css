@@ -1,0 +1,436 @@
+/* ============================================================
+   css/screens/overview.css — S1: 개요 화면 전용 (접두사 sc-ov- 만)
+   공용 클래스(.card·.kpi·.chip·.u-*·.is-* 등)는 재정의하지 않는다 — styles.css 단일 출처.
+   색은 전부 CSS 변수(var(--x)) 경유 · 틴트는 rgba(var(--x-rgb),α). 하드코딩 hex 금지.
+   Robodog 방향: 순백 서피스 + 아주 옅은 그림자(--shadow-*) + 넉넉한 여백(--sp-*) + 토큰 radius.
+   강조는 인디고(--accent)/민트/상태색 + 투명 틴트. 다크 필(잉크)은 공용 CTA·활성 세그먼트 전용이라
+   이 화면에서는 도입하지 않는다. status 채움(타일·스와치·도트 필)은 상태별 bright 토큰 명시 —
+   공용 .is-* 의 color(on-tint 텍스트 전용색)를 currentColor 로 필에 쓰지 않는다(DESIGN-TOKENS §1.4, #16).
+   ============================================================ */
+
+/* ------------------------------------------------------------
+   0. 페이지 레이아웃
+   ------------------------------------------------------------ */
+.sc-ov{ padding:var(--page-pad); max-width:var(--page-max); width:100%; margin:0 auto; box-sizing:border-box; display:flex; flex-direction:column; gap:var(--sp-4); }
+.sc-ov-head{ display:flex; flex-direction:column; gap:var(--sp-1); }
+.sc-ov-title{ font-size:var(--h1); font-weight:700; letter-spacing:-.02em; color:var(--ink); line-height:1.2; }
+.sc-ov-sub{ font-size:var(--fs-12); font-weight:600; color:var(--muted); }
+
+/* 세 행 모두 공통 12컬럼 그리드에 얹어 세로 정렬선을 맞춘다.
+   행 간·카드 간 gap 은 --sp-4(16px) 단일 토큰. row1/row2 는 같은 행 높이를 맞추고(stretch),
+   row3 는 장비 그리드와 사이드(경보/이벤트)의 성격이 달라 각자 높이(start). */
+.sc-ov-row1,.sc-ov-row2,.sc-ov-row3{ display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:var(--sp-4); }
+.sc-ov-row1,.sc-ov-row2{ align-items:stretch; }
+.sc-ov-row3{ align-items:start; }
+.sc-ov-row1>*:nth-child(1){ grid-column:span 3; }
+.sc-ov-row1>*:nth-child(2){ grid-column:span 6; }
+.sc-ov-row1>*:nth-child(3){ grid-column:span 3; }
+/* row2 = 자원 할당 · 라이선스 만료 · 스토리지. 스토리지는 topo.storage 있는 실장비 있을 때만 노출되므로
+   고정 grid(빈 열 발생) 대신 flex 로 카드 수(2 또는 3)에 자동 적응한다 — 숨은 카드는 flow 에서 빠지고
+   남은 카드가 균등하게 늘어난다. */
+.sc-ov-row2{ display:flex; flex-wrap:wrap; }
+.sc-ov-row2 > *{ flex:1 1 240px; min-width:0; }
+.sc-ov-row3>*:nth-child(1){ grid-column:span 8; }
+.sc-ov-row3>*:nth-child(2){ grid-column:span 4; }
+/* 최근 변동 카드 제거 후 실시간 경보(사이드)가 3행 유일 카드 → 전폭. */
+.sc-ov-row3>.sc-ov-side--full{ grid-column:span 12; }
+.sc-ov-side{ display:flex; flex-direction:column; gap:var(--sp-4); min-width:0; }
+.sc-ov-card{ gap:var(--sp-3); }
+/* 카드 변형(레이아웃 역할만 부여 — 공용 .card 규칙은 그대로 상속) */
+.sc-ov-att{ min-width:0; }
+.sc-ov-heat-card{ min-width:0; }
+.sc-ov-ft{ min-width:0; }
+.sc-ov-mini{ gap:12px; justify-content:flex-start; }
+.sc-ov-console{ gap:12px; }
+.sc-ov-hd-ic{ display:flex; align-items:center; flex-shrink:0; }
+.sc-ov-hd-right{ margin-left:auto; display:flex; align-items:center; gap:8px; }
+.sc-ov-ic-fb{ width:14px; height:14px; border-radius:50%; border:1px solid currentColor; display:inline-block; opacity:.4; }
+.sc-ov-none{ font-size:var(--fs-12); padding:6px 2px; }
+.sc-ov-foot{ text-align:center; font-size:var(--fs-12); padding-top:var(--sp-2); }
+
+/* 공통 "더 보기" 링크 */
+.sc-ov-more{ display:inline-flex; align-items:center; gap:4px; font-size:var(--fs-12); font-weight:700; color:var(--ink2); padding:4px 6px; border-radius:var(--r-xs); }
+.sc-ov-more:hover{ background:var(--line2); color:var(--accent-deep); }
+.sc-ov-more svg{ transform:rotate(-90deg); }
+
+/* 공통 얇은 바 (게이지 트랙 = --track). 채움은 순수 '필' → bright 토큰(§1.4, major#5) —
+   clusters/detail 의 사용률 바와 동일 색조로 통일한다(값 라벨 동반이라 relief 규칙 충족). */
+.sc-ov-bar{ display:block; height:4px; border-radius:3px; background:var(--track); overflow:hidden; }
+.sc-ov-bar-fill{ display:block; height:100%; border-radius:3px; background:currentColor; width:0; transition:width var(--dur) var(--ease); }
+.sc-ov-bar-fill.is-pos{ background:var(--pos-bright); }
+.sc-ov-bar-fill.is-warn{ background:var(--warn-bright); }
+.sc-ov-bar-fill.is-neg{ background:var(--neg); }
+
+/* 카드 대표 수치 (tabular) — 히어로 숫자 층을 토큰 티어로 통일: 카드 대표 수치는 KPI 대표값과
+   같은 --kpi(28)로 승격(비토큰 18px 제거, major M1). 제목 22 와 6px 분리로 위계도 명확. */
+.sc-ov-big{ font-size:var(--kpi); font-weight:700; letter-spacing:-.02em; line-height:1.1; font-variant-numeric:tabular-nums; }
+/* 히어로 숫자 톤 — 상태(is-*)가 아닌 대표 수치는 --num-hero(인디고). :not 가드로 상태 톤 보존. */
+ .sc-ov-big:not(.is-pos):not(.is-warn):not(.is-neg):not(.u-muted){ color:var(--num-hero); }
+.sc-ov-big-sub{ font-size:var(--fs-12); font-weight:700; }
+
+/* ── 위계 교정(감사 P0) ─────────────────────────────────────────────────
+   실측: 개요에서 가장 큰 활자가 '동기화 2/2'(28px/700)·'라이선스 D-59'(28px/700)였고
+   심각 경보 본문은 12px/400 · y≈811 이었다. 크기 2.33배·굵기 700 vs 400·위치 —
+   세 축 모두 '안전 정보 > 위험 정보'로 역전. 운영 콘솔에서 가장 위험한 실패 모드다.
+   → 위험 수치를 --kpi 의 1.25배로 올려 화면 최대 활자로 삼고(색은 is-* 톤이 운반),
+     안전 정보(FT 쌍 수·라이선스 D-day)는 --h1 로 한 단 낮춘다. 새 토큰 없이 기존 토큰 파생. */
+.sc-ov-att-hero-top{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+.sc-ov-att-hero{ font-size:var(--fs-34); line-height:1; }
+.sc-ov-att-hero-lbl{ font-size:var(--fs-12); font-weight:600; }
+.sc-ov-ft .sc-ov-big,
+.sc-ov-lic .sc-ov-big{ font-size:var(--h1); }
+
+/* 애니메이션 절제(minor#6) — 모션은 라이브 인디케이터(하단 라이브 로그 tail 도트) 1개에만.
+   상태 도트(warn)는 정적(상태는 색+라벨로 이미 relief 충족, DESIGN-TOKENS §1.4).
+   is-neg 는 공용(styles.css)에서 이미 정적(C2 blink 폐기)이라 warn 만 화면 범위로 정지시킨다.
+   개요 화면 무한 루프 총합 = 레일 라이브 + 로그 tail = 2(C2). */
+.sc-ov .u-dot.is-warn{ animation:none; }
+
+/* ------------------------------------------------------------
+   1. 주의 필요
+   ------------------------------------------------------------ */
+.sc-ov-att-body{ display:flex; flex-direction:column; flex:1; min-height:104px; }
+.sc-ov-att-list{ display:flex; flex-direction:column; gap:1px; }
+.sc-ov-att-row{ display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:var(--r-sm); text-align:left; width:100%; }
+.sc-ov-att-row:hover{ background:var(--line2); }
+.sc-ov-att-host{ font-size:var(--fs-12); font-weight:700; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sc-ov-att-type{ font-size:var(--fs-12); flex-shrink:0; }
+.sc-ov-att-empty{ flex:1; padding:16px 8px; gap:8px; }
+
+.sc-ov-avail{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.sc-ov-avail-lbl{ font-size:var(--fs-12); }
+.sc-ov-avail-val{ font-size:var(--fs-13); font-weight:700; margin-left:auto; font-variant-numeric:tabular-nums; }
+.sc-ov-avail-target{ font-size:var(--fs-12); font-weight:600; }
+.sc-ov-avail-track{ display:block; width:100%; height:3px; border-radius:2px; background:var(--track); overflow:hidden; }
+.sc-ov-avail-fill{ display:block; height:100%; border-radius:2px; background:var(--accent); width:0; box-shadow:var(--glow-accent); transition:width var(--dur) var(--ease); }
+
+/* ------------------------------------------------------------
+   2. 플릿 히트맵
+   ------------------------------------------------------------ */
+.sc-ov-heat-body{ display:flex; align-items:center; justify-content:center; flex:1; }
+/* 타일 크기는 --ov-cell(JS가 장비 수에 따라 지정) · auto-fit + justify-content:center 로
+   장비가 적으면 대형 타일이 카드 중앙에 모이고, 많으면 축소되어 중앙 정렬로 감싼다. */
+.sc-ov-heat{ display:grid; grid-template-columns:repeat(auto-fit,minmax(var(--ov-cell,34px),var(--ov-cell,34px))); gap:var(--sp-2); width:100%; justify-content:center; align-content:center; }
+/* button 요소(JS overview.js renderHeat) — UA 기본 본더/패딩/폰트를 리셋해 span 시절과 동일 박스를 유지. */
+.sc-ov-cell{ position:relative; display:block; aspect-ratio:1; border:0; padding:0; font:inherit; border-radius:6px; background:currentColor; cursor:pointer; }
+/* 잔디 타일 필은 상태별 bright 토큰 명시(DESIGN-TOKENS §1.4 — 필/도트=bright) — 공용 .is-* 의
+   color 는 on-tint '텍스트 전용색'이라 currentColor 필(라이트)은 타일을 텍스트용 다크 변형으로 채워,
+   같은 상태가 상태 도트(bright)와 한 화면에서 두 색으로 말했다(#16). background-color 만 지정해
+   sheen(아래)/노치(is-warn) 레이어와 라벨드 모드 override(더 높은 specificity)는 그대로 둔다. */
+.sc-ov-cell.is-pos{ background-color:var(--pos-bright); }
+.sc-ov-cell.is-warn{ background-color:var(--warn-bright); }
+.sc-ov-cell.is-neg{ background-color:var(--neg); }
+/* 민무늬 잔디 모드(대형 플릿)에선 라벨드 타일 내부 요소를 숨긴다 — 마크업은 공용. */
+.sc-ov-heat:not(.is-labeled) .sc-ov-cell > *{ display:none; }
+
+/* ── 라벨드 타일(≤24대 실장비 스케일) — 중첩 표면 + 코드/타입 인타일 ────────
+   상태 보더 + 도트(형태 토큰: 저하 '!' · 오프라인 '×')로 툴팁 없이 3분 식별.
+   호버: 리프트 + 톤 글로우(클릭→상세 어포던스). 색은 전부 토큰 rgba 경유. */
+.sc-ov-heat.is-labeled{ grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:var(--sp-3); }
+.sc-ov-heat.is-labeled .sc-ov-cell{
+  aspect-ratio:auto; height:64px; border-radius:var(--r-md); background:var(--surface-2);
+  background-image:none; display:flex; flex-direction:column; justify-content:space-between;
+  padding:10px 12px; border:1.5px solid var(--line); color:var(--ink); text-align:left;
+  transition:transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.sc-ov-heat.is-labeled .sc-ov-cell:hover{ transform:translateY(-2px); }
+.sc-ov-heat.is-labeled .sc-ov-cell:active{ filter:brightness(.97); }
+/* 라벨 타일은 카드 안의 한 단계 깊은 중립 표면을 공유한다. 상태는 도트·보더·형태로만 전달한다. */
+.sc-ov-heat.is-labeled .sc-ov-cell.is-pos{ background:var(--surface-2); border-color:var(--line); box-shadow:none; }
+.sc-ov-heat.is-labeled .sc-ov-cell.is-pos:hover{ border-color:rgba(var(--accent-rgb),.45); box-shadow:var(--shadow-sm); }
+.sc-ov-heat.is-labeled .sc-ov-cell.is-warn{
+  background:var(--surface-2); border-color:rgba(var(--warn-rgb),.5); box-shadow:none; background-image:none;
+}
+.sc-ov-heat.is-labeled .sc-ov-cell.is-warn:hover{ border-color:rgba(var(--warn-rgb),.75); box-shadow:var(--glow-warn); }
+.sc-ov-heat.is-labeled .sc-ov-cell.is-neg{
+  background:var(--surface-2); border-color:rgba(var(--neg-rgb),.55); box-shadow:none;
+}
+.sc-ov-heat.is-labeled .sc-ov-cell.is-neg:hover{ border-color:rgba(var(--neg-rgb),.8); box-shadow:var(--glow-neg); }
+.sc-ov-heat.is-labeled .sc-ov-cell.is-neg::after{ content:none; }
+.sc-ov-cell-top{ display:flex; align-items:center; gap:6px; min-width:0; }
+.sc-ov-cell-dot{
+  width:9px; height:9px; border-radius:50%; flex-shrink:0; background:var(--muted);
+  display:inline-flex; align-items:center; justify-content:center;
+  color:var(--surface); font-style:normal; font-size:7px; font-weight:700; line-height:1;
+}
+.sc-ov-cell.is-pos .sc-ov-cell-dot{ background:var(--pos-bright); box-shadow:var(--glow-pos); }
+.sc-ov-cell.is-warn .sc-ov-cell-dot{ background:var(--warn-bright); width:11px; height:11px; }
+.sc-ov-cell.is-warn .sc-ov-cell-dot::before{ content:"!"; }
+.sc-ov-cell.is-neg .sc-ov-cell-dot{ background:var(--neg); width:11px; height:11px; }
+.sc-ov-cell.is-neg .sc-ov-cell-dot::before{ content:"\00D7"; }
+.sc-ov-cell-type{
+  font-size:var(--fs-12); font-weight:var(--fw-med); color:var(--ink2); letter-spacing:.02em;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;
+}
+.sc-ov-cell-code{
+  font-size:var(--fs-12); font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;
+}
+/* 타일은 평면으로 유지하고, 선택·호버에만 인터랙션 어포던스를 준다. */
+.sc-ov-cell{ background-image:none; box-shadow:none; }
+.sc-ov-cell:hover{ outline:2px solid var(--accent); outline-offset:1px; }
+/* 오프라인(neg) 칸 형태 토큰(색각 갭 해소, minor#7 / C2): 색만으로 구분되지 않게 중앙에 surface색 ✕
+   글리프를 얹어 저하(warn)의 우상단 도트와 동등한 리던던트 인코딩을 준다(색맹 대응). 얇은 인셋 링은
+   '빈 테두리' 느낌을 더해 꽉 찬 다른 상태 칸과 형태로도 대비시킨다. */
+.sc-ov-cell.is-neg{ box-shadow:inset 0 0 0 2px var(--surface); }
+.sc-ov-cell.is-neg::after{
+  content:'✕'; position:absolute; inset:0;
+  display:flex; align-items:center; justify-content:center;
+  color:var(--surface); font-size:calc(var(--ov-cell,34px) * .5);
+  font-weight:700; line-height:1; pointer-events:none;
+}
+/* 저하(warn) 칸도 색각 갭 해소를 위해 형태 토큰을 얹는다(minor#3) — 오프라인 흰링과 같은 원리로,
+   우상단 서피스색 도트(노치)를 찍어 '가동(꽉 참)'·'오프라인(빈 테두리)'과 형태로 3분 구분한다. */
+.sc-ov-cell.is-warn{ background-image:radial-gradient(circle at 82% 18%,var(--surface) 0 1.9px,transparent 2.3px); }
+/* 히트맵 타일은 펄스/블링크하지 않는다 — 같은 장애 장비가 '주의 필요' 목록의 u-dot(색각 relief
+   계약, DESIGN-TOKENS §1.4)에서 이미 펄스하므로 타일까지 애니메이션하면 동일 신호가 동시 다발로
+   중복된다. 타일 상태는 색 + 범례 + 툴팁으로 전달(애니메이션 밀집 완화 — 펄스는 u-dot 한 곳으로). */
+/* (sc-ov-anim-pulse/-blink 죽은 규칙 제거, C2 — 오버뷰는 상태 애니 클래스를 emit 하지 않는다.) */
+.sc-ov-heat-legend{ gap:16px; flex:1; justify-content:center; }
+.sc-ov-legend-key{ width:9px; height:9px; border-radius:3px; background:currentColor; }
+/* 범례 스와치도 타일과 같은 bright 필(#16) — on-tint 텍스트색을 필로 쓰지 않는다. */
+.sc-ov-legend-key.is-pos{ background-color:var(--pos-bright); }
+.sc-ov-legend-key.is-warn{ background-color:var(--warn-bright); }
+.sc-ov-legend-key.is-neg{ background-color:var(--neg); }
+
+/* ------------------------------------------------------------
+   3. FT 이중화
+   ------------------------------------------------------------ */
+.sc-ov-ft-top{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.sc-ov-ft-unit{ font-size:var(--fs-12); font-weight:600; }
+.sc-ov-ft-empty{ font-size:var(--fs-12); padding:14px 0; text-align:center; }
+.sc-ov-ft-rows{ display:flex; flex-direction:column; gap:8px; margin-top:16px; }
+.sc-ov-ft-row{ display:flex; align-items:center; gap:8px; font-size:var(--fs-12); }
+.sc-ov-ft-row span{ flex:1; min-width:0; }
+.sc-ov-ft-row b{ font-size:var(--fs-12); font-weight:700; font-variant-numeric:tabular-nums; }
+.sc-ov-sq{ width:7px; height:7px; border-radius:2px; background:currentColor; flex-shrink:0; display:inline-block; }
+/* FT 스와치 필도 bright 토큰 명시(#16). 재동기화 링(:not)은 '속을 비운 링'이 역할이라 필 대상에서 제외. */
+.sc-ov-sq.is-pos{ background-color:var(--pos-bright); }
+.sc-ov-sq.is-warn:not(.sc-ov-sq--resync){ background-color:var(--warn-bright); }
+/* 오프라인(다운) FT 행 스와치(#257) — neg 는 bright 변형이 없고 base 를 필에도 그대로 쓴다(DESIGN-TOKENS §1.4). */
+.sc-ov-sq.is-neg{ background-color:var(--neg); }
+/* 재동기화(전환 상태)=링(도넛) 스와치 — 같은 앰버 hue 를 형태로 심플렉스(solid)와 구분한다(색각 relief,
+   새 hue 없이 형태 채널만 추가). 링 색은 --warn-bright(§1.4 필=bright — currentColor 면 on-tint
+   텍스트 전용색이 필에 새어 나온다, #16), 속은 서피스로 비운다. */
+.sc-ov-sq--resync{ background:transparent; box-shadow:inset 0 0 0 1.7px var(--warn-bright); }
+
+/* ------------------------------------------------------------
+   4~7. 소형 KPI 카드(자원/VM/라이선스/수집)
+   ------------------------------------------------------------ */
+.sc-ov-mini-body{ display:flex; flex-direction:column; gap:8px; }
+/* 자원 할당 카드는 라이선스 카드(목록)와 나란히 stretch 되어 하단에 사고성 공백(제목~첫행 100px+)이 컸다.
+   → 두 지표(vCPU/MEM)를 각각 flex:1 블록으로 만들어 카드 높이를 위아래로 균등 분할하고, 각 블록에 잉크
+   2-톤 할당 바를 얹어 빈 공간을 '콘텐츠'로 채운다(K2). 목록 카드와 높이 균형을 유지하되 66% 공백 제거. */
+.sc-ov-res-card .sc-ov-mini-body{ flex:1; }
+/* 자원 할당 — 도넛(2링)은 capacity 화면 전용으로 넘기고(중복 제거, minor#5), 개요는 숫자 요약 + 할당 바.
+   대표 %는 보조 대형 수치 티어(--fs-20=20)로, 사용/총량은 보조 텍스트로. */
+.sc-ov-res-sum{ display:flex; flex-direction:column; padding-top:var(--sp-1); flex:1; gap:var(--sp-3); }
+.sc-ov-res-block{ display:flex; flex-direction:column; justify-content:center; gap:var(--sp-3); flex:1; min-width:0; }
+.sc-ov-res-block + .sc-ov-res-block{ border-top:1px solid var(--line2); padding-top:var(--sp-3); }
+.sc-ov-res-row{ display:flex; align-items:baseline; gap:8px; min-width:0; }
+.sc-ov-res-k{ font-size:var(--fs-12); font-weight:var(--fw-med); letter-spacing:.04em; color:var(--muted); width:42px; flex-shrink:0; }
+.sc-ov-res-v{ font-size:var(--fs-12); font-weight:var(--fw-semi); color:var(--ink2); font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+/* 개요=요약(A2): 대표 %는 히어로 게이지값(fs-20)에서 요약 수치(fs-16)로 낮춰 용량 화면의 상세 게이지와
+   위계를 분리한다(개요는 요약 수치, 용량은 대형 게이지). 톤(앰버)은 긴장 힌트로 유지. */
+.sc-ov-res-pct{ margin-left:auto; font-size:var(--fs-16); font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; flex-shrink:0; }
+/* 개요 요약 바 — 커밋 2-톤 게이지(capacity 전용)와 구분되게 단일 중립 잉크 + 얇게(3px). 긴장 신호는
+   % 텍스트 톤이 전담(중복 게이지 제거, A2). */
+.sc-ov-res-card .sc-ov-bar{ height:3px; }
+.sc-ov-res-card .sc-ov-bar-fill{ background:var(--accent); }
+.sc-ov-res-more{ align-self:flex-start; margin-top:2px; }
+
+.sc-ov-lic-hero{ display:flex; flex-direction:column; gap:2px; }
+.sc-ov-lic-lead{ font-size:var(--fs-12); font-weight:600; }
+.sc-ov-lic-lead-host{ font-size:var(--fs-12); font-weight:600; max-width:100%; }
+.sc-ov-lic-list{ display:flex; flex-direction:column; gap:2px; margin-top:4px; }
+.sc-ov-lic-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:3px 6px; border-radius:var(--r-xs); text-align:left; width:100%; }
+.sc-ov-lic-row:hover{ background:var(--line2); }
+.sc-ov-lic-body{ display:flex; flex-direction:column; align-items:flex-start; min-width:0; }
+.sc-ov-lic-name{ font-size:var(--fs-12); font-weight:700; max-width:100%; }
+.sc-ov-lic-host{ font-size:var(--fs-12); max-width:100%; }
+.sc-ov-lic-dd{ font-size:var(--fs-12); font-weight:700; flex-shrink:0; font-variant-numeric:tabular-nums; }
+/* '외 N건 — 클러스터 보기' 절단 표기(#258) — res-more 과 같은 좌정렬 링크(카드 폭 stretch 방지). */
+.sc-ov-lic-more{ align-self:flex-start; margin-top:2px; }
+
+/* ------------------------------------------------------------
+   7a. 스토리지 — FT 클러스터 스토리지그룹 사용률(mini 카드, row2 3번째).
+   행: [장비 코드][그룹명 muted] …[%] 한 줄 + 하단 수평 게이지(track=--track, 필=중립 잉크/상태 bright).
+   게이지·% 톤은 fmt.js barColor 규칙(78 warn / 90 neg) 재사용 — 중립은 잉크(accent·pos 아님),
+   임계 초과 행만 % 텍스트·게이지 필에 상태색. 다크는 토큰 경유라 자동.
+   ------------------------------------------------------------ */
+.sc-ov-sto-list{ display:flex; flex-direction:column; gap:12px; padding-top:var(--sp-1); max-height:340px; overflow-y:auto; }
+.sc-ov-sto-row{ display:flex; flex-direction:column; gap:6px; padding:6px; border-radius:var(--r-sm); text-align:left; width:100%; }
+.sc-ov-sto-row:hover{ background:var(--line2); }
+.sc-ov-sto-head{ display:flex; align-items:baseline; gap:8px; min-width:0; }
+.sc-ov-sto-dev{ font-size:var(--fs-12); font-weight:var(--fw-semi); letter-spacing:-.02em; color:var(--ink); flex-shrink:0; max-width:48%; }
+.sc-ov-sto-grp{ font-size:var(--fs-12); font-weight:600; flex:1; min-width:0; }
+/* 중립(임계 미만) % 는 잉크 톤. 임계 초과만 상태색 — compound 선택자로 전역 .is-* 색을 확실히 이긴다
+   (overview.css 가 styles.css 뒤에 로드되므로 단일 .is-* 로는 base color 에 밀린다). */
+.sc-ov-sto-pct{ margin-left:auto; font-size:var(--fs-13); font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; flex-shrink:0; color:var(--ink2); }
+.sc-ov-sto-pct.is-warn{ color:var(--warn-on-tint); }
+.sc-ov-sto-pct.is-neg{ color:var(--neg-on-tint); }
+/* 수평 게이지 — track 은 공용 --track, 필은 중립 잉크(--ink2) 기본, 임계 초과 시 bright 상태색(§1.4 필=bright). */
+.sc-ov-sto-track{ display:block; width:100%; height:6px; border-radius:3px; background:var(--track); overflow:hidden; }
+.sc-ov-sto-fill{ display:block; height:100%; border-radius:3px; background:var(--ink2); width:0; transition:width var(--dur) var(--ease); }
+.sc-ov-sto-fill.is-warn{ background:var(--warn-bright); }
+.sc-ov-sto-fill.is-neg{ background:var(--neg); }
+/* 스토리지 데이터(topo.storage) 없는 플릿이면 카드 자체를 숨긴다(빈 카드 금지).
+   공용 .card{display:flex} 가 UA [hidden] 을 덮으므로 명시적으로 display:none 을 준다. */
+.sc-ov-sto-card[hidden]{ display:none; }
+
+/* ------------------------------------------------------------
+   7b. stat strip — 단일수치(가상 머신·수집 상태·마지막 폴)를 얇은 한 줄 band 로 통합(A2).
+   개별 카드의 넓은 여백을 제거하고, .card 를 가로 flex 로 눌러 한 줄 stat strip 으로 만든다.
+   ------------------------------------------------------------ */
+.sc-ov-strip{ flex-direction:row; align-items:center; flex-wrap:wrap; gap:0; padding:12px 18px; }
+.sc-ov-strip-item{ display:flex; align-items:center; justify-content:center; gap:var(--sp-2); flex:1 1 200px; min-width:0; padding:0 var(--sp-3); }
+.sc-ov-strip-ico{ display:flex; align-items:center; flex-shrink:0; }
+.sc-ov-strip-lbl{ font-size:var(--fs-12); font-weight:var(--fw-med); letter-spacing:.02em; flex-shrink:0; }
+.sc-ov-strip-val{ display:flex; align-items:baseline; gap:8px; min-width:0; flex-wrap:wrap; }
+.sc-ov-strip-num{ font-size:var(--fs-16); font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; color:var(--ink); }
+.sc-ov-strip-num:not(.is-pos):not(.is-warn):not(.is-neg){ color:var(--num-hero); }
+.sc-ov-strip-sub{ font-size:var(--fs-12); font-weight:600; }
+.sc-ov-strip-status{ font-size:var(--fs-16); font-weight:700; letter-spacing:-.01em; }
+.sc-ov-strip-note{ font-size:var(--fs-12); font-weight:700; }
+.sc-ov-strip-note[hidden]{ display:none; }
+.sc-ov-strip-div{ width:1px; align-self:stretch; background:var(--line); margin:3px 0; flex-shrink:0; }
+
+/* ------------------------------------------------------------
+   9. 실시간 경보
+   ------------------------------------------------------------ */
+.sc-ov-alerts{ display:flex; flex-direction:column; gap:8px; }
+.sc-ov-alert{ display:flex; gap:12px; padding:12px 14px; border-radius:var(--r-md); text-align:left; width:100%;
+  border:1px solid var(--line); background:var(--surface-2); transition:border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
+.sc-ov-alert:hover{ border-color:currentColor; box-shadow:var(--shadow-sm); }
+.sc-ov-alert-ico{ width:28px; height:28px; flex-shrink:0; border-radius:var(--r-xs); display:flex; align-items:center; justify-content:center; background:var(--chrome); margin-top:1px; }
+.sc-ov-alert-body{ flex:1; min-width:0; }
+/* 장비 식별자는 중립 모노 — 심각 카드에서 아이콘+심각 칩만 red, 식별자까지 red 로 태우던 3중 red 해소(C3).
+   행 톤(is-neg/-warn)은 아이콘(currentColor)에만 남고 식별자 텍스트는 잉크로 고정한다. */
+.sc-ov-alert-host{ font-size:var(--fs-12); font-weight:700; letter-spacing:-.02em; min-width:0; color:var(--ink); }
+/* 위계 교정: 경보 '본문'이 12px/400 이라 화면에서 가장 안 읽히는 텍스트였다.
+   심각도가 실린 문장이 식별자보다 작으면 안 된다 → 13px/600 + 잉크로 승격. */
+.sc-ov-alert-msg{ font-size:var(--fs-13); font-weight:600; color:var(--ink); margin-top:3px; line-height:1.4; }
+.sc-ov-alert-ago{ font-size:var(--fs-12); flex-shrink:0; margin-top:2px; }
+/* 확인(ack)된 경보 — 미리보기 모집단은 active+acked 합성이라 행 모습이 같으면
+   이미 손댄 경보를 미조치로 오독한다(#14). incidents 의 .is-acked 는 sc-inc 스코프라
+   재사용 불가(화면 CSS 는 자기 접두사만, ARCHITECTURE §7) → 화면 규칙으로 디밍+아이콘 탈색.
+   배지(.sc-ov-alert-st)는 공용 .u-badge 를 그대로 쓴다(재정의 없음). */
+.sc-ov-alert.is-acked{ opacity:.62; }
+.sc-ov-alert.is-acked .sc-ov-alert-ico{ filter:grayscale(1); }
+/* 가용성 절대치는 주 수치(잉크), 목표 대비 편차는 보조로 강등. */
+.sc-ov-avail-delta{ font-size:var(--fs-12); font-weight:600; }
+
+/* ------------------------------------------------------------
+   13. 라이브 로그 콘솔 (캔버스 well + mono)
+   ------------------------------------------------------------ */
+.sc-ov-log-tail{ display:inline-flex; align-items:center; gap:4px; font-size:var(--fs-12); margin-left:4px; }
+/* 라이브 하트비트는 은은한 opacity pulse 1개만(하드 blink 대신 완만한 호흡 주기 --dur-breath — M2). */
+.sc-ov-log-dot{ width:6px; height:6px; border-radius:50%; background:currentColor; display:inline-block; flex-shrink:0; animation:pulse var(--dur-breath) ease-in-out infinite; }
+/* 라이브 도트 필도 bright 계열 명시(#16) — 라이브=그린 bright, 시뮬=토스 블루(§1.4). */
+.sc-ov-log-dot.is-pos{ background-color:var(--pos-bright); }
+.sc-ov-log-dot.is-info{ background-color:var(--blue); }
+.sc-ov-log-dot.is-paused{ animation:none; opacity:.45; }
+.sc-ov-log-body{ background:var(--canvas); border:1px solid var(--line); border-radius:var(--r-md); padding:var(--sp-3) var(--sp-4); }
+/* 접이식 tail(기본 접힘) — 헤더 클릭으로 펼침/접힘(minor#2). 접힘 시 본문 숨김·캐럿 회전. */
+.sc-ov-log-head{ cursor:pointer; user-select:none; }
+.sc-ov-log-caret{ display:inline-flex; align-items:center; color:var(--muted); flex-shrink:0; transition:transform var(--dur) var(--ease); transform:rotate(-90deg); }
+.sc-ov-log-caret.is-open{ transform:rotate(0deg); }
+.sc-ov-console.is-collapsed .sc-ov-log-body{ display:none; }
+.sc-ov-log-lines{ display:flex; flex-direction:column; gap:2px; font-size:var(--fs-12); line-height:1.7; max-height:180px; overflow:hidden; }
+.sc-ov-log-line{ display:flex; gap:12px; white-space:nowrap; min-width:0; }
+.sc-ov-log-t{ flex-shrink:0; font-variant-numeric:tabular-nums; }
+.sc-ov-log-h{ flex-shrink:0; width:126px; }
+.sc-ov-log-l{ flex-shrink:0; width:46px; font-weight:700; }
+.sc-ov-log-m{ flex:1; min-width:0; color:var(--ink2); overflow:hidden; text-overflow:ellipsis; }
+
+/* ------------------------------------------------------------
+   14. 반응형 / 고밀도
+   ------------------------------------------------------------ */
+@media (max-width:1439px){
+  .sc-ov{ padding:var(--page-pad); }
+  .sc-ov-row1{ grid-template-columns:minmax(0,1fr) minmax(0,1.4fr); }
+  /* 기본 12컬럼용 span(3/6/3)은 .sc-ov-row1>*:nth-child(n) 명시도 (0,2,0)라 이 블록 안에서는
+     그대로 살아 있다 — 2트랙 템플릿에 span 3/6이 걸리면 implicit 트랙이 생성되고, FT(항상 row1의
+     3번째 자식)를 전폭으로 내리던 .sc-ov-ft{span 2}는 명시도 (0,1,0)이라 nth-child 규칙에 져서
+     '주의 필요+히트맵 1행 / FT 전폭' 재배치가 발동하지 않았다(카드 3장이 세로로 쌓임).
+     같은 명시도로 span을 다시 지정해 의도한 2단 배치로 고정한다. */
+  .sc-ov-row1>*:nth-child(1),
+  .sc-ov-row1>*:nth-child(2){ grid-column:auto; }
+  .sc-ov-row1>*:nth-child(3){ grid-column:span 2; }
+  /* row2 는 flex(위 정의) 라 grid-template 재정의 불필요 — flex-basis+wrap 이 좁은 폭을 처리한다. */
+  .sc-ov-row3{ grid-template-columns:minmax(0,1fr); }
+}
+
+body.is-dense .sc-ov{ gap:var(--sp-3); padding:var(--sp-4) var(--sp-5) var(--sp-6); }
+body.is-dense .sc-ov-row1,
+body.is-dense .sc-ov-row2,
+body.is-dense .sc-ov-row3{ gap:var(--sp-3); }
+body.is-dense .sc-ov-chg-row{ padding:var(--sp-2) var(--sp-2); gap:var(--sp-2); }
+
+
+/* FT 이중화 카드 — 클러스터별 동기화 리스트(카운트 3행 아래 공백 앵커, 심사 반영) */
+.sc-ov-ft-list{ display:flex; flex-direction:column; gap:2px; margin-top:var(--sp-2); border-top:1px solid var(--line2); padding-top:var(--sp-2);
+  /* 스케일 가드(50~100대 검증): 클러스터 목록 무상한이 1행 전체 높이를 뻥튀기하던 것 —
+     카드 안 스크롤로 가둔다. 8~9행 보이고 나머지는 스크롤(데이터 손실 없음). */
+  max-height:340px; overflow-y:auto; }
+.sc-ov-ft-item{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 8px; border-radius:var(--r-sm); text-align:left; cursor:pointer; transition:background var(--dur) var(--ease); }
+.sc-ov-ft-item:hover{ background:var(--line2); }
+.sc-ov-ft-item:active{ filter:brightness(.96); }
+.sc-ov-ft-code{ font-size:var(--fs-12); font-weight:var(--fw-semi); color:var(--ink); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* 라이선스 카드 — 항목 1~2건일 때 좌상단 뭉침/하단 공백 완화: 본문 세로 중앙 배분(재심사 반영) */
+.sc-ov-lic .card-body{ flex:1; display:flex; flex-direction:column; justify-content:center; }
+
+/* ------------------------------------------------------------
+   16. 반응형 미디어 쿼리 (1024px / 768px)
+   ------------------------------------------------------------ */
+@media (max-width: 1024px) {
+  .sc-ov-row1 > *:nth-child(1),
+  .sc-ov-row1 > *:nth-child(2),
+  .sc-ov-row1 > *:nth-child(3),
+  .sc-ov-row3 > *:nth-child(1),
+  .sc-ov-row3 > *:nth-child(2) {
+    grid-column: span 12 !important;
+  }
+}
+@media (max-width: 768px) {
+  .sc-ov {
+    padding: var(--page-pad);
+  }
+  .sc-ov-row1, .sc-ov-row2, .sc-ov-row3 {
+    display: flex;
+    flex-direction: column;
+  }
+  /* 위(그리드 시절)의 .sc-ov-row3{align-items:start} 가 flex 세로 쌓임에서도 남아
+     cross-axis stretch 를 끈다 — 카드가 max-content 폭으로 잡혀 부모를 +12px 넘는
+     모바일 넘침 실측(visual-check mobile/overview). flex 에선 stretch 로 되돌린다. */
+  .sc-ov-row3 {
+    align-items: stretch;
+  }
+}
+
+/* 플릿 총평 배지 — 페이지 제목과 같은 줄, 화면 전체의 단일 판정 앵커. */
+.sc-ov-head-top{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.sc-ov-verdict{ font-size:var(--fs-12); font-weight:var(--fw-bold); letter-spacing:.02em; }
+.sc-ov-verdict-why{ display:block; font-size:var(--fs-12); font-weight:var(--fw-med); margin-top:2px; }
+
+
+/* ── 경보 카드 밀도 ────────────────────────────────────────────────────
+   실측: 1356x230px 카드에 96자(3자/10k) — 화면에서 가장 성긴 카드였다.
+   원인은 행이 세로 2단(식별자/뱃지 줄 + 메시지 줄)인데 가로 1356px 중 왼쪽 30%만 쓰던 것.
+   넓은 화면에서는 한 줄로 펴서 같은 높이에 더 많은 경보를 담는다(모니터링 콘솔의 본분).
+   좁아지면 원래의 2단으로 자동 복귀한다. */
+@media (min-width: 1100px){
+  .sc-ov-alert{ align-items:center; padding:9px 14px; }
+  .sc-ov-alert-body{ display:flex; align-items:baseline; gap:12px; }
+  .sc-ov-alert-body > .u-row{ flex-shrink:0; }
+  .sc-ov-alert-msg{ margin-top:0; flex:1; min-width:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+}
+
+/* 경보 행 [확인] 퀵 버튼 — 행은 div[role=button] 이라 cursor 는 명시 */
+.sc-ov-alert{ cursor:pointer; }
+.sc-ov-alert-ack{ flex-shrink:0; align-self:center; border:1px solid var(--line); border-radius:var(--r-xs);
+  background:var(--surface); color:var(--ink2); font-size:var(--fs-12); font-weight:600; padding:4px 10px; cursor:pointer; }
+.sc-ov-alert-ack:hover{ border-color:var(--accent); color:var(--accent); }
+.sc-ov-alert.is-acked .sc-ov-alert-ack{ display:none; }

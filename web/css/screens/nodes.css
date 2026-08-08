@@ -1,0 +1,266 @@
+/* css/screens/nodes.css — S2 화면: 전체 노드 (All nodes)
+ * REBUILD-SPEC.md §5.5 — 이 파일은 접두사 `sc-nd-` 클래스만 정의한다.
+ * 공용 클래스(card/table/chip/u-*, is-pos 등)는 재사용만 하고 재정의하지 않는다.
+ * 색은 전부 var(--pos)/var(--warn)/var(--neg)/var(--ink)/var(--muted) 등 CSS 변수 경유.
+ * Robodog 리스킨(DESIGN-TOKENS.md 계약): 순백 플레인 + 헤어라인 + 소프트 섀도,
+ * 강조는 인디고/민트 상태색 + 투명 틴트. 다크 필은 쓰지 않는다(이 화면엔 primary CTA/활성 세그먼트 없음
+ * — 필터 칩 .is-active 는 공용 .chip 이 잉크필을 이미 지정).
+ *
+ * 수정 이력: 3번째 줄의 옛 문구는 별표 바로 뒤에 슬래시가 붙어 있어(u-* 뒤 is-pos 사이 구분자) 이
+ *   블록 주석을 의도보다 훨씬 앞에서 조기 종료시켰다. 그 결과 .sc-nd-wrap 규칙 전체가 깨진 선택자로
+ *   파싱되어 브라우저가 통째로 버렸다(패딩, max-width, gap 전부 무효화 — Playwright cssRules 파싱으로
+ *   실증 확인). 구분자를 쉼표로 바꿔 원복. 동일 문구가 capacity/detail/incidents/overview/
+ *   settings.css 헤더 주석에도 있어 그 화면들의 루트 래퍼도 같은 방식으로 깨져 있음(별도 보고).
+ */
+
+.sc-nd-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  padding: var(--page-pad);
+  box-sizing: border-box;
+}
+
+.sc-nd-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+}
+
+.sc-nd-title {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--h1);
+  font-weight:700;
+  letter-spacing: -.02em;
+  color: var(--ink);
+  line-height: 1.2;
+}
+
+.sc-nd-sub {
+  margin: 0;
+  font-size:var(--fs-12);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.sc-nd-filters {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.sc-nd-chip-label { white-space: nowrap; }
+
+/* 테이블 컬럼 폭 배분(공용 .table 스타일은 그대로 두고 폭만 이 화면 전용으로 지정) */
+.sc-nd-table th:nth-child(1),
+.sc-nd-table td:nth-child(1) { width: 22%; }
+.sc-nd-table th:nth-child(2),
+.sc-nd-table td:nth-child(2) { width: 15%; }
+.sc-nd-table th:nth-child(3),
+.sc-nd-table td:nth-child(3) { width: 12%; }
+.sc-nd-table th:nth-child(4),
+.sc-nd-table td:nth-child(4) { width: 8%; }
+.sc-nd-table th:nth-child(5),
+.sc-nd-table td:nth-child(5) { width: 8%; }
+.sc-nd-table th:nth-child(6),
+.sc-nd-table td:nth-child(6) { width: 13%; }
+.sc-nd-table th:nth-child(7),
+.sc-nd-table td:nth-child(7) { width: 11%; }
+.sc-nd-table th:nth-child(8),
+.sc-nd-table td:nth-child(8) { width: 11%; }
+
+.sc-nd-th-label { vertical-align: middle; }
+
+/* 정렬 버튼 — APG 패턴: th(columnheader) 안의 네이티브 버튼이 조작을 담당한다(aria-sort 는 th 에 유효).
+   셀 전체가 조작 영역이 되게 100% 폭, 숫자 열(is-num)은 우측 정렬을 따라간다.
+   나머지 서식은 전역 button 리셋(styles.css) + th 상속에 맡긴다. */
+.sc-nd-sort-btn { display: inline-flex; align-items: center; width: 100%; }
+.sc-nd-table th.is-num .sc-nd-sort-btn { justify-content: flex-end; }
+
+/* 정렬 화살표 — 공용 .table-sort-ico(불투명도)는 그대로 두고 방향만 이 화면에서 회전시킨다 */
+.sc-nd-sort-ico {
+  display: inline-flex;
+  align-items: center;
+  transition: transform var(--dur) var(--ease);
+}
+.sc-nd-sort-ico.sc-nd-sort-desc { transform: rotate(180deg); }
+
+.sc-nd-host {
+  font-weight: 700;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 저하/오프라인 상태 칩(색맹 대응, minor#8) — 노드 셀 이름 옆 상시 텍스트. */
+.sc-nd-status { flex-shrink: 0; padding: 2px 8px; letter-spacing: .01em; }
+.sc-nd-status[hidden] { display: none; }
+/* 애니메이션 절제(minor#6) — 상태 도트는 정적(색+텍스트 칩으로 relief 충족). 모션은 레일 라이브 1개. */
+.sc-nd-wrap .u-dot.is-warn,
+.sc-nd-wrap .u-dot.is-neg { animation: none; }
+
+.sc-nd-platform { font-size:var(--fs-12); color: var(--ink2); }
+.sc-nd-type-label { white-space: nowrap; }
+
+.sc-nd-site {
+  font-size:var(--fs-12);
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* G12: 표 본문 셀 단일 12px — sync 만 11px 라 같은 행 안에서 1px 갈라졌다(11은 메타/헤더 전용). */
+.sc-nd-sync { font-size:var(--fs-12); font-weight: 700; }
+.sc-nd-sync-ico { display: inline-flex; align-items: center; }
+.sc-nd-sync-label { white-space: nowrap; }
+
+/* 가용성 셀(E5) — 값 + SLA 편차(연간 다운타임 예산) 2줄 스택, 우측 정렬(is-num 셀). */
+/* G7: 가용성 셀 2줄 스택 → 1줄 인라인(99.990% · 연 53분) — 행 내 유일한 2줄 셀이라
+   열 베이스라인 리듬을 깨던 minor. 편차는 옅은 접미로 값 뒤에 붙인다. */
+.sc-nd-avail-cell { display: inline-flex; flex-direction: row; align-items: baseline; gap: 6px; line-height: 1.2; }
+.sc-nd-avail-val { font-weight: 700; font-variant-numeric: tabular-nums; }
+.sc-nd-avail-sub { font-size:var(--fs-12); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sc-nd-avail-sub:not(:empty)::before { content: '· '; }
+
+/* ============================================================
+   소수 장비(6대 미만) 카드형 — "플랫폼/OS 관점".
+   노드당 큰 카드: 상태 배지 + 물리 노드(node0/node1) 블록(코어/RAM·부하·온도·디스크·VM 타일).
+   공용 .card 규칙 상속(재정의 없음), 색은 전부 토큰 경유.
+   ============================================================ */
+.sc-nd-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+  gap: var(--sp-5);
+  align-items: start;
+}
+/* [hidden]은 UA display:none 이지만 author display:grid 가 이기므로 명시적으로 끈다 */
+.sc-nd-cards[hidden],
+.sc-nd-table-wrap[hidden],
+.sc-nd-empty[hidden] { display: none; }
+
+.sc-nd-card {
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.sc-nd-card:hover {
+  border-color: rgba(var(--accent-rgb), .5);
+  transform: translateY(-1px);
+  box-shadow: var(--elev-2);
+}
+/* 클릭 피드백 — 공용 버튼/칩과 동일한 pressed dim 패턴 */
+.sc-nd-card:active {
+  filter: brightness(.96);
+}
+.sc-nd-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sc-nd-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.sc-nd-card-id { flex: 1; min-width: 0; gap: 2px; }
+.sc-nd-card-host {
+  font-size:var(--fs-16);
+  font-weight:700;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-nd-card-plat {
+  gap: var(--sp-1);
+  font-size:var(--fs-12);
+  font-weight: 600;
+  color: var(--ink2);
+  min-width: 0;
+}
+.sc-nd-card-plat-ico { display: inline-flex; align-items: center; flex-shrink: 0; }
+.sc-nd-card-plat-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-nd-card-st { flex-shrink: 0; }
+
+/* ── 물리 노드(node0/node1) 블록 — 이 화면의 히어로. 어플라이언스 카드 안에
+      실제 노드 하드웨어/부하를 펼친다(clusters의 FT 이중화 프레이밍과 역할 분리). ── */
+.sc-nd-nodes { display: flex; flex-direction: column; gap: var(--sp-3); margin-top: var(--sp-2); }
+.sc-nd-node {
+  background: var(--surface-2); border-radius: var(--r-md);
+  padding: 12px var(--sp-4); display: flex; flex-direction: column; gap: 8px; min-width: 0;
+}
+.sc-nd-node-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+.sc-nd-node-name { font-size:var(--fs-13); font-weight:700; letter-spacing: -.01em; }
+.sc-nd-node-role { font-size:var(--fs-12); letter-spacing: .02em; flex-shrink: 0; }
+.sc-nd-node-state { margin-left: auto; gap: 8px; font-size:var(--fs-12); flex-shrink: 0; }
+.sc-nd-node-stlbl { font-weight: 700; white-space: nowrap; }
+.sc-nd-node-sub { font-size:var(--fs-12); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.sc-nd-node-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--sp-3); }
+.sc-nd-tile { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sc-nd-tile-lab {
+  font-size:var(--fs-12); font-weight:700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted);
+}
+.sc-nd-tile-val { font-size:var(--fs-13); font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+@media (max-width: 640px) {
+  .sc-nd-node-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 10px; }
+}
+
+.sc-nd-empty {
+  padding: var(--sp-7);
+  text-align: center;
+  color: var(--muted);
+  font-size:var(--fs-13);
+  font-weight: 600;
+  border: 1px dashed var(--line);
+  border-radius: var(--r-lg);
+}
+
+@media (max-width: 860px) {
+  .sc-nd-wrap { padding: var(--sp-4) var(--sp-4) 28px; }
+  .sc-nd-head { align-items: flex-start; }
+}
+
+/* ============================================================
+   G24: 회사 → 공장 → 장비 트리 테이블(사용자 지시 — manage/topology 와 동일 위계).
+   그룹 헤더 행은 클릭 = 접기/펼치기, 장비 행 라벨은 프리픽스 없는 코드.
+   ============================================================ */
+.sc-nd-group td {
+  padding: 9px 16px 7px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--dur) var(--ease);
+}
+.sc-nd-group--fa td {
+  background: var(--canvas);
+  padding-left: 34px;
+}
+.sc-nd-group:hover td { background: rgba(var(--accent-rgb), .05); }
+.sc-nd-group:active td { filter: brightness(.96); }
+.sc-nd-g-row { gap: 8px; }
+.sc-nd-g-caret { width: 12px; color: var(--muted); font-size: var(--fs-12); flex-shrink: 0; }
+.sc-nd-g-label { font-size: var(--fs-12); font-weight:700; color: var(--ink); }
+.sc-nd-group--fa .sc-nd-g-label { font-weight: 700; color: var(--ink2); }
+.sc-nd-g-status { font-size: var(--fs-11); font-weight: var(--fw-semi); color: var(--muted); }
+.sc-nd-g-count {
+  font-size: var(--fs-12); font-weight: 700; color: var(--ink2);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-pill); padding: 1px 8px;
+}
+.sc-nd-group--fa .sc-nd-g-count { background: var(--line2); border-color: transparent; }
+/* 장비 행 1열 들여쓰기 — 공장 아래 소속을 시각화 */
+.sc-nd-table [data-nd-row] td:first-child { padding-left: 52px; }
