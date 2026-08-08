@@ -3,7 +3,7 @@ config.local.json
 config.local.json.bak
 config.local.json.tmp
 *.log
-serverdesk
+/serverdesk
 cmd/serverdesk/serverdesk
 serverdesk.local.env
 dist/
