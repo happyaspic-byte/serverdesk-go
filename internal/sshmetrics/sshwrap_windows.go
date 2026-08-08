@@ -14,3 +14,11 @@ func sshCmd(ctx context.Context, args []string) *exec.Cmd {
 	// args 는 setsid 형식("-w", "ssh", ...) — "ssh" 본래 인수만 넘긴다.
 	return exec.CommandContext(ctx, args[1], args[2:]...)
 }
+
+// askpassFile/askpassScript — Windows OpenSSH 는 .bat 만 ASKPASS 로 실행할 수 있다.
+const askpassFile = "askpass.bat"
+const askpassScript = "@echo off\r\necho %SSH_PW%\r\n"
+
+// extraSSHArgs — Windows OpenSSH(8.1)는 ControlMaster(Unix 소켓 멀티플렉싱)를 지원하지
+// 않아 매 폴 새 접속으로 둔다(10초 주기라 비용은 작다).
+func extraSSHArgs(cmDir string) []string { return nil }

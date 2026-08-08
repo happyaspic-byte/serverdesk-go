@@ -73,10 +73,11 @@ func NewRunner(runtimeDir string, timeout time.Duration) (*Runner, error) {
 	if err := os.Chmod(runtimeDir, 0o700); err != nil {
 		return nil, fmt.Errorf("sshmetrics: runtime dir 모드: %w", err)
 	}
-	r.askpass = filepath.Join(runtimeDir, "askpass.sh")
+	r.askpass = filepath.Join(runtimeDir, askpassFile)
 	if _, err := os.Stat(r.askpass); errors.Is(err, fs.ErrNotExist) {
 		// 이미 있으면 내용을 덮지 않는다(현장 수정본 보존). Python 동일.
-		if err := os.WriteFile(r.askpass, []byte("#!/bin/sh\necho \"$SSH_PW\"\n"), 0o700); err != nil {
+		// 내용은 플랫폼별 상수(sshwrap_*.go) — Windows 는 askpass.bat.
+		if err := os.WriteFile(r.askpass, []byte(askpassScript), 0o700); err != nil {
 			return nil, fmt.Errorf("sshmetrics: askpass 생성: %w", err)
 		}
 	} else if err != nil {
@@ -152,10 +153,8 @@ func (r *Runner) execSSH(ctx context.Context, host string, port int, user, passw
 		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=no",
 		"-o", "LogLevel=ERROR",
-		"-o", "ControlMaster=auto",
-		"-o", "ControlPath=" + filepath.Join(r.cmDir, "%r@%h:%p"),
-		"-o", "ControlPersist=300",
 	}
+	args = append(args, extraSSHArgs(r.cmDir)...)
 	if password != "" {
 		args = append(args, "-o", "PreferredAuthentications=password",
 			"-o", "PubkeyAuthentication=no")
