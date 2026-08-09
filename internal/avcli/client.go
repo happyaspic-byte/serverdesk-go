@@ -57,6 +57,9 @@ type Client struct {
 	pw      string
 	statsMu sync.Mutex
 	stats   Stats
+
+	warnMu         sync.Mutex
+	lastWarnReason string // 같은 사유의 WARN 반복 억제용(상시 실패 시 60초마다 같은 로그가 쌓인다)
 }
 
 // NewClient 는 기본값(Bin "avcli", Timeout 90s, RetryDelay 5s)의 Client 를 만든다.
@@ -69,6 +72,29 @@ func NewClient(clusterKey, mgmtIP, user, password string) *Client {
 		Timeout:    90 * time.Second,
 		RetryDelay: 5 * time.Second,
 		pw:         password,
+	}
+}
+
+// warnOnce 는 같은 실패 사유의 WARN 을 한 번만 낸다. avcli 미설치·망 단절 같은
+// 상시 실패가 티어 주기(60s)마다 동일 로그를 쌓는 것을 막는다 — 사유가 바뀌거나
+// 복구되면 다시 로그한다.
+func (c *Client) warnOnce(reason, msg string) {
+	c.warnMu.Lock()
+	defer c.warnMu.Unlock()
+	if reason == c.lastWarnReason {
+		return
+	}
+	c.lastWarnReason = reason
+	Logf("warn", c.Key, msg)
+}
+
+// warnReset 은 성공 시 호출 — 실패 상태였으면 복구를 1회 알리고 억제를 푼다.
+func (c *Client) warnReset(command string) {
+	c.warnMu.Lock()
+	defer c.warnMu.Unlock()
+	if c.lastWarnReason != "" {
+		Logf("info", c.Key, "avcli 복구: "+command)
+		c.lastWarnReason = ""
 	}
 }
 
@@ -223,14 +249,15 @@ func (c *Client) CallXML3(command string) (*Element, error, bool) {
 			s.Errors++
 			s.LastError = err.Error()
 		})
-		Logf("warn", c.Key, fmt.Sprintf("avcli 실패 %s (%.1fs): %s", command, dur.Seconds(), reason))
+		c.warnOnce(reason, fmt.Sprintf("avcli 실패 %s (%.1fs): %s — 같은 사유의 반복 로그는 생략", command, dur.Seconds(), reason))
 		return nil, err, fatal
 	}
+	c.warnReset(command)
 	Logf("debug", c.Key, fmt.Sprintf("avcli ok %s (%.1fs)", command, dur.Seconds()))
 	return root, nil, false
 }
 
-// CallText 는 텍스트 모드 폴§백(-x 없이)이다.
+// CallText 는 텍스트 모드 폴백(-x 없이)이다.
 // snmp-info 처럼 XML 생성이 깨지는 명령용. 반환 map 은 ParseTextKV 결과다.
 func (c *Client) CallText(command string) (map[string]any, error) {
 	mu := lockFor(c.Mgmt)
