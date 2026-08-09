@@ -682,12 +682,25 @@ function renderBanner(st) {
       '수집기 연결 끊김 — 시뮬레이션 데이터 표시 중'
     );
   } else {
-    const secs = st.lastPoll ? Math.round((Date.now() - st.lastPoll) / 1000) : 0;
-    const reason = st.liveError ? String(st.liveError) : L('no response from collector', '수집기 응답 없음');
-    text = L(
-      'Poller disconnected — last collected ' + secs + 's ago (' + reason + ')',
-      '수집기 연결 끊김 — 마지막 수집 ' + secs + '초 전 (' + reason + ')'
-    );
+    // liveStale 는 '브라우저↔서버' 가 아니라 '폴리↔장비' 수집 실패다 — 종전 문구의
+    // '마지막 수집 N초 전' 은 프런트 자체 폴 시각(항상 0~3초)이라 모순돼 보였다.
+    // 실패한 장비 이름을 직접 보여 준다(사유 힌트 포함).
+    const staleNames = (Array.isArray(st.fleet) ? st.fleet : [])
+      .filter((d) => d && d.meta && d.meta.stale)
+      .map((d) => (d.meta && (d.meta.label || d.meta.name)) || d.host || d.id);
+    if (staleNames.length) {
+      const names = staleNames.slice(0, 3).join(', ') + (staleNames.length > 3 ? L(' and ', ' 외 ') + (staleNames.length - 3) + L(' more', '대') : '');
+      text = L(
+        'Collection failing — ' + names + ' (check address/credentials/avcli)',
+        '수집 지연 — ' + names + ' — 장비 주소·자격증명·avcli 설치를 확인하세요'
+      );
+    } else {
+      const reason = st.liveError ? String(st.liveError) : L('no response from collector', '수집기 응답 없음');
+      text = L(
+        'Collector connection issue (' + reason + ')',
+        '수집기 연결 이상 (' + reason + ')'
+      );
+    }
   }
   // 등장(숨김→표시) 시 1회만 통지 — 이후 카운트다운 갱신은 라이브 리전 밖에서 조용히(#577).
   // 새 에피소드 등장 전이에서 디듑 키를 비운다(#583) — 직전 에피소드와 문구가 같아도
