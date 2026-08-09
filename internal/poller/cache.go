@@ -22,6 +22,7 @@ const Version = "1.0.0"
 type FleetCache struct {
 	mu         sync.Mutex
 	fleet      map[string]any
+	emptyLogged bool // '클러스터 0대 배포' 안내는 1회만(매 갱신 주기마다 찍지 않음)
 	topology   map[string]any
 	topoFull   map[string]any
 	typedViews []topology.ClusterView // 직전 갱신의 타입 뷰(상세 토폴로지 입력)
@@ -71,9 +72,11 @@ func (c *FleetCache) Update(states []*ClusterState) {
 		clusters = append(clusters, view)
 		typed = append(typed, tv)
 	}
-	if len(clusters) == 0 {
-		logf("error", "-", "fleet 빌드 실패: 갱신 가능한 클러스터가 없음")
-		return
+	// FT 클러스터가 0대인 배포(엣지 전용·데모 전용)도 fleet 은 발행한다 — 빈 clusters
+	// + edge/sim 만으로도 /api/devices 가 서야 한다. 안내는 1회만.
+	if len(clusters) == 0 && !c.emptyLogged {
+		c.emptyLogged = true
+		logf("info", "-", "FT 클러스터 없이 기동 — 엣지/시뮬 장비만 표시합니다")
 	}
 	// overall: ok<warning=unknown<critical 최악 단계.
 	rank := map[string]int{"ok": 0, "warning": 1, "critical": 2, "unknown": 1}

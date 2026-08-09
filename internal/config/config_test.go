@@ -180,8 +180,14 @@ func TestEdgeDevices(t *testing.T) {
 }
 
 func TestLoadValidation(t *testing.T) {
-	if _, err := Parse([]byte(`{"clusters": []}`)); err == nil {
-		t.Error("empty clusters should fail")
+	if _, err := Parse([]byte(`{"clusters": [], "edge_devices": [], "sim_devices": 0}`)); err == nil {
+		t.Error("nothing to collect should fail")
+	}
+	if _, err := Parse([]byte(`{"clusters": [], "sim_devices": 4}`)); err != nil {
+		t.Errorf("empty clusters with sim devices should pass: %v", err)
+	}
+	if _, err := Parse([]byte(`{"clusters": [], "edge_devices": [{"key": "e1", "kind": "nas", "ip": "10.0.0.2"}]}`)); err != nil {
+		t.Errorf("empty clusters with edge devices should pass: %v", err)
 	}
 	if _, err := Parse([]byte(`{"clusters": [{"key": "a"}]}`)); err == nil {
 		t.Error("missing mgmt_ip should fail")

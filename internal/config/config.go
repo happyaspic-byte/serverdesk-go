@@ -399,8 +399,10 @@ func Parse(data []byte) (*Config, error) {
 	}
 
 	// --- 클러스터 검증 + 최상위 값 상속(poller.py load_config 와 동일 규칙) ---
-	if len(c.Clusters) == 0 {
-		return nil, errors.New("config error: clusters 가 비어 있습니다")
+	// FT 클러스터가 없는 배포도 허용한다(엣지 전용·데모 전용). 단, 수집 대상이
+	// 아무것도 없으면 기동할 이유가 없으니 셋 중 하나는 필요하다.
+	if len(c.Clusters) == 0 && len(c.EdgeDevices) == 0 && c.SimDevices <= 0 {
+		return nil, errors.New("config error: clusters, edge_devices, sim_devices 중 하나는 필요합니다")
 	}
 	for i := range c.Clusters {
 		cl := &c.Clusters[i]
