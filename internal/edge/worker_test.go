@@ -148,6 +148,10 @@ func TestWorkerSkipsNAHistory(t *testing.T) {
 	w.SNMPGet = fakeSNMP{}.get // 무응답
 	w.sws = blockedClient()
 	w.pollRound(context.Background())
+	lastRound, roundErr := w.CollectionStatus()
+	if lastRound.IsZero() || roundErr != "" {
+		t.Fatalf("collection status = %v %q", lastRound, roundErr)
+	}
 	d := w.LatestDevices()[0]
 	if len(d["histCpu"].([]int64)) != 0 || len(d["histMem"].([]int64)) != 0 {
 		t.Fatalf("NA hist = %v", d["histCpu"])

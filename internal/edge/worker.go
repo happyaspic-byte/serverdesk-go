@@ -34,11 +34,13 @@ type Worker struct {
 	pve *http.Client
 	rf  *http.Client
 
-	mu     sync.RWMutex
-	latest []map[string]any
-	static map[string]any
-	hist   map[string]*devHist
-	round  int
+	mu          sync.RWMutex
+	latest      []map[string]any
+	static      map[string]any
+	hist        map[string]*devHist
+	round       int
+	lastRoundAt time.Time
+	lastError   string
 }
 
 // NewWorker — 설정 목록으로 워커 생성.
@@ -90,11 +92,24 @@ func (w *Worker) LatestDevices() []map[string]any {
 	return out
 }
 
+// CollectionStatus reports the last fully completed round. Device-level failures still
+// complete a round and remain represented by down snapshots; only a round-level panic
+// sets lastError and leaves lastRoundAt unchanged.
+func (w *Worker) CollectionStatus() (time.Time, string) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.lastRoundAt, w.lastError
+}
+
 // safeRound — 라운드 수준 격리: 라운드 전체 패닉도 워커를 죽이지 않는다.
 func (w *Worker) safeRound(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			w.logf("ERROR", "edge", fmt.Sprintf("round failed: %v", r))
+			message := fmt.Sprintf("round failed: %v", r)
+			w.mu.Lock()
+			w.lastError = message
+			w.mu.Unlock()
+			w.logf("ERROR", "edge", message)
 		}
 	}()
 	w.pollRound(ctx)
@@ -117,6 +132,8 @@ func (w *Worker) pollRound(ctx context.Context) {
 	}
 	w.mu.Lock()
 	w.latest = out
+	w.lastRoundAt = time.Now()
+	w.lastError = ""
 	w.mu.Unlock()
 	w.round++
 }

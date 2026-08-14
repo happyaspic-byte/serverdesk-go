@@ -66,15 +66,35 @@ func TestLoginSessionAndLogout(t *testing.T) {
 		t.Fatalf("public health = %d %q", health.Code, health.Body.String())
 	}
 
+	healthHead := serve(handler, http.MethodHead, "/api/health", nil, "")
+	if healthHead.Code != http.StatusOK {
+		t.Fatalf("public HEAD health = %d, want 200", healthHead.Code)
+	}
+
+	detailedHealth := serve(handler, http.MethodGet, "/api/admin/health", nil, "")
+	if detailedHealth.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated detailed health = %d, want 401", detailedHealth.Code)
+	}
+	detailedHealthHead := serve(handler, http.MethodHead, "/api/admin/health", nil, "")
+	if detailedHealthHead.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated detailed HEAD health = %d, want 401", detailedHealthHead.Code)
+	}
+
 	healthSlash := serve(handler, http.MethodGet, "/api/health/", nil, "")
 	if healthSlash.Code != http.StatusUnauthorized {
 		t.Fatalf("health trailing slash = %d, want 401", healthSlash.Code)
 	}
+	healthSlashHead := serve(handler, http.MethodHead, "/api/health/", nil, "")
+	if healthSlashHead.Code != http.StatusUnauthorized {
+		t.Fatalf("HEAD health trailing slash = %d, want 401", healthSlashHead.Code)
+	}
 
-	for _, encodedHealth := range []string{"/api%2fhealth", "/api/%68ealth", "/API/health"} {
-		rec := serve(handler, http.MethodGet, encodedHealth, nil, "")
-		if rec.Code == http.StatusOK {
-			t.Errorf("non-exact health path %q reached the public handler", encodedHealth)
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, encodedHealth := range []string{"/api%2fhealth", "/api/%68ealth", "/API/health"} {
+			rec := serve(handler, method, encodedHealth, nil, "")
+			if rec.Code == http.StatusOK {
+				t.Errorf("%s non-exact health path %q reached the public handler", method, encodedHealth)
+			}
 		}
 	}
 

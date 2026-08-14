@@ -218,7 +218,9 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request, code int, payload 
 	}
 	h.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(code)
-	_, _ = w.Write(body)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
+	}
 }
 
 // writeGate 는 쓰기 공통 가드다. GateWrite는 Origin/Referer가 둘 다 없는
@@ -266,7 +268,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodOptions:
 		s.send(w, r, 204, []byte{})
 		return
-	case http.MethodGet:
+	case http.MethodGet, http.MethodHead:
 		s.doGet(w, r, path, r.URL.Query())
 		return
 	case http.MethodPut:
@@ -358,10 +360,12 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 		s.send(w, r, 200, out)
 	case "/api/admin/config/export":
 		s.handleConfigExport(w, r)
+	case "/api/admin/health":
+		s.send(w, r, 200, s.health(fleet, ts))
 	case "/api/availability.csv":
 		s.handleAvailabilityCSV(w, r)
 	case "/api/health":
-		s.send(w, r, 200, s.health(fleet, ts))
+		s.send(w, r, 200, publicHealth(s.health(fleet, ts)))
 	case "/api", "/":
 		// Python 폴러는 / 에서 엔드포인트 인덱스를 줬다. 병합 바이너리에서는
 		// / 가 프런트(index.html)에 할당되므로 인덱스는 /api 로 옮긴다.
@@ -369,72 +373,97 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 			"service": "everrun-poller", "version": poller.Version,
 			"endpoints": []string{"/api/fleet", "/api/devices",
 				"/api/fleet?format=devices", "/api/topology",
-				"/api/topology?model=full", "/api/health"}})
+				"/api/topology?model=full", "/api/health", "/api/admin/health"}})
 	default:
 		s.send(w, r, 404, map[string]any{"error": "not found", "path": path})
 	}
 }
 
-// health 는 /api/health 응답이다(poller.py _health 포트).
-// 감시 도구가 폴러하는 엔드포인트 — 'fast 가 한 번이라도 성공했나'만이 아니라
-// 티어 오류와 신선도(fast 주기 x3)를 함께 본다.
+// health 는 인증된 /api/admin/health 상세 응답이다. 수집 티어, 캐시,
+// edge worker, 이벤트 영속 저장의 신선도와 오류를 함께 판정한다.
 func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
 	clusters := []any{}
 	worst := "ok"
 	rank := map[string]int{"ok": 0, "degraded": 1, "down": 2}
-	bump := func(cstat string) {
-		if rank[cstat] > rank[worst] {
-			worst = cstat
+	bump := func(status string) {
+		if rank[status] > rank[worst] {
+			worst = status
 		}
 	}
+
+	uptime := time.Since(s.StartedAt)
+	if uptime < 0 {
+		uptime = 0
+	}
+	refresh := 5
+	if s.Cfg != nil && s.Cfg.CacheRefresh > 0 {
+		refresh = s.Cfg.CacheRefresh
+	}
+	cacheLimit := float64(refresh * 3)
+	cacheState := "ok"
+	var cacheAge, cacheReason any
+	if fleet == nil || ts == 0 {
+		cacheState = "down"
+		cacheReason = "캐시가 한 번도 생성되지 않음"
+		bump(cacheState)
+	} else {
+		age := round1(nowFloat() - ts)
+		cacheAge = age
+		if age > cacheLimit {
+			cacheState = "degraded"
+			cacheReason = fmt.Sprintf("캐시 %.1fs 경과(임계 %.0fs)", age, cacheLimit)
+			bump(cacheState)
+		}
+	}
+
 	for _, st := range s.States {
 		fastIV := st.Cfg.Intervals.Fast
 		limit := float64(fastIV * 3)
 		tiers := map[string]any{}
 		var fastAge *float64
 		errs := map[string]string{}
-		for _, t := range []string{"fast", "slow", "static"} {
-			age := st.Age(t)
-			errStr := st.TierErr(t)
+		for _, tier := range []string{"fast", "slow", "static"} {
+			age := st.Age(tier)
+			errStr := config.Mask(st.TierErr(tier))
 			var errVal any
 			if errStr != "" {
 				errVal = errStr
-				errs[t] = errStr
+				errs[tier] = errStr
 			}
-			tiers[t] = map[string]any{"age_secs": age, "error": errVal}
-			if t == "fast" {
+			tiers[tier] = map[string]any{"age_secs": age, "error": errVal}
+			if tier == "fast" {
 				fastAge = age
 			}
 		}
-		var cstat, why string
+		var status, reason string
 		if fastAge == nil {
-			cstat, why = "down", "fast 티어가 한 번도 성공하지 못함"
+			status, reason = "down", "fast 티어가 한 번도 성공하지 못함"
 		} else if *fastAge > limit {
-			cstat = "degraded"
-			why = fmt.Sprintf("fast 티어 %.0fs 경과(임계 %ds)", *fastAge, int64(limit))
+			status = "degraded"
+			reason = fmt.Sprintf("fast 티어 %.0fs 경과(임계 %ds)", *fastAge, int64(limit))
 		} else if len(errs) > 0 {
-			cstat = "degraded"
+			status = "degraded"
 			parts := []string{}
-			for _, t := range []string{"fast", "slow", "static"} {
-				if v, ok := errs[t]; ok {
-					parts = append(parts, t+"="+v)
+			for _, tier := range []string{"fast", "slow", "static"} {
+				if value, ok := errs[tier]; ok {
+					parts = append(parts, tier+"="+value)
 				}
 			}
-			why = "수집 오류: " + strings.Join(parts, "; ")
+			reason = "수집 오류: " + strings.Join(parts, "; ")
 		} else {
-			cstat = "ok"
+			status = "ok"
 		}
-		bump(cstat)
+		bump(status)
 		nodes, vms := st.NodeCounts()
-		var whyVal any
-		if why != "" {
-			whyVal = why
+		var reasonValue any
+		if reason != "" {
+			reasonValue = reason
 		}
 		clusters = append(clusters, map[string]any{
 			"key":                  st.Key,
 			"platform":             platformOr(st.GetPlatform(), "unknown"),
-			"status":               cstat,
-			"reason":               whyVal,
+			"status":               status,
+			"reason":               reasonValue,
 			"stale_threshold_secs": int64(limit),
 			"tiers":                tiers,
 			"nodes_seen":           nodes,
@@ -442,20 +471,110 @@ func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
 			"os_metrics":           osMetricsMap(st.OSReachable()),
 		})
 	}
-	if fleet == nil {
-		worst = "down"
+
+	eventStatus := map[string]any{"enabled": false, "healthy": true}
+	if s.Events != nil {
+		eventStatus = s.Events.Status()
+		eventStatus["enabled"] = true
+		if value, ok := eventStatus["last_error"].(string); ok {
+			eventStatus["last_error"] = config.Mask(value)
+		}
+		if healthy, _ := eventStatus["healthy"].(bool); !healthy {
+			bump("degraded")
+		}
 	}
-	var cacheAge any
-	if ts != 0 {
-		cacheAge = round1(nowFloat() - ts)
+
+	edgeSnapshot := poller.EdgeCollectorStatus{}
+	if s.Edge != nil {
+		edgeSnapshot = s.Edge.CollectorStatus()
+	} else if s.Cfg != nil {
+		edgeSnapshot.Configured = len(s.Cfg.EdgeDevices)
 	}
+	edgeStatus, edgeSeverity := edgeCollectorHealth(uptime, edgeSnapshot)
+	if edgeSeverity != "" {
+		bump(edgeSeverity)
+	}
+
 	return map[string]any{
 		"status":         worst,
 		"version":        poller.Version,
-		"uptime_secs":    int64(time.Since(s.StartedAt).Seconds()),
+		"uptime_secs":    int64(uptime.Seconds()),
 		"cache_age_secs": cacheAge,
+		"cache": map[string]any{
+			"status":               cacheState,
+			"reason":               cacheReason,
+			"age_secs":             cacheAge,
+			"stale_threshold_secs": int64(cacheLimit),
+		},
+		"event_store":    eventStatus,
+		"edge_collector": edgeStatus,
 		"clusters":       clusters,
 	}
+}
+
+// publicHealth 는 인증 없이 공개되는 설치/감시용 최소 응답이다. 내부 주소,
+// 클러스터 식별자, 수집 오류와 파일 경로는 상세 health에만 남긴다.
+func publicHealth(detail map[string]any) map[string]any {
+	return map[string]any{
+		"status":      detail["status"],
+		"version":     detail["version"],
+		"uptime_secs": detail["uptime_secs"],
+	}
+}
+
+const edgeCollectorStaleAfter = 130 * time.Second
+
+func edgeCollectorHealth(uptime time.Duration, snapshot poller.EdgeCollectorStatus) (map[string]any, string) {
+	component := map[string]any{
+		"status":               "disabled",
+		"reason":               nil,
+		"configured":           snapshot.Configured,
+		"observed":             snapshot.Observed,
+		"last_round_at":        nil,
+		"age_secs":             nil,
+		"stale_threshold_secs": int64(edgeCollectorStaleAfter.Seconds()),
+		"last_error":           nil,
+	}
+	if snapshot.Configured == 0 {
+		return component, ""
+	}
+
+	component["status"] = "ok"
+	if snapshot.LastError != "" {
+		component["status"] = "degraded"
+		component["reason"] = "edge 수집 라운드 실패"
+		component["last_error"] = config.Mask(snapshot.LastError)
+		return component, "degraded"
+	}
+	if snapshot.LastRoundAt.IsZero() {
+		if uptime < edgeCollectorStaleAfter {
+			component["status"] = "starting"
+			return component, ""
+		}
+		component["status"] = "degraded"
+		component["reason"] = "완료된 edge 수집 라운드 없음"
+		return component, "degraded"
+	}
+
+	age := time.Since(snapshot.LastRoundAt)
+	if age < 0 {
+		age = 0
+	}
+	component["last_round_at"] = snapshot.LastRoundAt.UTC().Format(time.RFC3339)
+	component["age_secs"] = round1(age.Seconds())
+	if age > edgeCollectorStaleAfter {
+		component["status"] = "degraded"
+		component["reason"] = fmt.Sprintf("edge 수집 %.1fs 경과(임계 %.0fs)",
+			age.Seconds(), edgeCollectorStaleAfter.Seconds())
+		return component, "degraded"
+	}
+	if snapshot.Observed < snapshot.Configured {
+		component["status"] = "degraded"
+		component["reason"] = fmt.Sprintf("설정 %d대 중 %d대 스냅샷",
+			snapshot.Configured, snapshot.Observed)
+		return component, "degraded"
+	}
+	return component, ""
 }
 
 func platformOr(p, def string) string {

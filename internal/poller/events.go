@@ -8,93 +8,425 @@ package poller
 // 싣는다. 재시작해도 jsonl 테일을 복원해 이력이 이어진다.
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
-// EventLog 는 장비 이벤트의 링 + jsonl 영속 저장소다.
+const (
+	defaultEventKeep         = 500
+	maxEventHostBytes        = 512
+	maxEventLabelBytes       = 2048
+	maxEventDescriptionBytes = 8192
+	maxEventLineBytes        = 16 << 10
+	minEventFileBytes        = 1 << 20
+)
+
+// EventLog 는 장비 이벤트의 링 + 크기가 제한된 jsonl 영속 저장소다.
 type EventLog struct {
-	path string
-	keep int
-	mu   sync.Mutex
-	ring []map[string]any
+	path         string
+	keep         int
+	maxFileBytes int64
+	mu           sync.RWMutex
+	ring         []map[string]any
+	fileBytes    int64
+	lastWriteAt  time.Time
+	lastError    string
+	lastErrorAt  time.Time
+	dirty        bool
+	loadBlocked  bool
 }
 
-// NewEventLog 는 path 의 jsonl 테일(최대 keep 건)을 복원해 연다.
+// NewEventLog 는 path 의 제한된 테일(최대 keep 건)만 복원한다. 이전 버전의
+// 무제한 파일도 기동 시 현재 링으로 원자적으로 압축해 이후 디스크 사용량을 제한한다.
 func NewEventLog(path string, keep int) *EventLog {
 	if keep <= 0 {
-		keep = 500
+		keep = defaultEventKeep
 	}
-	el := &EventLog{path: path, keep: keep, ring: []map[string]any{}}
-	var lines [][]byte
-	if data, err := os.ReadFile(path); err == nil {
-		sc := bufio.NewScanner(bytes.NewReader(data))
-		sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
-		for sc.Scan() {
-			ln := bytes.TrimSpace(sc.Bytes())
-			if len(ln) > 0 {
-				lines = append(lines, append([]byte(nil), ln...))
-			}
-		}
+	maxBytes := int64(keep) * int64(maxEventLineBytes)
+	if maxBytes < minEventFileBytes {
+		maxBytes = minEventFileBytes
 	}
-	if len(lines) > keep {
-		lines = lines[len(lines)-keep:]
+	el := &EventLog{
+		path: path, keep: keep, maxFileBytes: maxBytes,
+		ring: []map[string]any{},
 	}
-	for _, ln := range lines {
-		var ev map[string]any
-		if json.Unmarshal(ln, &ev) == nil {
-			el.ring = append(el.ring, ev)
-		}
+	if err := el.load(); err != nil {
+		el.markLoadFailure(err)
+		logf("warn", "events", fmt.Sprintf("이벤트 이력 복원 실패: %v", err))
 	}
 	return el
 }
 
+func (el *EventLog) markLoadFailure(err error) {
+	// load가 JSON 파싱 뒤 chmod/교체에서 실패했을 수도 있다. 그 부분 이력을
+	// post-start 버퍼로 오인하면 재시도 때 같은 기록을 중복 병합하므로 비운다.
+	el.ring = []map[string]any{}
+	el.dirty = false
+	el.loadBlocked = true
+	el.lastError = err.Error()
+	el.lastErrorAt = time.Now()
+}
+
+func (el *EventLog) load() error {
+	f, err := os.Open(el.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	el.fileBytes = info.Size()
+	readLimit := el.maxFileBytes + maxEventLineBytes
+	start := info.Size() - readLimit
+	if start < 0 {
+		start = 0
+	}
+	if start > 0 {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, readLimit))
+	closeErr := f.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+
+	needsCompact := start > 0 || info.Size() > el.maxFileBytes ||
+		(len(data) > 0 && data[len(data)-1] != '\n')
+	newestFirst := make([]map[string]any, 0, el.keep)
+	end := len(data)
+	for end > 0 && len(newestFirst) < el.keep {
+		lineStart := bytes.LastIndexByte(data[:end], '\n')
+		var raw []byte
+		if lineStart < 0 {
+			if start > 0 {
+				// seek 지점에서 시작한 첫 조각은 온전한 JSON 줄이라고 보장할 수 없다.
+				needsCompact = true
+				break
+			}
+			raw = data[:end]
+			end = 0
+		} else {
+			raw = data[lineStart+1 : end]
+			end = lineStart
+		}
+		raw = bytes.TrimSpace(raw)
+		if len(raw) == 0 {
+			continue
+		}
+		if len(raw) > maxEventLineBytes {
+			needsCompact = true
+			continue
+		}
+		var ev map[string]any
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			needsCompact = true
+			continue
+		}
+		ev = normalizeEvent(ev)
+		if _, err := marshalEventLine(ev); err != nil {
+			needsCompact = true
+			continue
+		}
+		newestFirst = append(newestFirst, ev)
+	}
+	if end > 0 {
+		needsCompact = true
+	}
+	events := make([]map[string]any, len(newestFirst))
+	for i := range newestFirst {
+		events[len(newestFirst)-1-i] = newestFirst[i]
+	}
+	el.ring = events
+	if needsCompact {
+		return el.compactLocked()
+	}
+	return os.Chmod(el.path, 0o600)
+}
+
 // Len 은 현재 링의 건수다(기동 로그용).
 func (el *EventLog) Len() int {
-	el.mu.Lock()
-	defer el.mu.Unlock()
+	el.mu.RLock()
+	defer el.mu.RUnlock()
 	return len(el.ring)
 }
 
-// eventStamp 는 화면 표기 관행(KST, 사전순 정렬 가능)과 같은 축의 타임스탬프다.
 func eventStamp() string {
 	return time.Now().UTC().Add(9 * time.Hour).Format("2006-01-02 15:04:05")
 }
 
-// Add 는 이벤트 1건을 링과 파일에 남긴다. 파일 쓰기 실패는 조용히 넘긴다 —
-// 로그 실패가 폴러를 죽이지 못하게 한다.
+func truncateEventText(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	if limit <= len("…") {
+		return ""
+	}
+	cut := limit - len("…")
+	for cut > 0 && !utf8.ValidString(value[:cut]) {
+		cut--
+	}
+	return value[:cut] + "…"
+}
+
+func eventString(ev map[string]any, key string) string {
+	value, _ := ev[key].(string)
+	return value
+}
+
+func normalizeEvent(ev map[string]any) map[string]any {
+	return map[string]any{
+		"ts":    truncateEventText(eventString(ev, "ts"), 64),
+		"host":  truncateEventText(eventString(ev, "host"), maxEventHostBytes),
+		"label": truncateEventText(eventString(ev, "label"), maxEventLabelBytes),
+		"kind":  truncateEventText(eventString(ev, "kind"), 64),
+		"sev":   truncateEventText(eventString(ev, "sev"), 32),
+		"desc":  truncateEventText(eventString(ev, "desc"), maxEventDescriptionBytes),
+	}
+}
+
+// marshalEventLine 은 JSON escaping까지 적용된 최종 한 줄을 절대 상한 안에 둔다.
+// 제어문자는 한 바이트가 \\u00xx 여섯 바이트로 팽창하므로 입력 길이 제한만으로는
+// 충분하지 않다.
+func marshalEventLine(ev map[string]any) ([]byte, error) {
+	shrinkOrder := []string{"desc", "label", "host", "kind", "sev", "ts"}
+	for attempts := 0; attempts < 128; attempts++ {
+		line, err := json.Marshal(ev)
+		if err != nil {
+			return nil, err
+		}
+		if len(line)+1 <= maxEventLineBytes {
+			return append(line, '\n'), nil
+		}
+		shrunk := false
+		for _, key := range shrinkOrder {
+			value := eventString(ev, key)
+			if value == "" {
+				continue
+			}
+			nextLimit := len(value) * 3 / 4
+			if nextLimit >= len(value) {
+				nextLimit = len(value) - 1
+			}
+			ev[key] = truncateEventText(value, nextLimit)
+			shrunk = true
+			break
+		}
+		if !shrunk {
+			break
+		}
+	}
+	return nil, fmt.Errorf("event JSON exceeds %d-byte limit", maxEventLineBytes)
+}
+
+func (el *EventLog) compactLocked() error {
+	dir := filepath.Dir(el.path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(el.path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	var written int64
+	for _, ev := range el.ring {
+		line, err := marshalEventLine(ev)
+		if err != nil {
+			_ = tmp.Close()
+			return err
+		}
+		if written+int64(len(line)) > el.maxFileBytes {
+			_ = tmp.Close()
+			return fmt.Errorf("event ring exceeds %d-byte file limit", el.maxFileBytes)
+		}
+		n, err := tmp.Write(line)
+		written += int64(n)
+		if err != nil {
+			_ = tmp.Close()
+			return err
+		}
+		if n != len(line) {
+			_ = tmp.Close()
+			return io.ErrShortWrite
+		}
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := replaceEventFile(tmpPath, el.path); err != nil {
+		return err
+	}
+	removeTmp = false
+	el.fileBytes = written
+	return nil
+}
+
+func (el *EventLog) appendLineLocked(line []byte) error {
+	if len(line) > maxEventLineBytes {
+		return fmt.Errorf("event line exceeds %d-byte limit", maxEventLineBytes)
+	}
+	f, err := os.OpenFile(el.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	n, writeErr := f.Write(line)
+	closeErr := f.Close()
+	el.fileBytes += int64(n)
+	if writeErr != nil {
+		if info, err := os.Stat(el.path); err == nil {
+			el.fileBytes = info.Size()
+		}
+		return writeErr
+	}
+	if n != len(line) {
+		return io.ErrShortWrite
+	}
+	return closeErr
+}
+
+func (el *EventLog) recoverLoadLocked() error {
+	buffered := append([]map[string]any(nil), el.ring...)
+	el.ring = nil
+	if err := el.load(); err != nil {
+		el.ring = buffered
+		return err
+	}
+	el.loadBlocked = false
+	el.ring = append(el.ring, buffered...)
+	if len(el.ring) > el.keep {
+		el.ring = el.ring[len(el.ring)-el.keep:]
+	}
+	return el.compactLocked()
+}
+
+// Add 는 이벤트를 메모리 링에 항상 남기고 jsonl 쓰기 상태를 별도로 추적한다.
+// 영속 실패가 폴러를 중단시키지는 않지만 health와 운영 로그에서 숨기지 않는다.
 func (el *EventLog) Add(host, label, kind, sev, desc string) {
-	ev := map[string]any{
+	ev := normalizeEvent(map[string]any{
 		"ts": eventStamp(), "host": host, "label": label,
 		"kind": kind, "sev": sev, "desc": desc,
-	}
-	b, err := json.Marshal(ev)
+	})
+	line, marshalErr := marshalEventLine(ev)
+
 	el.mu.Lock()
 	el.ring = append(el.ring, ev)
 	if len(el.ring) > el.keep {
 		el.ring = el.ring[len(el.ring)-el.keep:]
 	}
+	err := marshalErr
 	if err == nil {
-		if f, ferr := os.OpenFile(el.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); ferr == nil {
-			_, _ = f.Write(append(b, '\n'))
-			_ = f.Close()
+		if el.loadBlocked {
+			// 시작 시 읽지 못한 기존 파일은 현재 링으로 덮지 않는다. 다시 읽기에
+			// 성공한 뒤 기존 이력과 버퍼를 합쳐 원자적으로 교체한다.
+			err = el.recoverLoadLocked()
+		} else if el.dirty || el.fileBytes+int64(len(line)) > el.maxFileBytes {
+			// 이전 쓰기 실패 뒤에는 새 이벤트만 append하지 않고 메모리 링 전체를
+			// 교체해 누락된 이벤트까지 함께 복구한다.
+			err = el.compactLocked()
+		} else {
+			err = el.appendLineLocked(line)
 		}
 	}
+	previousError := el.lastError
+	previousDirty := el.dirty
+	previousLoadBlocked := el.loadBlocked
+	recovered := err == nil && (previousError != "" || previousDirty || previousLoadBlocked)
+	if err != nil {
+		if !el.loadBlocked {
+			el.dirty = true
+		}
+		el.lastError = err.Error()
+		el.lastErrorAt = time.Now()
+	} else {
+		el.dirty = false
+		el.lastError = ""
+		el.lastErrorAt = time.Time{}
+		el.lastWriteAt = time.Now()
+	}
+	newError := err != nil && err.Error() != previousError
 	el.mu.Unlock()
+
+	if newError {
+		logf("warn", "events", fmt.Sprintf("이벤트 이력 저장 실패: %v", err))
+	} else if recovered {
+		logf("info", "events", "이벤트 이력 저장 복구")
+	}
+}
+
+// Status 는 인증된 상세 health에 노출할 영속 저장 상태다. 파일 경로와 이벤트
+// 내용은 포함하지 않는다.
+func (el *EventLog) Status() map[string]any {
+	el.mu.RLock()
+	defer el.mu.RUnlock()
+	var lastWrite, lastErrAt any
+	if !el.lastWriteAt.IsZero() {
+		lastWrite = el.lastWriteAt.UTC().Format(time.RFC3339)
+	}
+	if !el.lastErrorAt.IsZero() {
+		lastErrAt = el.lastErrorAt.UTC().Format(time.RFC3339)
+	}
+	var lastErr any
+	if el.lastError != "" {
+		lastErr = el.lastError
+	}
+	return map[string]any{
+		"healthy":        !el.dirty && !el.loadBlocked && el.lastError == "",
+		"buffered":       len(el.ring),
+		"dirty":          el.dirty,
+		"load_blocked":   el.loadBlocked,
+		"file_bytes":     el.fileBytes,
+		"max_file_bytes": el.maxFileBytes,
+		"last_write_at":  lastWrite,
+		"last_error":     lastErr,
+		"last_error_at":  lastErrAt,
+	}
 }
 
 // List 는 최신순 최대 limit 건을 돌려준다.
 func (el *EventLog) List(limit int) []any {
-	el.mu.Lock()
-	defer el.mu.Unlock()
+	el.mu.RLock()
+	defer el.mu.RUnlock()
 	n := len(el.ring)
 	if limit <= 0 || limit > n {
 		limit = n

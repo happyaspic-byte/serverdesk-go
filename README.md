@@ -67,6 +67,8 @@ mode `0600`으로 관리된다.
 - 설정 백업/복구 — `GET /api/admin/config/export`(자격증명 마스킹) / `POST /api/admin/config/import`
   (빈 자격증명은 기존 값 유지, 장비·수집 변경은 재시작 후 적용)
 - 가용성 CSV — `GET /api/availability.csv` (30일 실측)
+- 공개 `/api/health`는 최소 상태만 반환하고, 인증된 `/api/admin/health`는 캐시·수집 티어·
+  Edge worker·이벤트 저장 상태를 제공한다. `events.jsonl`은 최근 이력으로 자동 압축된다.
 - 대시보드 경보 Quick Ack — 서버 공유 상태(/ack)로 동기화
 
 ## 개발

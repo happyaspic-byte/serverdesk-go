@@ -16,6 +16,14 @@ import (
 	"serverdesk/internal/edge"
 )
 
+// EdgeCollectorStatus is a point-in-time worker liveness snapshot.
+type EdgeCollectorStatus struct {
+	Configured  int
+	Observed    int
+	LastRoundAt time.Time
+	LastError   string
+}
+
 // EdgeManager 는 실행 중인 edge.Worker 와 그 대상 목록을 소유한다.
 //
 // 워커의 수명 컨텍스트는 NewEdgeManager 에 받은 루트 ctx 뿐이다 —
@@ -123,6 +131,22 @@ func (m *EdgeManager) Latest() []map[string]any {
 		return filter(lg)
 	}
 	return nil
+}
+
+// CollectorStatus reports worker liveness without exposing device identities.
+func (m *EdgeManager) CollectorStatus() EdgeCollectorStatus {
+	m.mu.Lock()
+	worker := m.worker
+	configured := len(m.devices)
+	m.mu.Unlock()
+
+	status := EdgeCollectorStatus{Configured: configured}
+	if worker == nil {
+		return status
+	}
+	status.Observed = len(worker.LatestDevices())
+	status.LastRoundAt, status.LastError = worker.CollectionStatus()
+	return status
 }
 
 // Add 는 장비를 핫애드한다(다음 라운드부터 폴링 — 첫 라운드는 즉시 시작).
