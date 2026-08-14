@@ -7,3 +7,6 @@ config.local.json.tmp
 cmd/serverdesk/serverdesk
 serverdesk.local.env
 dist/
+/auth.json
+/.serverdesk-auth-*
+/docs/HANDOFF.md
