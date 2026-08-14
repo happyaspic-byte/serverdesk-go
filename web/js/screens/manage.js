@@ -3,13 +3,13 @@
  * REBUILD-SPEC §1.8 / §5.1 / §5.5
  *
  * 회사 ▸ 공장 ▸ 장비 3단 접이식 트리 + 추가 위저드(4단계) + 수정 모달(4탭) + 삭제 확인.
- * 시뮬 모드는 state.fleet 로컬 배열을 직접 변경, 실 모드는 /api/clusters 호출 후 폴백.
+ * 실장비는 /api/clusters를 통해 config에 저장한다.
  *
  * CSS 접두사: sc-mng-   /   data 훅: data-mng-*
  * 의존: js/model/*, js/util/* 만 (다른 screens 미import)
  * ========================================================================== */
 
-import { makeDevice, TYPE_KEYS } from '../model/data.js';
+import { TYPE_KEYS } from '../model/data.js';
 
 const DASH = '—';
 
@@ -280,8 +280,8 @@ const screen = {
       '회사 ▸ 공장 ▸ 장비 — 이름·IP·상태, 추가/수정/제거'
     );
 
-    // 폴러 배너 (시뮬 모드에서는 숨김)
-    const liveErr = state.source === 'live' && (state.liveError || state.stale);
+    // 폴러 연결 배너
+    const liveErr = state.liveError || state.stale;
     this.elBanner.hidden = !liveErr;
     if (liveErr) {
       this.elBannerText.textContent = L('Poller unreachable', '폴러 연결 실패')
@@ -531,8 +531,7 @@ const screen = {
     const r = this.rowRefs.get(d.id);
     if (!r) return;
     const L = ctx.L;
-    // G8: 회사 그룹 헤더가 이미 회사를 말하므로 행 라벨은 프리픽스를 벗긴 장비코드만
-    //     ('대원정밀 EDGE-21' → 'EDGE-21') — 토폴로지 컴팩트 카드(G5)와 동일 규칙.
+    // 회사 그룹 헤더와 중복되지 않도록 행에는 회사 프리픽스를 벗긴 장비코드만 표시한다.
     const nmFull = d.label || d.host || DASH;
     r.name.textContent = (d.company && nmFull.indexOf(d.company) === 0)
       ? (nmFull.slice(d.company.length).trim() || nmFull) : nmFull;
@@ -1235,8 +1234,7 @@ const screen = {
       platform: m.platform || '',
       // FT 수집 방식(api)도 복원 — 미복원이면 rest/snmp 장비가 항상 'avcli (자동)'으로
       // 렌더된다(#392). api_orig 는 buildBody 가 '자동으로 되돌리기'(빈 값 명시 전송)와
-      // '기존 유지'(미전송)를 구분하는 기준이다. meta.api 는 live normalize 화이트리스트에
-      // 아직 없어 실 모드에서는 대부분 '' — 살아 있는 경우(시뮬·normalize 보정 후)만 복원된다.
+      // '기존 유지'(미전송)를 구분하는 기준이다. meta.api가 응답에 있으면 그 값을 복원한다.
       api: m.api || '', api_orig: m.api || '',
       vendor: m.vendor || '', bmc_ip: (m.bmc && m.bmc.ip) || '',
       model: (m.plc && m.plc.model) || '', asset_tag: m.assetTag || '', floor_pos: m.floorPos || '',
@@ -1302,7 +1300,7 @@ const screen = {
     return null;
   },
 
-  /* ── 저장 / 삭제 (시뮬=로컬, 실=REST + 폴백) ──────────────────────────── */
+  /* ── 저장 / 삭제 (REST) ─────────────────────────────────────────────── */
   buildBody(f) {
     const vmips = (f.vms || [])
       .map((v) => ({ name: String(v.name || '').trim(), ip: String(v.ip || '').trim() }))
@@ -1331,16 +1329,9 @@ const screen = {
   },
 
   async api(method, url, body) {
-    const st = this.ctx.store.getState();
-    if (st.source !== 'live') return { ok: true, sim: true };
     try {
       const headers = {};
       if (body) headers['Content-Type'] = 'application/json';
-      // serve.py 를 --token 으로 띄운 운영 모드에서는 모든 쓰기 요청이
-      // X-Serverdesk-Token 헤더 일치를 요구한다(불일치·누락 → 403). 토큰은 설정
-      // 화면에서 입력받아 setg.token 에 영속한다.
-      const tok = (st.setg && typeof st.setg.token === 'string') ? st.setg.token : '';
-      if (tok) headers['X-Serverdesk-Token'] = tok;
       const r = await fetch(url, {
         method,
         headers: Object.keys(headers).length ? headers : undefined,
@@ -1395,11 +1386,7 @@ const screen = {
     const st = ctx.store.getState();
     const fleet = (st.fleet || []).slice();
     if (f.mode === 'add') {
-      fleet.push(makeDevice({
-        key: f.key, type: f.type, label: f.label, company: f.company,
-        factory: f.factory, mgmt: f.mgmt, site: f.site, assetTag: f.asset_tag,
-      }));
-      ctx.store.setState(sameForm ? { fleet, form: null, wizardStep: 0 } : { fleet });
+      ctx.store.setState(sameForm ? { form: null, wizardStep: 0 } : {});
       ctx.showToast(res.restart_required
         ? L('Saved — polling starts after poller restart', '저장됨 — 폴러 재시작 후 수집 시작') + ': ' + f.label
         : (L('Device added', '장비를 추가했습니다') + ': ' + f.label));
@@ -1414,23 +1401,18 @@ const screen = {
           vendor: f.vendor || (dev.meta && dev.meta.vendor) || '',
         });
         if (f.bmc_ip && dev.meta.bmc) dev.meta.bmc = Object.assign({}, dev.meta.bmc, { ip: f.bmc_ip });
-        // 실 모드 낙관 반영 마커 — 폴리가 PUT 을 반영하기 전에 다음 pull 이 서버 스냅샷으로
-        // 이 필드들을 되돌리지 못하게 data.pullPatch(mergeLocalWrites)가 다시 입힌다.
-        // 시뮬(res.sim)에서는 서버 스냅샷이 없으므로 달지 않는다(시뮬 계약 불변).
-        if (!res.sim) {
-          dev.meta.localEdit = {
-            ts: Date.now(),
-            site: dev.site,
-            label: dev.meta.label, company: dev.meta.company, factory: dev.meta.factory,
-            mgmt: dev.meta.mgmt, assetTag: dev.meta.assetTag, floorPos: dev.meta.floorPos,
-            vendor: dev.meta.vendor, bmcIp: String(f.bmc_ip || '').trim(),
-          };
-        }
+        // PUT 성공 직후 폴러가 변경을 반영하기 전까지 표시 필드를 유지한다.
+        // data.pullPatch(mergeLocalWrites)가 서버 스냅샷 위에 다시 적용한다.
+        dev.meta.localEdit = {
+          ts: Date.now(),
+          site: dev.site,
+          label: dev.meta.label, company: dev.meta.company, factory: dev.meta.factory,
+          mgmt: dev.meta.mgmt, assetTag: dev.meta.assetTag, floorPos: dev.meta.floorPos,
+          vendor: dev.meta.vendor, bmcIp: String(f.bmc_ip || '').trim(),
+        };
         fleet[i] = dev;
       }
-      // 내용 편집은 fleet 의 id·길이·updatedAt 이 불변이라 buildModel 메모 지문(compute.js)의
-      // fleet 프록시가 그대로다 — lastPoll 을 함께 올려 다음 폴링 틱 없이도(시뮬 +
-      // refresh OFF) 지문이 바뀌어 편집 내용이 즉시 반영되게 한다(#358).
+      // 표시 필드 수정은 lastPoll도 갱신해 다음 폴링 전 화면에 즉시 반영한다.
       ctx.store.setState(sameForm
         ? { fleet, form: null, wizardStep: 0, lastPoll: Date.now() }
         : { fleet, lastPoll: Date.now() });
@@ -1486,14 +1468,9 @@ const screen = {
     if (!String(f.mgmt || '').trim()) { this.setForm({ testErr: L('Management IP is required', '관리 IP는 필수입니다'), testResult: null }); return; }
     this.setForm({ testing: true, testErr: null, testResult: null });
 
-    const st = ctx.store.getState();
     let result = null; let error = null;
-    if (st.source === 'live') {
-      const res = await this.api('POST', '/api/clusters/test', this.buildBody(f));
-      if (res.ok) result = res; else error = res.error;
-    } else {
-      result = this.simTest(f, L);
-    }
+    const res = await this.api('POST', '/api/clusters/test', this.buildBody(f));
+    if (res.ok) result = res; else error = res.error;
     // await 사이에 폼이 교체·폐기됐을 수 있다 — 테스트 중엔 busy=false라 닫기가 허용되고
     // (닫기 계약은 busy 만 본다), 닫은 뒤 다른 모달을 열면 form 객체가 바뀐다. 시작한 폼
     // f와 다륩다면 결과·에러를 현재 폼에 주입하지 않는다(submit·doDelete 의 #319 와 동형).
@@ -1504,33 +1481,6 @@ const screen = {
     this.setForm({ testing: false, testResult: result, testErr: error });
   },
 
-  /** 시뮬 모드 연결 테스트 — 폼 값만으로 그럴듯한 결과를 합성한다(백엔드 없음). */
-  simTest(f, L) {
-    const ip = String(f.mgmt || '').trim();
-    const okIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(ip);
-    const ft = isFTType(f.type);
-    const authNeeded = ft || f.type === 'WIN' || f.type === 'PI';
-    const hasPw = !!(f.admin_pass || f.root_pass) || f.mode === 'edit';
-    const out = {
-      reachable: okIp,
-      auth: { ok: !authNeeded || (okIp && hasPw), error: authNeeded && !hasPw ? L('password required', '비밀번호 필요') : '' },
-      transport: ft ? (f.api || 'avcli') : (f.type === 'PLC' ? 'fins' : 'snmp'),
-      version: ft ? '7.9.2.0' : '',
-      warnings: [],
-    };
-    if (!okIp) out.warnings.push(L('Management IP looks invalid.', '관리 IP 형식이 올바르지 않습니다.'));
-    if (ft && okIp) {
-      out.nodes = [0, 1].map((i) => ({
-        name: (f.label || f.key || 'node') + '-node' + i,
-        state: 'running', standing: 'normal', primary: i === 0,
-      }));
-      out.vms = ['app01', 'db01', 'hmi01'].map((n, i) => ({ name: n, state: i === 2 ? 'stopped' : 'running', ft: i === 0 }));
-    }
-    if (!ft && f.type !== 'PLC' && !f.community && f.mode === 'add') {
-      out.warnings.push(L('SNMP community is empty — telemetry may be unavailable.', 'SNMP 커뮤니티가 비어 있어 텔레메트리 수집이 안 될 수 있습니다.'));
-    }
-    return out;
-  },
 
   fillVms() {
     const f = this.form(); if (!f || !f.testResult || !f.testResult.vms) return;

@@ -193,8 +193,8 @@ export function fmtDowntimeYr(a, L) {
   return l((hrs / 24).toFixed(1) + 'd/yr', '연 ' + (hrs / 24).toFixed(1) + '일');
 }
 
-/** 장비 라벨('대원정밀 EDGE-27')에서 회사 프리픽스를 벗긴 고유 장비코드('EDGE-27'). 프리픽스가
- *  없으면(everRun 8.1.0.2-19 등) 라벨을 그대로 쓴다 — 절단에서 살아남아야 할 토큰을 우선한다(E1). */
+/** 장비 라벨에서 회사 프리픽스를 벗긴 고유 장비코드를 반환한다.
+ * 프리픽스가 없으면 라벨을 그대로 유지한다. */
 function deviceCode(label, company) {
   let s = String(label == null ? '' : label).trim();
   const co = String(company == null ? '' : company).trim();
@@ -386,12 +386,11 @@ export function sortRows(rows, key, dir) {
  * 6. 경보/트랩 수집 (Vigil buildModel.ts liveAlerts/liveTraps)
  * ======================================================================== */
 
-// 경보 유형(name) → 한글 요약. 실장비 폴러(everRun)와 시뮬 템플릿의 경보 desc 는 전부 영문이라,
-// 라벨/필터/상태가 한글인 카드 본문만 영문으로 남아 판독 마찰이 생겼다(E3). 유형 키(name)로 한글
-// 요약을 매핑하고, 원문(desc)은 카드 툴팁·로그 tail 에 그대로 보존한다(정보 손실 없음). 매핑에 없는
-// 유형(동적 포트/노드명이 섞인 원시 트랩 등)은 원문을 그대로 노출한다.
+// 경보 유형(name) → 한글 요약. 수집 장비의 경보 desc는 주로 영문이므로 카드 판독을 위해
+// 유형 키로 한글 요약을 매핑한다. 원문(desc)은 툴팁·로그에 보존하며, 매핑에 없는
+// 동적 포트·노드 경보나 원시 트랩은 원문을 그대로 노출한다.
 const ALERT_KO = {
-  // data.js 시뮬 템플릿(name)
+  // 주요 수집 경보 유형
   DISK_PRESSURE: '공유 볼륨 그룹 저장 용량 부족',
   NIC_NO_LINK: '네트워크 인터페이스 링크 없음',
   VM_MIGRATED: 'VM 이 피어 노드로 이전됨',
@@ -875,8 +874,8 @@ export function buildModel(a, b) {
   //   (critOf) 키가 영구 불일치해, 확인한 심각 경보가 '주의 필요'에 남는다.
   // #365: time 결측의 폴핵은 onset 맵이 아니라 고정값(ACK_TIME_MISSING) — collectAlerts 가
   //   납품하는 ackTime 과 같은 재료라 카드 키와 세션 무관하게 일치한다.
-  // #398: DEVICE_STATE(합성)도 collectAlerts 와 같은 재료(downSince/issueSince 우선, 없으면
-  //   고정값) — 시뮬이 기록한 세션 시각 a.time 을 쓰면 카드 키와 갈라진다.
+  // #398: DEVICE_STATE(합성)도 collectAlerts와 같은 재료(downSince/issueSince 우선,
+  //   없으면 고정값)를 써야 카드 키가 세션 시각과 무관하게 유지된다.
   const isAcked = (hostId, a, m) => !!ackMap[ackKeyOf(hostId, a.name, a.desc || a.name,
     (a && a.name === 'DEVICE_STATE')
       ? (tsNorm(m && m.downSince) || tsNorm(m && m.issueSince) || ACK_TIME_MISSING)
@@ -1118,9 +1117,8 @@ export function buildModel(a, b) {
     return out;
   };
 
-  // 로그: 이벤트 이력(폴러 events[] — 전이·발생·해제) + trap 병합(최신순) + 레벨/키워드 필터.
-  // 이력이 오면 그것이 정본 — 활성 경보 스냅샷 병합(liveEvents)은 이력 없는 구폴러/시뮬 폴백.
-  // (스냅샷 방식은 경보가 해소되는 순간 로그에서도 증발했다 — 실사용 지적.)
+  // 로그: 이벤트 이력(폴러 events[] — 전이·발생·해제)이 정본이며 trap을 최신순으로 병합한다.
+  // 이벤트 이력이 없는 이전 폴러에서는 활성 경보 스냅샷을 보조 경로로 사용한다.
   const evLog = _arr(S.liveEventLog).map((e) => ({
     id: 'ev|' + e.host + '|' + e.time + '|' + e.desc,
     hostId: e.host, host: e.label || e.host,
@@ -1251,11 +1249,9 @@ export function buildModel(a, b) {
   };
 
   /* ---- 스토리지그룹 사용률(FT 클러스터) ----
-     FT 장비(EV/EDGE/END/FTS)의 meta.topo.storage[] 그룹별 사용률(%)을 한 목록으로 모은다.
-     topo(폴러 실관계)는 실장비 응답에만 담기고 시뮬 장비엔 없다 → topo.storage 가 없으면 그 장비는
-     생략한다(방어). 사용률(pct) 결측 그룹도 건너뛴다. 임계 톤은 barColor 규칙(78 warn/90 neg)을
-     재사용하되, 중립은 pos(녹색)가 아니라 잉크 톤이라 tone=''(빈 문자열)로 내보낸다.
-     실장비 ztC Edge 의 'Initial Storage Group'(97%)이 이 카드의 존재 이유다. */
+     FT 장비(EV/EDGE/END/FTS)의 meta.topo.storage[] 그룹별 사용률(%)을 모은다.
+     topo.storage 또는 사용률이 없는 장비·그룹은 건너뛴다. 임계 톤은 barColor 규칙을
+     재사용하되, 정상 중립값은 잉크 톤으로 표시한다. */
   const storageGroups = [];
   SERVERS.forEach((s) => {
     if (!isFT(s.type)) return;
@@ -1400,9 +1396,9 @@ export function buildModel(a, b) {
     tierErrs: tierErrHosts.slice(0, 3),
   };
   const pollStat = Object.assign({}, collect, {
-    source: S.source || 'sim',
-    live: S.source === 'live',
-    sourceLabel: S.source === 'live' ? L('Live', '실시간') : L('Simulation', '시뮬레이션'),
+    source: 'live',
+    live: true,
+    sourceLabel: L('Live', '실시간'),
     lastPoll,
     ago: agoText(pollAgoSec, L, ko),
     agoSec: pollAgoSec,
@@ -1442,9 +1438,7 @@ export function buildModel(a, b) {
   /* ---- 클러스터 / 용량 / 관리 트리 / 검색 ---- */
   const clusters = buildClusterRows(allRows, SERVERS, S, L, ko);
   const capacity = buildCapacityModel(allRows, SERVERS, resAgg, L, ko);
-  // 관리 트리(manage 화면 전용 소비)는 config CRUD 대상만 — 시뮬 장비(meta.sim)는
-  // config 에 없어 수정/삭제가 실패하므로 트리에서 뺀다. 다른 화면 표시에는 그대로 포함.
-  const tree = buildTree(allRows.filter((r) => !(devById[r.id] && _meta(devById[r.id]).sim)), S, L);
+  const tree = buildTree(allRows, S, L);
   const searchResults = buildSearchList(SERVERS, realAlerts, S, L, ko, today);
 
   /* ---- 경보 인사이트(통계 탭) — 새 수집 없이 기존 모집단에서 파생한다 ---- */
@@ -1464,11 +1458,9 @@ export function buildModel(a, b) {
   });
   const topDevices = Object.keys(_devCnt).map((k) => _devCnt[k])
     .sort((a, b) => (b.critN - a.critN) || (b.count - a.count)).slice(0, 5);
-  // 확인 시간 — 경보의 실제 onset(a.time 벽시계)과 확인 시각(ISO)의 차. 키의 시각 재료
-  // (parts[3]=ackTime)는 쓰지 않는다 — #543 이후 DEVICE_STATE 의 ackTime 은 키 안정화용
-  // 에피소드 스탬프(data.js::_episodeStamp, 최대 ~300일 과거의 결정적 가짜 시각)라 그걸
-  // onset 으로 파싱하면 시뮬에서 '평균 확인 수천 시간'이 나온다(#585). 이미 해소돼 목록에
-  // 없는 경보의 고아 키는 onset 조회 실패로 자연 배제된다.
+  // 확인 시간은 경보의 실제 onset(a.time)과 확인 시각의 차다. 키 안정화용 ackTime은
+  // 실제 발생 시각이 아닐 수 있으므로 계산에 쓰지 않는다. 이미 해소돼 목록에 없는 경보의
+  // 고아 키는 onset 조회 실패로 자연 배제된다.
   const _onsetByAckKey = Object.create(null);
   realAlerts.forEach((r) => {
     if (r.ackKey && _onsetByAckKey[r.ackKey] == null) _onsetByAckKey[r.ackKey] = tsKey(r.time);
@@ -1590,11 +1582,8 @@ function buildCapacityModel(rows, fleet, resAgg, L, ko) {
     _arr(m.vmList).forEach((v) => {
       const n = String(v.node || '');
       if (!n) return;
-      // E2: 노드 부제 스킴 통일 — 시뮬은 'sj-edge-sim23-node0'(장비 raw id 접두), 실장비는 'node0'로
-      //     서로 달랐고, 접두 raw id 는 상단 친숙 장비명(host)과도 충돌했다. 접두를 벗겨 'node0'로 정규화해
-      //     전 행이 '{장비명} · node{N}' 동일 스킴이 되게 한다(그룹핑 키는 원문 n 유지).
-      //     nodeKey(원문 n)는 화면 syncList 키 재료 — 같은 nShort로 정규화되는 원문 다른 두 노드
-      //     (예: node0와 foo-node0)가 표시명만으로 키를 만들면 충돌해 행이 소실된다.
+      // 노드 원문에 장비 접두사가 포함돼도 부제는 node{N}으로 정규화한다.
+      // 그룹핑 키에는 원문을 유지해 서로 다른 노드의 표시명이 같아도 행이 소실되지 않게 한다.
       const nShort = n.replace(/^.*?-(node\d+)$/i, '$1');
       const cur = per[n] || (per[n] = { node: nShort, nodeKey: n, host: m.label || s.host, id: s.id, total: 0, running: 0 });
       cur.total++;
@@ -1719,9 +1708,7 @@ export function buildCapacity(a, b) {
 }
 export function buildManageTree(a, b) {
   const { fleet, state } = _resolve(a, b);
-  // 장비 관리는 config CRUD 화면 — 폴섭이 생성한 시뮬 장비(sim_devices)는 config 에
-  // 없어서 수정/삭제가 반드시 실패하므로 목록에서 숨긴다(삭제 시 '장비 없음' 오류 방지).
-  const m = buildModel(_arr(fleet).filter((s) => !(s && s.meta && s.meta.sim)), state);
+  const m = buildModel(fleet, state);
   return m.tree;
 }
 export function buildSearch(a, b) {
@@ -2661,11 +2648,7 @@ function coDefaultColorMap(coNames, hasReal) {
  * 작으면(회사 포커스 등) 자연히 C=1·D=1 로 수렴한다(열을 늘려도 종횡비 이득이 없으므로).
  * ------------------------------------------------------------------------ */
 const PAD = 24;
-// T1→G1: 회사 박스 폭 150→164 — 150 은 이름 폭 87px 로 '동아반도체'(800 웨이트 실측 ~86px)가
-//     여유 1px 에 걸려 렌더러에 따라 '동아반…'으로 절단됐다. 폭을 최장명 +14px 여유로 키우고
-//     오른쪽 컬럼(FA.x)·그리드 기준선(GRID_X)을 같이 +18 밀어 간선 최소 수평런(≥20px)을 지킨다.
-// G33: CO.w 164→176 — --fs-19 확대(19→23px, FIT_MIN 0.40 페어)로 '동아반도체' 실측 105px 가
-//     내부 101px 를 4px 넘겨 '동아반…' 절단 재발(G1 회귀). +12 로 여유 8px 복원.
+// 회사명이 긴 환경에서도 라벨이 잘리지 않도록 카드 폭과 내부 여백을 확보한다.
 const CO = { x: 24, w: 176, h: 46 };
 // FA.w 152→196: 실장비 공장 라벨(서브넷 '172.30.1.0/24')이 fit 라벨 확대(--fs-19)에서
 // 실측 127px 를 요구 — 188(내부 125px)은 2px 모자라 '/24'가 잘렸다. +8 여유로 절단 제거.
@@ -2678,8 +2661,7 @@ const GRID_X = 458;                 // 장비 그리드 좌측 기준선(열 0).
 // 면적을 줄여야 같은 스테이지에 더 많은 열/행이 들어온다(실측: 라이브 102대 기준 fit 0.42,
 // 스테이지 점유 57%, 잘림 0). 기본(미줌) 배율에선 sub/bars/foot 를 CSS 가 이미 숨기고 head(아이콘+
 // 라벨) 1줄만 남기므로(§styles :not(.is-zoomed)) 높이를 줄여도 기본 뷰 판독성은 그대로다.
-// G33: CARD.w 150→164 — 실클러스터 컴팩트 타일 라벨 'everRun 8.1.0.2-19' 실측 114px 가
-//     내부 107px 에서 7px 절단. +14 로 내부 121px(여유 7px) 확보 — 시뮬 코드(EV-05)는 원래 무사.
+// G33: CARD.w 150→164 — 긴 실클러스터 타일 라벨이 내부 폭에서 잘리지 않도록 여유를 확보한다.
 // G34(레드팀 P2-1 정정): CARD.gx 8→26 — 이전 값(8px)에서는 열 간 스파인(spineX = colX-22)이
 // 이전 열 카드의 우변(prevColX+CARD.w)보다 왼쪽에 와 스파인 선이 이전 카드 밑에 깔려 가려졌다.
 // gx 를 26 으로 넓히고 spineX 를 colX-13 으로 당겨 접기 손잡이(카드 우변 중앙, ±11px)와 스파인
@@ -2701,7 +2683,7 @@ const XD = { w: 252, h: 140 };
 const ENDU = { w: 595 };            // ztC Endurance 단일 섀시 카드 — 흐름 그룹 4열(BMC→STANDBY→MGMT→HOST) + 상태점/ms 실측 수용 폭
 const XN = { x: 288, w: 208, h: 74, gy: 14 };
 const XE = { x: 532, w: 142, h: 106 };
-// 시뮬·비FT 호스팅 VM 은 오른쪽으로 열을 늘리지 않고 한 열에서 아래로 계속 쌓는다.
+// 비FT 호스팅 VM은 오른쪽으로 열을 늘리지 않고 한 열에서 아래로 계속 쌓는다.
 // 사용자가 장비→VM 흐름을 좌→우 새 열이 아니라 위→아래 형제 목록으로 읽도록 폭을 고정한다.
 const XV = { x: 718, w: 212, h: 92, gy: 12 };
 const TARGET_RATIO = 1.62;
@@ -3034,7 +3016,7 @@ export function realLanes(m, vgColOf) {
   return { lanes, total };
 }
 
-/** 시뮬·비FT 호스팅 VM 은 개수와 무관하게 한 열에서 아래로 쌓는다. */
+/** 비FT 호스팅 VM은 개수와 무관하게 한 열에서 아래로 쌓는다. */
 export function vmGrid(n) {
   if (n <= 0) return { cols: 0, rows: 0 };
   return { cols: 1, rows: n };
@@ -3094,7 +3076,7 @@ export function nodeStatus(n) {
   if (!run) return 'down';
   const sd = String((n && n.standing) || '').toLowerCase();
   const md = String((n && n.mode) || '').toLowerCase();
-  // mode 는 poller/시뮬레이터에 따라 'normal' 또는 'production' 이 정상값이다.
+  // 수집원에 따라 mode 정상값은 'normal' 또는 'production'이다.
   const modeBad = md && md !== 'normal' && md !== 'production';
   return ((sd && sd !== 'normal') || modeBad) ? 'deg' : 'op';
 }
@@ -3172,16 +3154,15 @@ export function buildTopo(a, b) {
     (c[fa] || (c[fa] = [])).push(s);
   });
   Object.keys(coMap).forEach((co) => Object.keys(coMap[co]).forEach((fa) => coMap[co][fa].sort(devSort)));
-  // G3: 실장비(폴러 meta.topo) 회사를 맨 위로 — 초기 fit 화면(상단부)에서 실제 인프라가
-  //     먼저 읽힌다. 대형 시뮬 플릿에 실클러스터가 아래로 밀려 첫 화면 밖으로 잘리던 문제.
-  const coHasReal = (co) => Object.keys(coMap[co]).some((fa) => coMap[co][fa].some((s) => !!topoOf(s)));
+  // 상세 토폴로지가 있는 회사를 위에 두어 초기 fit 화면에서 FT 인프라를 먼저 읽게 한다.
+  const coHasTopology = (co) => Object.keys(coMap[co]).some((fa) => coMap[co][fa].some((s) => !!topoOf(s)));
   const companies = Object.keys(coMap).sort((a, b) => {
-    const ra = coHasReal(a) ? 0 : 1; const rb = coHasReal(b) ? 0 : 1;
+    const ra = coHasTopology(a) ? 0 : 1; const rb = coHasTopology(b) ? 0 : 1;
     return ra !== rb ? ra - rb : cmpKo(coLabel(a), coLabel(b));
   });
   const realCos = companies.filter((c) => c !== UNASSIGNED_CO);
   // 기본색 산출은 모듈 단일 함수(buildCompanyColors 와 공용 — #52).
-  const coDefaults = coDefaultColorMap(realCos, coHasReal);
+  const coDefaults = coDefaultColorMap(realCos, coHasTopology);
   const coColor = (co) => companyColors[co]
     || (co === UNASSIGNED_CO ? null : coDefaults[co]);
   const shown = (focusCo && companies.indexOf(focusCo) >= 0) ? [focusCo] : companies;
@@ -3466,8 +3447,7 @@ export function buildTopo(a, b) {
       // 점검 창 장비 표시(#19) — topology.js 가 상태 배지를 '점검 중'으로 대체하고 사유를 툴팁에 둔다.
       maintWin, maintNote: maintWin ? String((maintMap[s.id] || {}).note || '') : '',
       label: m.label || s.host, typeIcon: ti.icon, typeLabel: ti.short || ti.label, mgmt: m.mgmt || '',
-      // E1: 플로어 맵 타일 라벨이 '대원정밀 EDGE-…' 처럼 회사 프리픽스에서 절단돼 고유 식별번호(EDGE-27)가
-      //     사라졌다. 회사명을 벗긴 장비코드(code)와 회사(company)를 함께 내려, 타일이 코드를 우선 노출한다.
+      // 회사명을 벗긴 장비코드(code)와 회사(company)를 함께 내려 타일이 코드를 우선 노출한다.
       company: m.company || '',
       code: deviceCode(m.label || s.host, m.company),
       // 플로어 맵 실배치('행,열', 장비 관리에서 편집) — 빈 값이면 플로어 뷰가 자동 배치.
@@ -3854,12 +3834,9 @@ export function buildTopo(a, b) {
     // T2: 4줄 장황 안내문을 한 줄 요약으로 축약. 세부(무슨 +가 무엇을 펼치는지)는 hintTip(툴팁)으로 이관.
     hint: L('Click a card for detail · + expands each layer',
       '카드 클릭 → 상세 · + 로 하위 계층 펼침'),
-    // #316: 장비 +·VM 그룹 + 도 실데이터(meta.topo) 펼침 행 전용 — 시뮬 뷰의 실존 + 는
-    //     회사·공장·노드뿐이다. 화면에 실제로 그려진 + 박스 기준으로 문구를 분기해,
-    //     없는 컨트롤을 가리키는 오안내를 막는다(실데이터 전용 컨트롤은 조걸부로만 안내).
-    // #350: 분기를 박스 종류별로 나눈다 — 장비 + 와 VM 그룹 + 는 별개 컨트롤이라,
-    //     meta.topo 는 있지만 VM 0대인 플릿(장비 + 만 존재)에서까지 'VM 그룹의 +' 를
-    //     안내하면 같은 부류의 오안내다. 각 문구는 해당 컨트롤이 실존할 때만 포함한다.
+    // 장비 +와 VM 그룹 +는 상세 토폴로지 행에만 존재한다. 실제로 그려진 컨트롤을
+    // 기준으로 문구를 분기해 없는 조작을 안내하지 않는다.
+    // meta.topo가 있어도 VM이 0대면 장비 +만 존재하므로 각 문구를 독립적으로 고른다.
     hintTip: devPlus
       ? (vgPlus
         ? L('Click a card to open its detail. The device + expands nodes / console; each VM group + toggles its VMs.',

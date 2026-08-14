@@ -114,6 +114,21 @@
 .sc-topo-fit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sc-topo-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
 .sc-topo-svg { position: absolute; left: 0; top: 0; display: block; overflow: visible; }
+/* 빈 구성에서도 격자만 남아 렌더 오류처럼 보이지 않게, 캔버스 위에 안내를 고정한다. */
+.sc-topo-empty {
+  position: absolute; inset: 0; z-index: 5;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--sp-2); padding: var(--sp-6); text-align: center; pointer-events: none;
+}
+.sc-topo-empty[hidden] { display: none; }
+.sc-topo-empty-ico {
+  display: flex; align-items: center; justify-content: center;
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--surface-2); color: var(--muted);
+}
+.sc-topo-empty-title { font-size: var(--fs-16); font-weight: 700; color: var(--ink); }
+.sc-topo-empty-sub { max-width: 340px; font-size: var(--fs-13); line-height: 1.5; color: var(--muted); }
+.sc-topo-empty-go { margin-top: var(--sp-2); pointer-events: auto; }
 
 /* 링크 선 — pointer-events 는 stroke 픽셀에만(팬 드래그·카드 클릭을 막지 않도록 버블링 유지).
    정상 링크는 중립선으로 후퇴시키고, hover 만 브랜드 액센트로 올린다.

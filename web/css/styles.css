@@ -420,12 +420,14 @@ main[data-screen-root],
 .hd-bell-dot.is-neg{ background:var(--neg); }
 .hd-bell-dot.is-warn{ background:var(--warn-bright); }
 .hd-bell-dot.is-info{ background:var(--blue); }
-/* 프로필은 클릭 동작이 없는 정적 표시 영역 — cursor:pointer 는 클릭 어포던스 오신호라 제거. */
-.hd-profile{ display:flex; align-items:center; gap:8px; flex-shrink:0; }
-.hd-avatar{ width:34px; height:34px; border-radius:50%; background:var(--shell-hover); color:var(--shell-ink); border:1px solid var(--shell-line); display:flex; align-items:center; justify-content:center; font-size:var(--fs-12); font-weight:var(--fw-semi); flex-shrink:0; }
-.hd-profile-meta{ line-height:1.25; }
+/* 로그인 계정 표시와 서버 세션 로그아웃. */
+.hd-profile{ display:flex; align-items:center; gap:8px; flex-shrink:0; margin:0; }
+.hd-avatar{ width:34px; height:34px; border-radius:50%; background:var(--shell-hover); color:var(--shell-ink); border:1px solid var(--shell-line); display:flex; align-items:center; justify-content:center; font-size:var(--fs-11); font-weight:var(--fw-semi); flex-shrink:0; }
+.hd-profile-meta{ display:flex; flex-direction:column; line-height:1.25; }
 .hd-profile-name{ font-size:var(--fs-13); font-weight:var(--fw-semi); }
 .hd-profile-role{ font-size:var(--fs-11); color:var(--shell-muted); }
+.hd-logout{ width:32px; height:32px; border-radius:50%; border:1px solid var(--shell-line); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:var(--shell-muted); background:var(--shell-2); cursor:pointer; transition:all var(--dur) var(--ease); }
+.hd-logout:hover{ background:var(--shell-hover); border-color:var(--shell-active); color:var(--shell-ink); }
 
 /* ============================================================
    5. ICON RAIL (rail-)
@@ -445,11 +447,14 @@ main[data-screen-root],
 .rail-indicator.is-on{ opacity:1; }
 .rail.is-open{ width:216px; align-items:stretch; }
 /* 펼침/접힘 토글 (index.html: rail-toggle, 상단 고정) */
-.rail-toggle{ width:38px; height:34px; margin-bottom:2px; border-radius:var(--r-md); display:flex; align-items:center; justify-content:center; cursor:pointer; background:transparent; color:var(--shell-muted); flex-shrink:0; }
-.rail-toggle:hover{ background:var(--shell-hover); color:var(--shell-ink); }
-.rail-toggle svg{ transition:transform var(--dur) var(--ease); }
-.rail.is-open .rail-toggle{ width:100%; justify-content:flex-end; padding:0 11px; }
-.rail.is-open .rail-toggle svg{ transform:rotate(180deg); }
+.rail-toggle{ width:38px; height:34px; margin-bottom:2px; border:1px solid transparent; border-radius:var(--r-md); display:flex; align-items:center; justify-content:center; cursor:pointer; background:transparent; color:var(--shell-muted); flex-shrink:0; transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease),box-shadow var(--dur) var(--ease); }
+.rail-toggle:hover{ background:var(--shell-hover); border-color:var(--shell-line); color:var(--shell-ink); }
+.rail-toggle svg{ flex-shrink:0; transition:transform var(--dur) var(--ease),color var(--dur) var(--ease); }
+.rail-toggle-label{ display:none; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--fs-12); font-weight:var(--fw-semi); line-height:1; }
+.rail.is-open .rail-toggle{ width:100%; height:40px; margin-bottom:6px; justify-content:flex-start; gap:10px; padding:0 10px; background:var(--shell-hover); border-color:var(--shell-line); color:var(--shell-ink); box-shadow:var(--hairline-highlight); }
+.rail.is-open .rail-toggle:hover{ border-color:var(--shell-active); color:var(--shell-ink); }
+.rail.is-open .rail-toggle svg{ transform:rotate(180deg); color:var(--shell-active); }
+.rail.is-open .rail-toggle-label{ display:block; flex:1; text-align:left; }
 .rail-icon{ position:relative; z-index:1; width:38px; height:38px; border-radius:var(--r-md); display:flex; align-items:center; justify-content:center; cursor:pointer; background:transparent; color:var(--shell-muted); flex-shrink:0; transition:background var(--dur) var(--ease),color var(--dur) var(--ease); }
 /* 호버는 중립 회색 워시, 활성은 슬라이딩 블루 틴트 인디케이터 + 딥블루 잉크 — 강도와 색으로 구분. */
 .rail-icon:hover{ background:var(--shell-hover); color:var(--shell-ink); }
@@ -794,11 +799,9 @@ table.table{ width:100%; border-collapse:collapse; font-size:var(--fs-13); }
   font-size:var(--fs-12); font-weight:var(--fw-med); letter-spacing:.03em; color:var(--shell-muted); }
 .rail-live .u-dot{ width:6px; height:6px; }
 .rail-live.is-live{ color:var(--pos-bright); }
-/* 접힘(기본) 레일: 라이브/SIM 텍스트는 7토큰 밖 8.5px(판독 하한 미만)라 제거하고 도트+가용성 수치만
-   남긴다 — live=초록/sim=앰버 도트 색과 하단 99.9% 가용성이 라이브 여부를 이미 전달(T1). 펼침 시엔
-   폭 여유가 있어 라벨을 --fs-12(12px)로 노출한다. */
+/* 접힘(기본) 레일은 좁으므로 LIVE 텍스트를 숨기고 상태 도트와 가용성 수치만 남긴다.
+   펼침 상태에서는 라벨과 가용성을 한 줄로 정렬한다. */
 .rail:not(.is-open) .rail-live [data-field="sourceLabel"]{ display:none; }
-/* 펼침 상태: 하단 live/sim 배지 + 가용성을 한 줄 정렬 */
 .rail.is-open .rail-foot{ flex-direction:row; align-items:center; justify-content:space-between; width:100%; padding:9px 12px 0; }
 .rail.is-open .rail-live{ font-size:var(--fs-12); gap:8px; }
 .rail.is-open .rail-live .u-dot{ width:7px; height:7px; }

@@ -21,16 +21,10 @@ const THRESHOLDS = [
 ];
 
 const SETG_ROWS = [
-  // 설명 문구는 실제 데이터 소스에 따라 달라진다 — 실 폴러로 도는 중에 "시뮬레이션 갱신"이라고
-  // 적혀 있으면 운영자에게 실장비를 시뮬레이션이라고 말하는 셈이다(실측 결함).
   { key: 'refresh',
     nameEn: 'Auto refresh', nameKo: '자동 새로고침',
-    metaEn: 'Advances the live simulation every 1.2s', metaKo: '1.2초 간격으로 시뮬레이션 갱신',
-    // 이 토글은 라이브 수신을 끄지 못한다 — 3초 pull 은 ARCHITECTURE.md §4.3 계약상 setg.refresh 와
-    // 무관하게 돌고, 꺼지는 건 1.2초 tick 하트비트(화면 경과시간 갱신 등)뿐이다. 문구가 마치 수신
-    // 주기를 제어하는 것처럼 읽히면 운영자가 데이터 신선도 제어를 오해한다 — 수신 지속을 명시한다.
-    metaLiveEn: 'Off keeps the 3s snapshot fetch running (collector polls devices every %s) — only the 1.2s screen heartbeat pauses',
-    metaLiveKo: '꺼도 3초 스냅샷 수신은 계속(장비 수집 주기 %s) · 1.2초 화면 하트비트만 멈춥니다' },
+    metaEn: 'Off keeps the 3s snapshot fetch running — only the 1.2s screen heartbeat pauses',
+    metaKo: '꺼도 3초 스냅샷 수신은 계속되고 1.2초 화면 하트비트만 멈춥니다' },
   { key: 'sound', nameEn: 'Alert sound', nameKo: '알림 사운드', metaEn: 'Plays a chime on warning-or-above alerts', metaKo: '경고 등급 이상 경보에서만 재생' },
   { key: 'dense', nameEn: 'Dense layout', nameKo: '고밀도 레이아웃', metaEn: 'Tighter row spacing across all screens', metaKo: '전체 화면의 행 간격을 좁게 표시' },
 ];
@@ -417,40 +411,6 @@ function buildDom(ctx) {
     setgRefs[r.key] = { name, meta, sw };
   });
 
-  // 관리 API 토큰 행 — serve.py 를 --token 으로 띄운 운영 모드에서 manage 쓰기(장비 추가·수정·
-  // 삭제·연결 테스트)는 X-Serverdesk-Token 헤더 일치를 요구한다. 값은 setg.token 에 영속하고
-  // manage.js api() 가 헤더로 첨부한다. 평문 노출 방지: password 입력 + 저장값을 다시
-  // 화면에 채우지 않는다 — 설정 여부는 placeholder·'해제' 버튼 노출로만 알린다(웹훅 카드 패턴).
-  const tokRow = el('div', 'toggle-row sc-set-token-row');
-  const tokBody = el('div', 'toggle-body');
-  const tokName = el('div', 'toggle-name');
-  // 관리 API 토큰 입력의 accessible name — 옆 라벨 텍스트를 id 로 연결한다(스위치 전례와 동일).
-  // render() 가 언어 전환 시 textContent 만 갱신하므로(id 불변) 참조가 stale 해지지 않는다.
-  tokName.id = 'sc-set-token-name';
-  const tokMeta = el('div', 'toggle-meta');
-  tokBody.appendChild(tokName);
-  tokBody.appendChild(tokMeta);
-  const tokForm = el('div', 'sc-set-token-form');
-  const tokInput = document.createElement('input');
-  tokInput.className = 'field-input u-mono sc-set-token-input';
-  tokInput.type = 'password';
-  tokInput.spellcheck = false;
-  tokInput.autocomplete = 'off';
-  tokInput.setAttribute('data-set-token-input', '');
-  tokInput.setAttribute('aria-labelledby', tokName.id);
-  const tokSave = el('button', 'btn btn--primary btn--sm');
-  tokSave.type = 'button';
-  tokSave.setAttribute('data-set-token-save', '');
-  const tokClear = el('button', 'btn btn--outline btn--sm');
-  tokClear.type = 'button';
-  tokClear.setAttribute('data-set-token-clear', '');
-  tokClear.hidden = true;
-  tokForm.appendChild(tokInput);
-  tokForm.appendChild(tokSave);
-  tokForm.appendChild(tokClear);
-  tokRow.appendChild(tokBody);
-  tokRow.appendChild(tokForm);
-  setgBody.appendChild(tokRow);
   setgCard.appendChild(setgBody);
   // ── 백업 / 복구 카드 — 설정 JSON(비밀 마스킹)·가용성 CSV 다운로드 + 파일 복구.
   const bkCard = el('section', 'card sc-set-card');
@@ -528,7 +488,6 @@ function buildDom(ctx) {
     themeName, themeMeta, btnThS, btnThL, btnThD,
     ackName, ackMeta, btnAck0, btnAck7, btnAck30,
     escName, escMeta, btnEsc0, btnEsc4, btnEsc24,
-    tokName, tokMeta, tokInput, tokSave, tokClear,
     coCard, coTitle: coH.title, coSub: coH.sub, coHint, coList,
     hookTitle: hookH.title, hookName, hookMeta, hookStatus,
     hookInput, hookSave, hookTest, hookClear, hookMsg,
@@ -708,10 +667,11 @@ async function importConfig(ctx, file) {
   S.busy = 'bk';
   render(ctx.store.getState(), ctx);
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    const tok = (ctx.store.getState().setg || {}).token || '';
-    if (tok) headers['X-Serverdesk-Token'] = tok;
-    const r = await fetch('/api/admin/config/import', { method: 'POST', headers, body: text });
+    const r = await fetch('/api/admin/config/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: text,
+    });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
     S.dom.bkMsg.textContent = j.message || L(ctx, 'Restored', '복구했습니다');
@@ -738,10 +698,11 @@ async function saveThresholds(ctx, reset) {
   S.busy = 'th';
   render(ctx.store.getState(), ctx);
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    const tok = (ctx.store.getState().setg || {}).token || '';
-    if (tok) headers['X-Serverdesk-Token'] = tok;
-    const r = await fetch('/api/admin/thresholds', { method: 'PUT', headers, body: JSON.stringify({ warn, crit }) });
+    const r = await fetch('/api/admin/thresholds', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ warn, crit }),
+    });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
     ctx.store.setState({ thresholds: { warn, crit } });
@@ -796,7 +757,7 @@ async function testHook(ctx) {
     if (e && e.name === 'AbortError') {
       showHookMsg(ctx, false, L(ctx, 'Timed out — webhook is slow or unreachable', '시간 초과 — 웹훅 응답이 느리거나 도달할 수 없습니다'));
     } else {
-      showHookMsg(ctx, false, L(ctx, 'No backend reachable (offline simulation)', '백엔드 없음(오프라인 시뮬레이션)'));
+      showHookMsg(ctx, false, L(ctx, 'Backend unreachable', '백엔드에 연결할 수 없습니다'));
     }
   }
   // await 사이에 화면을 이탈하면 destroy() 가 S=null 로 만든다 — null 역참조 방지.
@@ -805,34 +766,6 @@ async function testHook(ctx) {
   render(ctx.store.getState(), ctx);
 }
 
-// ---------------------------------------------------------------------------
-// 관리 API 토큰 (setg.token — manage 쓰기의 X-Serverdesk-Token)
-// ---------------------------------------------------------------------------
-function updateTokenButtons() {
-  if (!S) return;
-  const dom = S.dom;
-  const val = (dom.tokInput.value || '').trim();
-  dom.tokSave.disabled = !val;
-}
-
-function saveToken(ctx) {
-  if (!S) return;
-  const val = (S.dom.tokInput.value || '').trim();
-  if (!val) return;
-  ctx.store.setState((s) => ({ setg: Object.assign({}, s.setg, { token: val }) }));
-  // 입력창은 항상 비운다 — 저장된 토큰을 평문으로 다시 보여주지 않기 위함.
-  S.dom.tokInput.value = '';
-  try { ctx.showToast(L(ctx, 'API token saved', 'API 토큰을 저장했습니다')); } catch (e) { /* noop */ }
-  render(ctx.store.getState(), ctx);
-}
-
-function clearToken(ctx) {
-  if (!S) return;
-  ctx.store.setState((s) => ({ setg: Object.assign({}, s.setg, { token: '' }) }));
-  S.dom.tokInput.value = '';
-  try { ctx.showToast(L(ctx, 'API token cleared', 'API 토큰을 해제했습니다')); } catch (e) { /* noop */ }
-  render(ctx.store.getState(), ctx);
-}
 
 // ---------------------------------------------------------------------------
 // 이벤트 위임
@@ -893,8 +826,6 @@ function onClick(ev, ctx) {
   if ((hit = t.closest('[data-set-th-save]'))) { saveThresholds(ctx, false); return; }
   if ((hit = t.closest('[data-set-th-reset]'))) { saveThresholds(ctx, true); return; }
   if ((hit = t.closest('[data-set-bk-import]'))) { if (S && S.dom.bkFile) S.dom.bkFile.click(); return; }
-  if ((hit = t.closest('[data-set-token-save]'))) { saveToken(ctx); return; }
-  if ((hit = t.closest('[data-set-token-clear]'))) { clearToken(ctx); return; }
   if ((hit = t.closest('[data-set-toggle]'))) {
     const key = hit.getAttribute('data-set-toggle');
     ctx.store.setState((s) => ({ setg: Object.assign({}, s.setg, { [key]: !(s.setg && s.setg[key]) }) }));
@@ -933,9 +864,6 @@ function onInput(ev, ctx) {
   }
   if (t.matches && t.matches('[data-set-hook-input]')) {
     updateHookButtons(ctx);
-  }
-  if (t.matches && t.matches('[data-set-token-input]')) {
-    updateTokenButtons();
   }
 }
 
@@ -1089,32 +1017,16 @@ function render(state, ctx) {
   dom.aboutNames.mail.textContent = L(ctx, 'Email', '이메일');
   dom.aboutNames.tel.textContent = L(ctx, 'Phone', '전화');
 
-  // 관리 API 토큰(환경설정 카드 마지막 행)
-  dom.tokName.textContent = L(ctx, 'Manage API token', '관리 API 토큰');
-  dom.tokMeta.textContent = L(
-    ctx,
-    'Sent as X-Serverdesk-Token on device add/edit/delete/test when serve.py runs with --token',
-    'serve.py를 --token으로 띄운 경우 장비 추가·수정·삭제·연결 테스트 요청의 X-Serverdesk-Token 헤더로 전송됩니다'
-  );
-  const tokSet = !!(state.setg && state.setg.token);
-  dom.tokInput.placeholder = tokSet
-    ? L(ctx, 'Token set — enter a new one to replace', '토큰 설정됨 — 새 토큰 입력 시 교체')
-    : L(ctx, 'Enter token (stored in this browser only)', '토큰 입력(이 브라우저에만 저장)');
-  dom.tokSave.textContent = L(ctx, 'Save', '저장');
-  dom.tokClear.textContent = L(ctx, 'Clear', '해제');
-  dom.tokClear.hidden = !tokSet;
-  updateTokenButtons();
 
   // 환경설정 토글
   dom.setgTitle.textContent = L(ctx, 'Preferences', '환경설정');
   SETG_ROWS.forEach((r) => {
     const ref = dom.setgRefs[r.key];
     ref.name.textContent = L(ctx, r.nameEn, r.nameKo);
-    // 실 모드에서는 실제 폴링 주기를 보여 준다. 시뮬 모드에서만 '시뮬레이션'이라고 말한다.
-    if (r.key === 'refresh' && state.source === 'live') {
+    if (r.key === 'refresh') {
       const sec = Number(state.refreshSec) > 0 ? Number(state.refreshSec) : 60;
       const every = L(ctx, sec + 's', sec + '초');
-      ref.meta.textContent = L(ctx, r.metaLiveEn, r.metaLiveKo).replace('%s', every);
+      ref.meta.textContent = L(ctx, r.metaEn, r.metaKo) + ' · ' + L(ctx, 'collector interval ', '장비 수집 주기 ') + every;
     } else {
       ref.meta.textContent = L(ctx, r.metaEn, r.metaKo);
     }

@@ -8,7 +8,7 @@
 // 소수 장비 적응 레이아웃:
 //  - FT 클러스터가 6대 미만이면 테이블 대신 카드형(클러스터당 큰 카드: 상태·이중화 노드 페어·sync·
 //    VM(실행/전체)·라이선스·가용성, 하단에 CPU/MEM 미니바)으로 전환해 화면을 의미 있게 채운다.
-//  - 6대 이상이면 기존 읽기전용 테이블(시뮬 15대 회귀 방지). 모드 판정은 필터 이전 total 기준.
+//  - 6대 이상이면 읽기전용 테이블. 모드 판정은 필터 이전 total 기준.
 //
 //   clusters = { list[], filters[{key,label,count,active}], counts{all,op,deg,down}, total }
 //   list[] 행 필드 = compute.js row 공통 필드 + { nodeCount, vmText, licTxt, licTone }
@@ -440,10 +440,8 @@ export default {
       c.vmVal.textContent = row.vmText;
       c.licBadge.className = 'u-badge sc-cl-tile-badge ' + toneClass(row.licTone);
       c.licBadge.textContent = row.licTxt;
-      // 가용성 타일 — row.avail 은 availDays=0(시뮬·수집 초기)일 때 상태의 순수 함수인
-      // 명목값이다(compute rowOf 가 availIsMeasured 로 구분해 납품). 실측처럼 3자리 소수만
-      // 보이면 '정밀해 보이는 가짜 값'이 되므로 명목일 때는 꼬리표를 달아 출처를 밝힌다
-      // (nodes.js 의 availDown 병기와 같은 취지 — 이 화면 타일은 병기 공간이 없어 꼬리표로).
+      // 가용성 타일 — row.avail은 수집 초기에는 상태에서 유도한 명목값이다.
+      // 실측처럼 보이지 않도록 명목값에 꼬리표를 달아 출처를 밝힌다.
       c.availVal.textContent = row.availIsMeasured === false
         ? row.avail + ' · ' + ctx.L('nominal', '명목')
         : row.avail;
@@ -473,7 +471,7 @@ export default {
     });
   },
 
-  // ======================= 테이블 렌더 (6대 이상, 시뮬 15대) =======================
+  // ======================= 테이블 렌더 (6대 이상) =======================
   _renderTable(list, ctx) {
     const s = this._s;
     const dom = ctx.util.dom;
@@ -544,9 +542,7 @@ export default {
         cellsRef.memFill = tdMem.querySelector('.sc-cl-bar-fill');
         cellsRef.memVal = tdMem.querySelector('.sc-cl-bar-val');
 
-        // Sync — 아이콘은 슬롯에 넣고 참조를 보관한다: tickFleet 이 매 틱 dev.sync 를
-        // 재계산하므로 patch 경로에서도 아이콘을 갱신해야 라벨·색과 모순되지 않는다
-        // (카드 경로·nodes.js 의 syncIcoSlot 패턴과 동일).
+        // Sync 아이콘은 슬롯 참조를 보관해 폴링으로 상태가 바뀔 때 함께 갱신한다.
         const syncIcoSlot = dom.el('span');
         syncIcoSlot.appendChild(iconFn(row.syncIcon || 'link', { size: 14 }));
         const tdSync = dom.el('td', {}, [

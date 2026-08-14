@@ -1021,8 +1021,8 @@ function controlsCard(d) {
   P((d) => {
     // Endurance 는 클러스터가 아니라 단일 섀시 안의 컴퓨트 모듈 쌍이다(용어 정정).
     setText(note, (d && d.endurance)
-      ? L('Module actions run on the compute modules (simulated when the poller is offline).', '모듈 액션을 컴퓨트 모듈에 실행합니다 (시뮬레이션 모드에서는 로컬 상태로 흉내).')
-      : L('Node actions run on the cluster (simulated when the poller is offline). Control VMs inline in the list above.', '노드 액션을 클러스터에 실행합니다 (시뮬레이션 모드에서는 로컬 상태로 흉내). VM 제어는 위 가상 머신 목록에서 실행하세요.'));
+      ? L('Module actions run on the compute modules.', '모듈 액션을 컴퓨트 모듈에 실행합니다.')
+      : L('Node actions run on the cluster. Control VMs inline in the list above.', '노드 액션을 클러스터에 실행합니다. VM 제어는 위 가상 머신 목록에서 실행하세요.'));
     show(res, !!resultMsg);
     if (resultMsg) {
       setText(res, (resultMsg.ok ? '✓ ' : '✕ ') + resultMsg.msg);
@@ -2172,74 +2172,10 @@ function syncRunBtn() {
   setText(m.runBtn, busy ? L('Running…', '실행 중…') : L('Run', '실행'));
 }
 
-/* 시뮬레이션 CRUD: fleet 로컬 변경으로 액션을 흉내낸다 */
-function simulateAction(action, target) {
-  const st = CTX.store.getState();
-  const id = (lastDetail || {}).id;
-  const fleet = arr(st.fleet);
-  const idx = fleet.findIndex((s) => s && s.id === id);
-  if (idx < 0) return { ok: false, msg: L('Device not found', '장비를 찾을 수 없습니다') };
-  const dev = fleet[idx];
-  const meta = Object.assign({}, dev.meta || {});
-  const nodes = arr(meta.nodes).map((n) => Object.assign({}, n));
-  const vms = arr(meta.vmList).map((v) => Object.assign({}, v));
-  const snmp = arr(meta.snmp).map((s) => Object.assign({}, s));
-  const n = nodes.find((x) => x.name === target);
-  const vm = vms.find((x) => x.name === target);
 
-  if (action === 'node-workon' && n) { n.standing = 'maintenance'; n.mode = 'maintenance'; }
-  else if (action === 'node-workoff' && n) { n.standing = 'normal'; n.mode = 'production'; n.state = 'running'; }
-  else if (action === 'node-reboot' && n) {
-    // #541: mode 도 함께 리셋 — _nodeMaint(compute.js)는 standing+mode 둘 다 보기에
-    // 점검 중 재부팅 후 mode='maintenance' 가 잔류하면 유령 '점검 중' 으로 고정된다(#532 동급).
-    n.state = 'running'; n.standing = 'normal'; n.mode = 'production';
-    // #551: at 은 epoch 초 계약 — 시뮬 폴 러(data.js)는 Math.floor(now/1000)로 기록하고
-    // compute.js 는 at*1000 으로 읽는다. ms 로 기록하면 이벤트 정렬 키가 ~1.7e15 가 되어
-    // 개요 '최근 이벤트' 최상단에 세션 종료까지 고정된다.
-    const atSec = Math.floor(Date.now() / 1000);
-    meta.lastReboot = { ip: n.ip || '', node: n.name, at: atSec, agoSecs: 0 };
-    // agoSecs 노화 경로(data.js)는 snmp 노드의 rebooted_at 이 있을 때만 돈다 — 함께 심어
-    // '재부팅 감지됨 · 방금' 이 세션이 끝날 때까지 식지 않는 가짜 신선도 신호가 되는 것을 막는다.
-    const sn = snmp.find((s) => s && s.ip && s.ip === n.ip);
-    if (sn) { sn.rebooted_at = atSec; sn.reboot_ago = 0; }
-  } else if (action === 'node-shutdown' && n) {
-    // #576: reboot(#541)와 동일 — mode 도 함께 리셋. _nodeMaint(compute.js)는 standing+mode 를
-    // 모두 보기에 점검 중 종료 후 mode='maintenance' 가 잔류하면 멈춘 노드가 유령 '점검 중' 으로 고정된다.
-    n.state = 'stopped'; n.standing = 'normal'; n.mode = 'production';
-  }
-  else if (action === 'node-recover' && n) { n.state = 'running'; n.standing = 'normal'; n.mode = 'production'; }
-  else if (action === 'vm-poweron' && vm) { vm.state = 'running'; }
-  else if ((action === 'vm-shutdown' || action === 'vm-poweroff') && vm) { vm.state = 'shutdown'; }
-  else return { ok: false, msg: L('Target not found', '대상을 찾을 수 없습니다') };
-
-  meta.nodes = nodes;
-  meta.vmList = vms;
-  meta.snmp = snmp;
-  meta.vms = vms.length;
-  meta.vmRunning = vms.filter((x) => x.state === 'running').length;
-
-  const next = Object.assign({}, dev, { meta });
-  const M = CTX.model || {};
-  try {
-    if (typeof M.deriveStatus === 'function') next.status = M.deriveStatus(nodes, snmp);
-    if (typeof M.deriveSync === 'function') next.sync = M.deriveSync(nodes, next.status);
-    if (typeof M.availN === 'function') next.availN = M.availN(next.status);
-  } catch (e) { /* 파생 실패는 무시 */ }
-
-  const nf = fleet.slice();
-  nf[idx] = next;
-  CTX.store.setState({ fleet: nf });
-  return { ok: true, msg: L('Simulated: ', '시뮬레이션 실행: ') + action + ' ' + target };
-}
-
-/* #615: 제어 액션 POST. manage.js api() 전례 — serve.py 를 --token 으로 띄운 운영
- * 모드에서는 모든 쓰기 요청이 X-Serverdesk-Token 헤더 일치를 요구한다(_mutating_denied,
- * 불일치·누락 → 403). 토큰은 설정 화면에서 입력받아 setg.token 에 영속한다.
- * fetchImpl 주입 가능 — export 해서 게이트로 묶는다. */
-export async function postAction(id, action, target, setg, fetchImpl) {
+/* 제어 액션 POST. 상위 서버 세션이 인증하며, fetchImpl은 테스트에서 주입할 수 있다. */
+export async function postAction(id, action, target, fetchImpl) {
   const headers = { 'Content-Type': 'application/json' };
-  const tok = (setg && typeof setg.token === 'string') ? setg.token : '';
-  if (tok) headers['X-Serverdesk-Token'] = tok;
   const doFetch = fetchImpl || ((url, opts) => fetchTimeout(url, opts, 15000));
   return doFetch('/api/clusters/' + encodeURIComponent(id) + '/action', {
     method: 'POST',
@@ -2264,20 +2200,15 @@ async function runConfirm() {
   }
   busy = true;
   syncRunBtn();
-  const st = CTX.store.getState();
   let res;
-  if (st.source === 'live') {
-    try {
-      const r = await postAction(id, action, target, st.setg);
-      let j = {};
-      try { j = await r.json(); } catch (e) { j = {}; }
-      res = r.ok ? { ok: true, msg: j.output || L('started', '실행 요청됨') }
-        : { ok: false, msg: j.error || ('HTTP ' + r.status) };
-    } catch (e) {
-      res = { ok: false, msg: String((e && e.message) || e) };
-    }
-  } else {
-    res = simulateAction(action, target);
+  try {
+    const r = await postAction(id, action, target);
+    let j = {};
+    try { j = await r.json(); } catch (e) { j = {}; }
+    res = r.ok ? { ok: true, msg: j.output || L('started', '실행 요청됨') }
+      : { ok: false, msg: j.error || ('HTTP ' + r.status) };
+  } catch (e) {
+    res = { ok: false, msg: String((e && e.message) || e) };
   }
   busy = false;
   // #510: fetch(최대 15초) 대기 중 render-only 전환(뒤로가기)으로 현재 장비가 바뀌었으면
@@ -2490,8 +2421,8 @@ export default {
     const nothing = !d || !d.id;
     show(fix.empty, nothing);
     show(fix.head, !nothing);
-    // #145: bar 전체를 숨기지 않는다 — '목록으로'는 장비 소실(라이브→시뮬 폴 락 등) 시
-    // 화면 내 유일한 복귀 수단이다. 장비가 없을 때는 점검·설정 수정만 숨긴다.
+    // bar 전체를 숨기지 않는다. 장비가 수집 목록에서 사라져도 '목록으로'는
+    // 화면 내 유일한 복귀 수단이므로 점검·설정 수정만 숨긴다.
     show(fix.maintWrap, !nothing);
     show(fix.edit, !nothing);
     show(fix.tiles, !nothing);

@@ -80,9 +80,7 @@
 .sc-set-about-link:hover { text-decoration: underline; }
 
 /* 언어·테마·자동확인·에스컬레이션 행(전부 .sc-set-lang-row) — ≤560px 미디어쿼리가
-   .sc-set-seg{width:100%} 로 세로 쌓기를 의도하지만, 공용 .toggle-row 는 wrap 이 없어
-   라벨이 0폭으로 압착되고 가로 오버플로가 났다. 헤더 계약(공용 .toggle-* 재정의 금지)상
-   자기 접두사 클래스에 wrap 을 준다(.sc-set-token-row 의 wrap 전략과 동일). */
+   .sc-set-seg{width:100%} 로 세로 쌓기를 의도하므로 자체 행에서 wrap을 허용한다. */
 .sc-set-lang-row { flex-wrap: wrap; }
 
 /* 언어 세그먼트 */
@@ -247,10 +245,6 @@
 .sc-set-hook-input { flex: 1 1 300px; min-width: 0; }
 .sc-set-hook-msg { margin-top: 8px; font-size:var(--fs-12); font-weight: 700; }
 
-/* 관리 API 토큰 — toggle-row 안의 입력 폼. 좁으면 폼이 라벨 아래로 접힌다(웹훅 폼과 같은 wrap 전략). */
-.sc-set-token-row { flex-wrap: wrap; }
-.sc-set-token-form { display: flex; gap: 8px; flex: 1 1 340px; flex-wrap: wrap; }
-.sc-set-token-input { flex: 1 1 200px; min-width: 0; }
 
 /* 알림 임계값(읽기전용) */
 .sc-set-thresh-row { padding: 12px 0; border-top: 1px solid var(--line); }

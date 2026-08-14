@@ -326,7 +326,7 @@
 .sc-ov-log-tail{ display:inline-flex; align-items:center; gap:4px; font-size:var(--fs-12); margin-left:4px; }
 /* 라이브 하트비트는 은은한 opacity pulse 1개만(하드 blink 대신 완만한 호흡 주기 --dur-breath — M2). */
 .sc-ov-log-dot{ width:6px; height:6px; border-radius:50%; background:currentColor; display:inline-block; flex-shrink:0; animation:pulse var(--dur-breath) ease-in-out infinite; }
-/* 라이브 도트 필도 bright 계열 명시(#16) — 라이브=그린 bright, 시뮬=토스 블루(§1.4). */
+/* 라이브 상태 도트는 밝은 녹색을 사용한다. */
 .sc-ov-log-dot.is-pos{ background-color:var(--pos-bright); }
 .sc-ov-log-dot.is-info{ background-color:var(--blue); }
 .sc-ov-log-dot.is-paused{ animation:none; opacity:.45; }

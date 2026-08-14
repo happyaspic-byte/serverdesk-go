@@ -152,8 +152,7 @@ function cls(node, v) {
 }
 
 /** 장비 라벨의 하이픈(EDGE-24·everRun 8.1.0.2-19 등)을 비분리 하이픈(U+2011)으로 치환한다.
- *  컴팩트 카드 2줄 클램프에서 줄바꿈 지점을 회사명↔장비ID '공백' 하나로 고정해, 하이픈 뒤에서
- *  '동아반도체 EDGE-' / '24' 처럼 장비ID 가 쪼개지지 않게 한다(E4). 글리프는 하이픈과 동일. */
+ *  컴팩트 카드 2줄 클램프에서 회사명과 장비 ID를 분리하고 장비 ID 내부 하이픈은 줄바꿈하지 않는다. */
 function labelNB(v) {
   return String(v == null ? '' : v).replace(/-/g, '‑');
 }
@@ -194,6 +193,17 @@ function buildShell() {
   });
   const canvas = E('div', 'sc-topo-canvas', { 'data-topo-canvas': '1' });
   fit.appendChild(canvas);
+  const empty = E('div', 'sc-topo-empty', { 'data-topo-empty': '1', hidden: true });
+  const emptyIcon = E('span', 'sc-topo-empty-ico');
+  emptyIcon.appendChild(ico('box', 24));
+  const emptyTitle = E('h2', 'sc-topo-empty-title');
+  const emptySub = E('p', 'sc-topo-empty-sub');
+  const emptyGo = E('button', 'btn btn--primary btn--sm sc-topo-empty-go', {
+    type: 'button',
+    'data-goto': 'manage',
+  });
+  empty.appendChild(emptyIcon); empty.appendChild(emptyTitle); empty.appendChild(emptySub); empty.appendChild(emptyGo);
+  fit.appendChild(empty);
 
   const focusWrap = E('div', 'sc-topo-focuswrap');
   focusWrap.hidden = true;
@@ -326,7 +336,7 @@ function buildShell() {
 
   return {
     wrap, title, sub, legend,
-    fit, canvas, focusWrap, focusBtn, focusDot, focusName, focusHint, zoomHint, zIn, zOut, tooltip,
+    fit, canvas, empty, emptyTitle, emptySub, emptyGo, focusWrap, focusBtn, focusDot, focusName, focusHint, zoomHint, zIn, zOut, tooltip,
     floor, stageWrap, mapTitleTxt, stNodes, stHealthy, stAlert, mapLiveTxt,
     mapStage, rackLayer, cableSvg: cables, b2d, b3d,
     cNodes, cHealthy, cAlerts, cAlertCrit, grpLbl, rowsWrap, hintTxt,
@@ -543,9 +553,8 @@ function patchDevice(rec, b) {
   const r = rec.refs;
   cls(rec.node, rec.base + ' ' + tcls(b.tone));
   cls(r.dot, 'sc-topo-dev-dot sc-topo-dot ' + tcls(b.tone) + (b.anim ? ' ' + b.anim : ''));
-  // G5: 컴팩트 카드는 회사 프리픽스를 벗긴 장비코드(code)만 보여 준다 — 회사·공장은 이미
-  //     왼쪽 계층 칩이 말하고 있어 '대원정밀 EV-03' 52회 반복은 순수 노이즈였다.
-  //     전체 이름은 카드 title(툴팁)과 상세 화면에 그대로 남는다.
+  // 컴팩트 카드는 회사·공장 계층과 중복되지 않게 장비코드만 표시하고,
+  // 전체 이름은 카드 title과 상세 화면에 유지한다.
   txt(r.label, labelNB((r.compact && b.code) ? b.code : b.label));
   // 콘솔 점검 창(maintWin, #19) — 상태 배지를 '점검 중'으로 대체(nodes.js 와 같은 규약).
   // 실제 장비 상태는 카드 title·상세 화면에 그대로 남고, 창 사유(note)는 배지 툴팁에 둔다.
@@ -706,14 +715,14 @@ function patchEac(rec, b) {
 function buildVm(b) {
   const node = E('button', '', { type: 'button', 'data-topo-open': b.deviceId || b.id });
   const head = E('div', 'sc-topo-vm-head');
-  // 상태점 — 컴팩트(실데이터 세로 스택)에서 아이콘 대신 노출, 상태색을 담는다.
+  // 상태점 — 컴팩트 세로 스택에서 아이콘과 함께 상태색을 전달한다.
   const dot = E('span', 'sc-topo-vm-dot sc-topo-dot');
   head.appendChild(dot);
   head.appendChild(ico('box', 14, 'sc-topo-vm-ico'));
   const name = E('span', 'sc-topo-vm-name u-mono');
   const ft = E('span', 'sc-topo-vm-ft');
   head.appendChild(name);
-  // 비컴팩트(시뮬)는 이름 옆에, 컴팩트(실데이터)는 이름이 한 줄을 다 쓰도록 FT/HA 를 노드 줄로 내린다.
+  // 비컴팩트는 이름 옆에, 컴팩트는 이름 한 줄을 확보하도록 FT/HA를 노드 줄로 내린다.
   if (!b.compact) head.appendChild(ft);
   node.appendChild(head);
   const ip = E('div', 'sc-topo-vm-ip u-mono');
@@ -1409,11 +1418,10 @@ export function tooltipRows(box) {
     rows.push(['title', box.name || 'VM']);
     rows.push(['sub', box.state || '']);
     // #348: VM ip/node 칸의 의미는 출처 경로마다 다르다 — 라벨을 값 의미에 맞춰 분기한다.
-    //  · 실데이터(avcli poller meta.topo) 경로는 compact=true. 게스트 IP가 있으면 IP를,
-    //    없으면 ip 칸에 '8 vCPU · 16 GB' 자원 스펙을 싣는다(compute.js pushRealRow).
-    //  · 시뮬·호스팅(비FT 게스트) VM 은 ip=실제 IP → 'IP'. node 는 배치 노드/서버 유형이
-    //    정상이지만, 호스팅 VM 이 매칭 서버 없이 vcpu 만 있으면 node 칸에 '8 vCPU' 스펙이
-    //    들어온다 → 이 경우만 '사양'.
+    //  · avcli meta.topo 경로는 compact=true. 게스트 IP가 있으면 IP를,
+    //    없으면 ip 칸에 '8 vCPU · 16 GB' 자원 스펙을 싣는다.
+    //  · 비FT 호스팅 VM은 ip=실제 IP다. 매칭 서버 없이 vcpu만 있으면
+    //    node 칸이 자원 스펙이므로 이 경우에만 '사양'으로 표시한다.
     const specIp = !!box.compact && !box.ipIsAddress;
     const nodeIsSpec = !specIp && /vCPU/.test(box.node || '');
     if (box.node) rows.push(['kv', nodeIsSpec ? L('Spec', '사양') : L('Node', '노드'), box.node]);
@@ -1738,6 +1746,14 @@ export default {
     // G32: 최신 박스 데이터 캐시 — 호버 툴팁이 patch 주기와 무관하게 이걸 읽는다.
     boxDataMap = new Map();
     topo.boxes.forEach((b) => boxDataMap.set(b.id, b));
+    const empty = topo.boxes.length === 0;
+    els.empty.hidden = !empty;
+    txt(els.emptyTitle, L('No devices registered', '등록된 장비 없음'));
+    txt(els.emptySub, L(
+      'Add a device in Device Management to display the topology.',
+      '장비 관리에서 장비를 추가하면 토폴로지가 표시됩니다.',
+    ));
+    txt(els.emptyGo, L('Manage devices', '장비 관리'));
 
     /* ---- 헤더 ---- */
     txt(els.title, L('Topology', '토폴로지'));
@@ -1816,7 +1832,7 @@ export default {
       txt(els.stNodes.txt, String(devs.length) + L(' dev', ' 장비'));
       txt(els.stHealthy.txt, String(devs.filter((d) => d.tone === 'pos').length));
       txt(els.stAlert.txt, String(devs.filter((d) => d.tone !== 'pos').length));
-      txt(els.mapLiveTxt, state.source === 'live' ? 'Live' : L('Sim', '시뮬'));
+      txt(els.mapLiveTxt, 'Live');
     }
     lastPaneSig = pane;
 

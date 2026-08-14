@@ -20,6 +20,25 @@ export const LS_NOTES = 'sd.notes';
 export const LS_NOTIFY = 'sd.notify';
 // 확인 처리된 경보 키 집합 — 폴러가 해제 API 를 주지 않으므로 확인 상태는 클라이언트가 보관한다.
 export const LS_ACKED = 'sd.ackedAlerts';
+const LS_DATA_SCHEMA = 'sd.dataSchema';
+const DATA_SCHEMA = 'live-only-v1';
+
+function migrateLocalState() {
+  try {
+    if (localStorage.getItem(LS_DATA_SCHEMA) !== DATA_SCHEMA) {
+      [LS_COMPANY_COLORS, LS_ACKED, LS_MAINT, LS_NOTES].forEach((key) => localStorage.removeItem(key));
+      localStorage.setItem(LS_DATA_SCHEMA, DATA_SCHEMA);
+    }
+  } catch (e) { /* private mode 등 무시 */ }
+  try {
+    const raw = localStorage.getItem(LS_SETG);
+    const saved = raw ? JSON.parse(raw) : null;
+    if (saved && typeof saved === 'object' && Object.prototype.hasOwnProperty.call(saved, 'token')) {
+      delete saved.token;
+      localStorage.setItem(LS_SETG, JSON.stringify(saved));
+    }
+  } catch (e) { /* 구형 설정 정리 실패 무시 */ }
+}
 
 /**
  * 초기 상태 (REBUILD-SPEC.md §3.2 전문).
@@ -40,7 +59,7 @@ export const initialState = {
   railOpen: false,         // 좌측 레일 펼침 여부. localStorage['sd.railOpen']
   // ── 데이터 ──
   fleet: [],               // device[] (§4.1)
-  source: 'sim',           // 'sim' | 'live'
+  source: 'live',
   lastPoll: 0,             // epoch ms
   refreshSec: 30,          // stale 임계 계산용
   stale: false,
@@ -48,7 +67,6 @@ export const initialState = {
   liveEventLog: null,      // 폴러 events[] 이력(로그 tail 정본). 미수신 시 null — compute 는 배열로 방어
   pollerOverall: null,     // 폴러 계산 플릿 총평 'ok'|'warning'|'critical'|null
   cacheAgeSec: null,       // 폴러가 실장비를 읽은 뒤 흐른 초(null=미제공)
-  simFallback: false,      // 실 모드 유예 초과로 시뮬로 내려온 상태 — 배너 유지용
   alertView: 'cards',      // incidents 화면 탭 'cards'(경보)|'log'(로그)|'stats'(통계). 해시(#/logs)와 바인딩
   alertExpanded: false,    // incidents 카드 '더 보기' 펼침 상태(§4.1 — setState 동적 추가 금지)
   hist: {},                // { [id]: {cpu:[], mem:[], rtt:[]} } 최대 48
@@ -77,7 +95,7 @@ export const initialState = {
   thresholds: null,      // 서버 사용률 임계값 {warn,crit} — /api/devices 폴이 채움
   maint: {},
   notes: {},
-  setg: { refresh: true, sound: false, dense: false, ackAutoDays: 0, escHours: 0, token: '' },
+  setg: { refresh: true, sound: false, dense: false, ackAutoDays: 0, escHours: 0 },
   // ── floor map(topology 보완 뷰)이 재사용하는 기존 필드 ──
   view3d: false,
   zoom: 1,
@@ -89,6 +107,7 @@ export const initialState = {
 
 /** 저장된 값을 읽어 초기 상태에 덮어쓸 patch를 만든다. 실패해도 절대 throw 하지 않는다. */
 export function loadPersisted() {
+  migrateLocalState();
   const patch = {};
   try {
     const lang = localStorage.getItem(LS_LANG);
@@ -113,16 +132,14 @@ export function loadPersisted() {
     if (raw) {
       const o = JSON.parse(raw);
       if (o && typeof o === 'object') {
-        // 알려진 불린 키만 받아들인다 — 저장소가 오염돼도 상태 모양이 깨지지 않게.
+        // 알려진 키만 받아들인다 — 저장소가 오염돼도 상태 모양이 깨지지 않게.
         // ackAutoDays 는 7/30 일만 허용(그 외·없음은 0=해제).
-        // token 은 문자염만 허용 — serve.py --token 운영 시 manage 쓰기의 X-Serverdesk-Token 값.
         patch.setg = {
           refresh: typeof o.refresh === 'boolean' ? o.refresh : true,
           sound: typeof o.sound === 'boolean' ? o.sound : false,
           dense: typeof o.dense === 'boolean' ? o.dense : false,
           ackAutoDays: (o.ackAutoDays === 7 || o.ackAutoDays === 30) ? o.ackAutoDays : 0,
           escHours: (o.escHours === 4 || o.escHours === 24) ? o.escHours : 0,
-          token: typeof o.token === 'string' ? o.token : '',
         };
       }
     }
@@ -192,7 +209,6 @@ export function persist(state) {
       refresh: !!g.refresh, sound: !!g.sound, dense: !!g.dense,
       ackAutoDays: (g.ackAutoDays === 7 || g.ackAutoDays === 30) ? g.ackAutoDays : 0,
       escHours: (g.escHours === 4 || g.escHours === 24) ? g.escHours : 0,
-      token: typeof g.token === 'string' ? g.token : '',
     }));
   } catch (e) { /* noop */ }
 }

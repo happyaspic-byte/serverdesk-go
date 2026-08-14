@@ -47,11 +47,12 @@ const shell = {
   searchWrap: null, searchInput: null, searchResults: null,
   clock: null, bellDot: null, banner: null, toast: null,
   screenRoot: null, sourceBadge: null,
-  rail: null, railToggle: null, skipLink: null, langToggle: null, bell: null,
+  rail: null, railToggle: null, railToggleLabel: null, skipLink: null, langToggle: null, bell: null,
 };
 function cacheShell() {
   shell.rail = $('[data-rail]');
   shell.railToggle = $('[data-rail-toggle]');
+  shell.railToggleLabel = $('[data-rail-toggle-label]');
   // 슬라이딩 액티브 인디케이터 — 마크업 오염 없이 여기서 1회 생성(.rail-indicator, styles.css §5).
   if (shell.rail && !shell.railInd) {
     shell.railInd = document.createElement('span');
@@ -216,11 +217,9 @@ function syncHash(st) {
 
 /**
  * 딥링크 라우트 검증 — `#/detail/<id>`의 id가 fleet에 없으면 overview로 보낸다(§7).
- * 단, 첫 pull이 끝나 데이터 소스가 확정되기 전에는 검증하지 않는다 —
- * boot()가 채우는 placeholder 시뮬 플릿(27대)은 라이브 52대와 id 체계가 달라,
- * 여기서 검증하면 새로고침·URL 직접 접속 딥링크가 전부 overview로 튕긴다.
- * 확정 전 미존재 id는 detail의 빈 상태(EMPTY_DEV)가 받아주고, 확정 후
- * applyHash() 1회 재실행으로 진짜 없는 id만 정정한다.
+ * 단, 첫 실수집이 끝나기 전에는 아직 fleet이 비어 있으므로 검증하지 않는다.
+ * 이 시점에 검증하면 실제로 존재하는 장비의 새로고침·직접 접속 딥링크도 overview로 튕긴다.
+ * 확정 전 미존재 id는 detail 빈 상태가 받고, 확정 후 applyHash()가 실제 fleet 기준으로 정정한다.
  */
 let dataSettled = false;
 function resolveRoute(route, st) {
@@ -522,6 +521,7 @@ function renderShell(st) {
     const tip = st.railOpen ? L('Collapse sidebar', '사이드바 접기') : L('Expand sidebar', '사이드바 펼치기');
     shell.railToggle.setAttribute('aria-label', tip);
     shell.railToggle.title = tip + ' ([)';
+    if (shell.railToggleLabel) shell.railToggleLabel.textContent = tip;
   }
 
   // 레일: 활성 + 툴팁 + 배지 + 펼침 라벨
@@ -559,24 +559,23 @@ function renderShell(st) {
   // 펼침 모드에서 width/height 도 함께 변해 박스 4속성을 같은 토큰 전환으로 묶는 게 단순하다.
   positionRailIndicator();
 
-  // 레일 하단: live/sim + fleet 가용성
+  // 레일 하단: 실시간 수집 상태 + fleet 가용성
   if (shell.sourceBadge) {
-    shell.sourceBadge.dataset.source = st.source;
-    shell.sourceBadge.classList.toggle('is-live', st.source === 'live');
+    shell.sourceBadge.dataset.source = 'live';
+    shell.sourceBadge.classList.add('is-live');
     const dot = shell.sourceBadge.querySelector('.u-dot');
     if (dot) {
-      dot.classList.toggle('is-pos', st.source === 'live');
-      dot.classList.toggle('is-warn', st.source !== 'live');
-      dot.classList.toggle('pulse', true);
+      dot.classList.add('is-pos', 'pulse');
+      dot.classList.remove('is-warn');
     }
-    setField('sourceLabel', st.source === 'live' ? 'LIVE' : 'SIM');
+    setField('sourceLabel', 'LIVE');
   }
   setField('fleetAvail', (m && m.kpi && m.kpi.avail) || '—');
 
   // 알림 종
   renderBell(st, m);
 
-  // 폴러 단절 배너 (시뮬 모드는 표시 안 함)
+  // 폴러 단절 배너
   renderBanner(st);
 
   // 전역 검색
@@ -654,10 +653,6 @@ function renderBell(st, m) {
 }
 
 let bannerDismissedAt = 0;
-// 시뮬 폴핵 에피소드 진입 시각. sim 소스에서는 tick 루프가 lastPoll 을 매번 현재 시각으로
-// 갱신하므로(computeStale·LIVE 인디케이터가 쓰는 동작이라 건드리지 않는다) dismiss 비교를
-// lastPoll 에 걸면 닫기 직후 다음 틱에 배너가 부활한다 — 에피소드 진입 시각으로 대체한다.
-let simFallbackSince = 0;
 // 등장 1회 통지용 — 직전 렌더의 배너 표시 상태(#577). 배너는 role=alert 가 아니므로
 // textContent 갱신이 AT 에 재통지되지 않고, 등장 전이 때만 announce 로 알린다.
 let bannerWasOn = false;
@@ -667,45 +662,26 @@ function renderBanner(st) {
   // 닫기(×) 아이콘 전용 버튼의 접근 이름 — 언어 전환 추적은 renderShell 의 searchInput 과 같은
   // 패턴으로, 배너 표시 여부와 무관하게 매 렌더 갱신한다(#552, 모달 닫기의 L('Close','닫기') 관례).
   if (shell.bannerX) shell.bannerX.setAttribute('aria-label', L('Close', '닫기'));
-  const liveStale = st.source === 'live' && st.stale;
-  // 폴러 단절로 시뮬 fleet 으로 갈아탄 상태: 가짜 플릿이 정상처럼 보여도 배너 지속.
-  const simFallback = st.source === 'sim' && st.simFallback;
-  if (simFallback && !simFallbackSince) simFallbackSince = Date.now();
-  else if (!simFallback) simFallbackSince = 0;   // live 복귀 — 다음 에피소드는 새 dismiss 단위
-  const dismissBasis = simFallback ? simFallbackSince : st.lastPoll;
-  const on = (liveStale || simFallback) && dismissBasis > bannerDismissedAt;
+  const on = st.source === 'live' && st.stale && st.lastPoll > bannerDismissedAt;
   if (!on) { shell.banner.hidden = true; bannerWasOn = false; return; }
   let text;
-  if (simFallback) {
+  const staleNames = (Array.isArray(st.fleet) ? st.fleet : [])
+    .filter((d) => d && d.meta && d.meta.stale)
+    .map((d) => (d.meta && (d.meta.label || d.meta.name)) || d.host || d.id);
+  if (staleNames.length) {
+    const names = staleNames.slice(0, 3).join(', ') + (staleNames.length > 3 ? L(' and ', ' 외 ') + (staleNames.length - 3) + L(' more', '대') : '');
     text = L(
-      'Collector disconnected — showing simulation data',
-      '수집기 연결 끊김 — 시뮬레이션 데이터 표시 중'
+      'Collection failing — ' + names + ' (check address/credentials/avcli)',
+      '수집 지연 — ' + names + ' — 장비 주소·자격증명·avcli 설치를 확인하세요'
     );
   } else {
-    // liveStale 는 '브라우저↔서버' 가 아니라 '폴리↔장비' 수집 실패다 — 종전 문구의
-    // '마지막 수집 N초 전' 은 프런트 자체 폴 시각(항상 0~3초)이라 모순돼 보였다.
-    // 실패한 장비 이름을 직접 보여 준다(사유 힌트 포함).
-    const staleNames = (Array.isArray(st.fleet) ? st.fleet : [])
-      .filter((d) => d && d.meta && d.meta.stale)
-      .map((d) => (d.meta && (d.meta.label || d.meta.name)) || d.host || d.id);
-    if (staleNames.length) {
-      const names = staleNames.slice(0, 3).join(', ') + (staleNames.length > 3 ? L(' and ', ' 외 ') + (staleNames.length - 3) + L(' more', '대') : '');
-      text = L(
-        'Collection failing — ' + names + ' (check address/credentials/avcli)',
-        '수집 지연 — ' + names + ' — 장비 주소·자격증명·avcli 설치를 확인하세요'
-      );
-    } else {
-      const reason = st.liveError ? String(st.liveError) : L('no response from collector', '수집기 응답 없음');
-      text = L(
-        'Collector connection issue (' + reason + ')',
-        '수집기 연결 이상 (' + reason + ')'
-      );
-    }
+    const reason = st.liveError ? String(st.liveError) : L('no response from collector', '수집기 응답 없음');
+    text = L(
+      'Collector connection issue (' + reason + ')',
+      '수집기 연결 이상 (' + reason + ')'
+    );
   }
-  // 등장(숨김→표시) 시 1회만 통지 — 이후 카운트다운 갱신은 라이브 리전 밖에서 조용히(#577).
-  // 새 에피소드 등장 전이에서 디듑 키를 비운다(#583) — 직전 에피소드와 문구가 같아도
-  // (시뮬 폴핵은 언어별 상수 문자열이라 항상 동일) announce 의 lastAnnounce 디듑에
-  // 삼켜지지 않고 재등장이 AT 에 통지된다. 에피소드 내 1회 통지는 bannerWasOn 이 보장.
+  // 등장(숨김→표시) 시 한 번만 알리고 같은 장애 구간의 반복 갱신은 조용히 처리한다.
   if (!bannerWasOn) lastAnnounce = '';
   if (!bannerWasOn) announce(text);
   bannerWasOn = true;
@@ -1060,7 +1036,6 @@ function startClock() {
 // stale 판정 (§4.4)
 // ---------------------------------------------------------------------------
 function computeStale(st) {
-  if (st.source !== 'live') return false;
   if (st.liveError) return true;
   if (!st.lastPoll) return false;
   return Date.now() - st.lastPoll > (st.refreshSec || 30) * 3 * 1000;
@@ -1160,26 +1135,6 @@ function startTick() {
     const st = getState();
     if (!(st.setg && st.setg.refresh)) return;
     const patch = { tick: st.tick + 1 };
-    if (st.source === 'sim' && data && typeof data.tickFleet === 'function') {
-      try {
-        // model/data.js 계약: {fleet, hist, lastPoll, changed} 반환 + fleet은 제자리 변경.
-        // 구버전(배열 반환 / 반환 없음)도 그대로 받아들인다.
-        const r = data.tickFleet(st.fleet, st);
-        if (Array.isArray(r)) {
-          patch.fleet = r;
-          patch.lastPoll = Date.now();
-        } else if (r && typeof r === 'object') {
-          if (Array.isArray(r.fleet) && r.fleet !== st.fleet) patch.fleet = r.fleet;
-          if (r.hist) patch.hist = r.hist;                 // ← 스파크라인 이력(누락 시 차트가 빈다)
-          patch.lastPoll = r.lastPoll || Date.now();
-          if (Array.isArray(r.changed) && r.changed.length) notifyTransitions(r.changed);
-        } else {
-          patch.lastPoll = Date.now();
-        }
-      } catch (e) {
-        console.warn('[serverdesk] tickFleet 실패', e);
-      }
-    }
     const stale = computeStale(st);
     if (stale !== st.stale) patch.stale = stale;
     setState(patch);
@@ -1209,33 +1164,24 @@ function startPull() {
     const gen = generation;
     if (!isTabActive) return; // 탭 비활성화 시 백그라운드 폴링 중단 (자원 절약)
     const st = getState();
-    // 앱은 항상 sim 플레이스홀더로 부팅하므로 첫 요청도 source 와 무관하게 실행해야 한다.
-    // 여기서 live 만 허용하면 sim → live 전환이 영원히 일어나지 않아, 폴러가 정상이어도
-    // 27대 시뮬레이션 플릿만 보인다.
+    // 첫 요청부터 서버의 실제 장비 목록을 가져온다.
     let pulled = false;
     try {
       const patch = await pullPatch(st);
       if (patch && Object.keys(patch).length) {
-        fails = patch.source === 'live' ? 0 : fails + 1;
+        fails = patch.liveError ? fails + 1 : 0;
         const merged = { ...getState(), ...patch };
         patch.stale = computeStale(merged);
         setState(patch);
         pulled = true;
       }
     } catch (e) {
-      // pullPatch는 자체 폴백해야 하지만, 예외가 새어나와도 시뮬 유지
-      // source 만 바꾸면 tickFleet 랜덤워크가 실장비 스냅샷을 흔드므로(pullPatch 폴백 분기와
-      // 동일 사유) 시뮬 fleet 을 새로 만들어 통째로 교체하고 배너 플래그(simFallback)를 남긴다.
       fails += 1;
-      const patch = { source: 'sim', liveError: null, simFallback: true };
-      try {
-        if (data && typeof data.buildFleet === 'function') patch.fleet = data.buildFleet();
-      } catch (_) { /* noop */ }
-      setState(patch);
+      const message = (e && e.message) ? e.message : 'collector request failed';
+      setState({ source: 'live', liveError: message, stale: true });
     }
     if (pulled) {
-      // 후처리는 pull 성공 확정 뒤 try 밖에서 실행한다 — 여기서 throw 되어도 위 catch 의
-      // 시뮬 플릿 교체로 이어지면 안 된다(수집기는 멀쩡한데 라이브 플릿이 날아가는 결함).
+      // 후처리는 pull 성공 확정 뒤 try 밖에서 실행한다.
       // 후처리 자체의 예외는 폴링 루프를 죽이지 않도록 따로 격리한다.
       try {
         applyAutoAck();
@@ -1246,12 +1192,12 @@ function startPull() {
         // 에스컬레이션도 자동확인과 같은 생존 조건을 갖는다 — tick 게이트(setg.refresh)
         // 와 무관하게 pull 완료 때도 재통보를 검사한다(자동새로고침 OFF 에서 중단되는 결함).
         applyEscalation();
-        applyAlertSound();   // 실 모드에서 새 경보는 pull 로만 들어온다(tickFleet 은 시뮬 전용)
+        applyAlertSound();
       } catch (e) {
         console.warn('[serverdesk] pull 후처리 실패', e);
       }
     }
-    // 첫 pull 완료 = 데이터 소스 확정(live 또는 시뮬 폴백). 이제부터 딥링크 검증 활성화,
+    // 첫 pull 완료 후 딥링크 검증을 활성화한다.
     // 현재 해시를 1회 재해석해 진짜 없는 id만 정정한다.
     if (!dataSettled) { dataSettled = true; try { applyHash(); } catch (_) { /* noop */ } }
     const wait = Math.min(MAX_MS, BASE_MS * Math.pow(2, Math.max(0, fails - 3)));
@@ -1277,17 +1223,6 @@ function startPull() {
   run();
 }
 
-/** tickFleet이 보고한 상태 전이를 토스트로 알린다(최대 1건/틱). */
-function notifyTransitions(changed) {
-  const c = changed[changed.length - 1];
-  if (!c || !c.to) return;
-  const dev = (getState().fleet || []).find(d => String(d.id) === String(c.id));
-  const host = dev ? (dev.host || dev.id) : c.id;
-  const label = to => (to === 'down' ? L('offline', '오프라인')
-    : to === 'deg' ? L('degraded', '저하')
-      : L('operational', '정상'));
-  showToast(host + ' → ' + label(c.to));
-}
 
 // ---------------------------------------------------------------------------
 // 부트스트랩
@@ -1296,15 +1231,6 @@ async function boot() {
   cacheShell();
   await loadShared();
 
-  // 초기 fleet(시뮬)
-  if (data && typeof data.buildFleet === 'function') {
-    try {
-      const fleet = data.buildFleet(data.SIM_SEED);
-      if (Array.isArray(fleet)) setState({ fleet, source: 'sim', lastPoll: Date.now() });
-    } catch (e) {
-      console.warn('[serverdesk] buildFleet 실패', e);
-    }
-  }
 
   // 세 원격 동기화는 서로 의존하지 않으므로 병렬로 시작한다. 각 작업은 자체 오류를
   // 삼켜 폐쇄망 폴백을 유지하고, 가장 느린 엔드포인트 하나만 첫 렌더를 지연시킨다(#154).
