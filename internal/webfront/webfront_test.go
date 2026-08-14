@@ -89,7 +89,7 @@ func TestStaticIndexAndSecurityHeaders(t *testing.T) {
 	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Errorf("X-Content-Type-Options = %q", got)
 	}
-	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
+	if got := rec.Header().Get("Referrer-Policy"); got != "same-origin" {
 		t.Errorf("Referrer-Policy = %q", got)
 	}
 	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {

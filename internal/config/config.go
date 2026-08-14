@@ -8,7 +8,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
+	"strings"
 )
+
+func validateAvcliExecutable(goos, bin string) error {
+	if goos != "windows" {
+		return nil
+	}
+	lower := strings.ToLower(strings.TrimSpace(bin))
+	if strings.HasSuffix(lower, ".bat") || strings.HasSuffix(lower, ".cmd") {
+		return fmt.Errorf("avcli_bin must be a directly executable file on Windows, not %q", bin)
+	}
+	return nil
+}
 
 // Intervals 는 폴링 티어 주기(초)다.
 // avcli 1콜이 실측 3.7~4.8초라 fast(node+alert 2콜)는 60초, slow(6~7콜)는 300초가
@@ -188,6 +201,7 @@ type Config struct {
 	Listen             string          `json:"listen"`
 	LogLevel           string          `json:"log_level"`
 	AvcliBin           string          `json:"avcli_bin"`
+	AvcliArgs          []string        `json:"avcli_args"`
 	AvcliTimeout       int             `json:"avcli_timeout"`  // 초, 기본 90 — avcli 1콜 실측 15~40초의 상한
 	HistoryPoints      int             `json:"history_points"` // 기본 120
 	CacheRefresh       int             `json:"cache_refresh"`  // 초, 기본 5
@@ -195,10 +209,8 @@ type Config struct {
 	SSHTimeout         int             `json:"ssh_timeout"` // 초, 기본 20
 	SNMPEnabled        bool            `json:"snmp_enabled"`
 	SNMPCommunity      string          `json:"snmp_community,omitempty"`
-	SimDevices         int             `json:"sim_devices"` // 0 이면 시뮬 끔(실장비만)
-	SimSeed            int64           `json:"sim_seed"`
 	Intervals          Intervals       `json:"intervals"`
-	Thresholds         Thresholds      `json:"thresholds"` // warn/crit 사용률 임계값 %, 기본 78/90
+	Thresholds         Thresholds      `json:"thresholds"`           // warn/crit 사용률 임계값 %, 기본 78/90
 	Trap               TrapConfig      `json:"-"`                    // 스키마는 평면 trap_* 키(및 관용적으로 중첩 trap 객체) — Load 가 수동 해석
 	CORSAllowedOrigins []string        `json:"cors_allowed_origins"` // 비어 있으면 ACAO 미부여(드라이브바이 인벤토리 유출 방지)
 	HTTPTimeout        int             `json:"http_timeout"`         // 초, 기본 30 — 유휴/slowloris 차단
@@ -270,9 +282,8 @@ func mergeIntervals(base Intervals, raw json.RawMessage) Intervals {
 	return out
 }
 
-// Parse 는 config JSON 바이트를 해석하고 poller.py load_config 와 같은
-// 기본값 채우기·큟스터 상속·자격증명 마스킹 등록까지 수행한다.
-// clusters 가 비었거나 key/mgmt_ip 가 없으면 에러(poller.py 는 SystemExit).
+// Parse 는 config JSON 바이트를 해석하고 기본값 채우기·클러스터 상속·
+// 자격증명 마스킹 등록까지 수행한다. 수집 대상이 없는 빈 배포도 허용한다.
 func Parse(data []byte) (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
@@ -283,7 +294,7 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("config JSON 파싱 실패: %w", err)
 	}
 
-	// --- 최상위 기본값(poller.py DEFAULTS 와 동일) ---
+	// --- 최상위 기본값 ---
 	if _, ok := top["listen"]; !ok {
 		c.Listen = "0.0.0.0:9891"
 	}
@@ -303,7 +314,7 @@ func Parse(data []byte) (*Config, error) {
 		c.CacheRefresh = 5
 	}
 	if _, ok := top["runtime_dir"]; !ok {
-		c.RuntimeDir = "~/.everrun-poller"
+		c.RuntimeDir = "data"
 	}
 	if _, ok := top["ssh_timeout"]; !ok {
 		c.SSHTimeout = 20
@@ -311,16 +322,10 @@ func Parse(data []byte) (*Config, error) {
 	if _, ok := top["snmp_enabled"]; !ok {
 		c.SNMPEnabled = true
 	}
-	if _, ok := top["sim_devices"]; !ok {
-		c.SimDevices = 50
-	}
 	if _, ok := top["thresholds"]; !ok {
 		c.Thresholds = Thresholds{Warn: 78, Crit: 90}
 	} else if !(c.Thresholds.Warn > 0 && c.Thresholds.Warn < c.Thresholds.Crit && c.Thresholds.Crit <= 100) {
 		return nil, fmt.Errorf("thresholds: 0 < warn < crit <= 100 이어야 합니다")
-	}
-	if _, ok := top["sim_seed"]; !ok {
-		c.SimSeed = 20260720
 	}
 	if _, ok := top["http_timeout"]; !ok {
 		c.HTTPTimeout = 30
@@ -397,13 +402,12 @@ func Parse(data []byte) (*Config, error) {
 			nested.apply(&c.Trap)
 		}
 	}
+	if err := validateAvcliExecutable(runtime.GOOS, c.AvcliBin); err != nil {
+		return nil, err
+	}
 
 	// --- 클러스터 검증 + 최상위 값 상속(poller.py load_config 와 동일 규칙) ---
-	// FT 클러스터가 없는 배포도 허용한다(엣지 전용·데모 전용). 단, 수집 대상이
-	// 아무것도 없으면 기동할 이유가 없으니 셋 중 하나는 필요하다.
-	if len(c.Clusters) == 0 && len(c.EdgeDevices) == 0 && c.SimDevices <= 0 {
-		return nil, errors.New("config error: clusters, edge_devices, sim_devices 중 하나는 필요합니다")
-	}
+	// FT 클러스터가 없는 빈 배포도 허용한다. 장비는 설치 후 UI에서 추가할 수 있다.
 	for i := range c.Clusters {
 		cl := &c.Clusters[i]
 		if cl.Key == "" || cl.MgmtIP == "" {

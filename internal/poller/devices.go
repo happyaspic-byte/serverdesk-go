@@ -603,8 +603,7 @@ func metaAlerts(view map[string]any) []any {
 	return out
 }
 
-// metaEvents 는 실제 알림 상위 6건이다. 시뮬레이터처럼 상태전이/재부팅을
-// 지어내지 않는다(허구 금지).
+// metaEvents는 수집된 실제 알림 중 상위 6건만 제공하며 상태전이·재부팅을 지어내지 않는다.
 func metaEvents(view map[string]any, alerts []any) []any {
 	out := []any{}
 	host := strVal(view["name"])
@@ -1140,8 +1139,7 @@ func BuildDevice(view map[string]any, cfg DisplayMeta, now float64) map[string]a
 }
 
 // BuildDevices 는 /api/fleet 응답 → /api/devices 응답 변환이다
-// (devices_adapter.build_devices). 시뮬레이션 장비는 포팅하지 않는다 —
-// 운영 설정은 sim_devices=0 이라 실장비만 낸다.
+// BuildDevices 는 수집 캐시를 프런트 device 스키마로 변환한다.
 func BuildDevices(fleet map[string]any, cfgByKey map[string]DisplayMeta, refreshSec int) map[string]any {
 	now := nowFloat()
 	devices := []any{}

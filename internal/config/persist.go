@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -19,6 +20,9 @@ const (
 // Warnf 는 백업 실패처럼 치명적이지 않은 경고를 호스트 로거에 연결하는 훅이다.
 // 기본은 no-op — 폴패키지는 로깅 정책을 강제하지 않는다.
 var Warnf = func(format string, args ...any) {}
+
+// ErrConfigChanged reports that a compare-and-replace observed a newer document.
+var ErrConfigChanged = errors.New("config changed concurrently")
 
 // Store 는 config JSON 파일에 대한 원자적 RMW(read-modify-write) 저장소다.
 //
@@ -115,6 +119,40 @@ func (s *Store) ReadDoc() (map[string]json.RawMessage, error) {
 // ReplaceDoc 은 문서 전체를 교체한다(import 용) — rmw 와 같은 잠금·원자 교체·.bak 경로.
 func (s *Store) ReplaceDoc(doc map[string]json.RawMessage) error {
 	return s.rmw(func(cur map[string]json.RawMessage) error {
+		for k := range cur {
+			delete(cur, k)
+		}
+		for k, v := range doc {
+			cur[k] = v
+		}
+		return nil
+	})
+}
+
+func rawDocsEqual(left, right map[string]json.RawMessage) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftRaw := range left {
+		rightRaw, ok := right[key]
+		if !ok {
+			return false
+		}
+		var leftValue, rightValue any
+		if json.Unmarshal(leftRaw, &leftValue) != nil || json.Unmarshal(rightRaw, &rightValue) != nil ||
+			!reflect.DeepEqual(leftValue, rightValue) {
+			return false
+		}
+	}
+	return true
+}
+
+// CompareAndReplaceDoc atomically replaces expected with doc or returns ErrConfigChanged.
+func (s *Store) CompareAndReplaceDoc(expected, doc map[string]json.RawMessage) error {
+	return s.rmw(func(cur map[string]json.RawMessage) error {
+		if !rawDocsEqual(cur, expected) {
+			return ErrConfigChanged
+		}
 		for k := range cur {
 			delete(cur, k)
 		}

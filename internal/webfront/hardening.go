@@ -2,7 +2,6 @@ package webfront
 
 import (
 	"bytes"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -48,21 +47,8 @@ func CheckSameOrigin(r *http.Request) bool {
 	return true
 }
 
-// CheckToken 은 X-Serverdesk-Token 헤더를 설정된 토큰과 상수 시간 비교한다.
-// 토큰이 설정돼 있지 않으면(Options.Token 과 SERVERDESK_TOKEN 모두 비어 있으면)
-// 항상 true — 토큰 게이트는 명시적으로 켜는 것이다.
-func (s *Server) CheckToken(r *http.Request) bool {
-	if s.token == "" {
-		return true
-	}
-	supplied := r.Header.Get("X-Serverdesk-Token")
-	return subtle.ConstantTimeCompare([]byte(supplied), []byte(s.token)) == 1
-}
-
-// GateWrite 는 통합자가 /api 쓰기 mux 에 마운트하는 게이트다(Python _mutating_denied 포트).
-// 쓰기가 허용되면 true. 거부면 이미 403 JSON 을 보냈으니 false — 호출부는 즉시 리턴한다.
-// 순서: AllowWrites → 같은 출처 → 토큰. 콘솔 상태 엔드포인트는 이 게이트를 쓰지 않는다
-// (장비 설정이 아니라 AllowWrites 와 분리 — 패키지 문서 참조).
+// GateWrite는 통합자가 /api 쓰기 mux에 마운트하는 게이트다.
+// 로그인 미들웨어가 인증을 끝낸 뒤 호출되며, 여기서는 쓰기 허용 여부와 동일 출처만 확인한다.
 func (s *Server) GateWrite(w http.ResponseWriter, r *http.Request) bool {
 	if !s.allowWrites {
 		writeJSONError(w, http.StatusForbidden,
@@ -72,10 +58,6 @@ func (s *Server) GateWrite(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if !CheckSameOrigin(r) {
 		writeJSONError(w, http.StatusForbidden, "cross-origin write rejected")
-		return false
-	}
-	if !s.CheckToken(r) {
-		writeJSONError(w, http.StatusForbidden, "missing or invalid X-Serverdesk-Token")
 		return false
 	}
 	return true

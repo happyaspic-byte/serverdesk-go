@@ -78,6 +78,85 @@ func TestValidateConfigDoc(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "edge_devices[0]") {
 		t.Errorf("key 없는 항목을 인덱스와 함께 거부해야 함: %v", err)
 	}
+	duplicate := validateConfigDoc(map[string]any{
+		"clusters": []any{map[string]any{"key": "a"}, map[string]any{"key": "a"}},
+	})
+	if duplicate == nil || !strings.Contains(duplicate.Error(), "중복") {
+		t.Errorf("중복 key를 거부해야 함: %v", duplicate)
+	}
+}
+
+func TestMergeSecretsDoesNotUseArrayPosition(t *testing.T) {
+	oldCfg := map[string]any{
+		"clusters": []any{map[string]any{
+			"key": "cluster-a",
+			"nodes": []any{
+				map[string]any{"ip": "10.0.0.1", "root_password": "one"},
+				map[string]any{"ip": "10.0.0.2", "root_password": "two"},
+			},
+		}},
+	}
+	newCfg := map[string]any{
+		"clusters": []any{map[string]any{
+			"key": "cluster-a",
+			"nodes": []any{
+				map[string]any{"ip": "10.0.0.3", "root_password": ""},
+				map[string]any{"ip": "10.0.0.2", "root_password": ""},
+				map[string]any{"ip": "10.0.0.1", "root_password": ""},
+			},
+		}},
+	}
+
+	mergeSecrets(newCfg, oldCfg)
+	nodes := newCfg["clusters"].([]any)[0].(map[string]any)["nodes"].([]any)
+	if nodes[0].(map[string]any)["root_password"] != "" {
+		t.Errorf("새 IP 노드가 배열 위치의 비밀을 받음: %+v", nodes[0])
+	}
+	if nodes[1].(map[string]any)["root_password"] != "two" || nodes[2].(map[string]any)["root_password"] != "one" {
+		t.Errorf("IP 기반 재정렬 비밀 머지 실패: %+v", nodes)
+	}
+}
+
+func TestMergeSecretsDoesNotTransferChangedEndpoint(t *testing.T) {
+	oldCfg := map[string]any{"nodes": []any{map[string]any{"ip": "10.0.0.1", "root_password": "one"}}}
+	newCfg := map[string]any{"nodes": []any{map[string]any{"ip": "10.0.0.9", "root_password": ""}}}
+
+	mergeSecrets(newCfg, oldCfg)
+	node := newCfg["nodes"].([]any)[0].(map[string]any)
+	if node["root_password"] != "" {
+		t.Errorf("변경된 endpoint에 비밀이 이동함: %+v", node)
+	}
+}
+
+func TestMergeSecretsDoesNotTransferChangedDeviceEndpoints(t *testing.T) {
+	oldCfg := map[string]any{
+		"clusters": []any{map[string]any{
+			"key": "cluster-a", "mgmt_ip": "10.0.0.1", "admin_password": "cluster-secret",
+		}},
+		"edge_devices": []any{map[string]any{
+			"key": "server-a", "ip": "10.0.0.2", "bmc_ip": "10.0.0.3",
+			"password": "host-secret", "bmc_password": "bmc-secret",
+		}},
+	}
+	newCfg := map[string]any{
+		"clusters": []any{map[string]any{
+			"key": "cluster-a", "mgmt_ip": "10.0.0.9", "admin_password": "",
+		}},
+		"edge_devices": []any{map[string]any{
+			"key": "server-a", "ip": "10.0.0.8", "bmc_ip": "10.0.0.7",
+			"password": "", "bmc_password": "",
+		}},
+	}
+
+	mergeSecrets(newCfg, oldCfg)
+	cluster := newCfg["clusters"].([]any)[0].(map[string]any)
+	if cluster["admin_password"] != "" {
+		t.Errorf("changed cluster endpoint received old secret: %+v", cluster)
+	}
+	edge := newCfg["edge_devices"].([]any)[0].(map[string]any)
+	if edge["password"] != "" || edge["bmc_password"] != "" {
+		t.Errorf("changed edge endpoint received old secrets: %+v", edge)
+	}
 }
 
 // backupTestSrv 는 임시 config + 콘솔 상태로 최소 Server 를 만든다.
@@ -94,11 +173,11 @@ func backupTestSrv(t *testing.T, cfgJSON string) (*Server, string) {
 	}
 	return &Server{
 		Store: config.NewStore(cfgPath),
-		Gate:  webfront.New(nil, webfront.Options{StateDir: stateDir}),
+		Gate:  webfront.New(nil, webfront.Options{StateDir: stateDir, AllowWrites: true}),
 	}, cfgPath
 }
 
-// loopbackReq 는 루프백 요청(writeGate 통과)과 레코더를 만든다.
+// loopbackReq 는 Origin 없는 로컬 자동화 요청과 레코더를 만든다.
 func loopbackReq(method, target, body string) (*httptest.ResponseRecorder, *http.Request) {
 	r := httptest.NewRequest(method, target, strings.NewReader(body))
 	r.RemoteAddr = "127.0.0.1:4321"
@@ -186,5 +265,79 @@ func TestImportRejectsBadSchema(t *testing.T) {
 	srv.handleConfigImport(w, r)
 	if w.Code != 400 {
 		t.Errorf("schema 오류는 400 이어야 함: %d", w.Code)
+	}
+}
+func TestImportRejectsProcessConfigWithoutWrite(t *testing.T) {
+	srv, cfgPath := backupTestSrv(t, `{"listen":"127.0.0.1:6005","clusters":[{"key":"a","mgmt_ip":"10.0.0.1"}]}`)
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"schema":"serverdesk-config/1","config":{"listen":"0.0.0.0:9999","clusters":[{"key":"a","mgmt_ip":"10.0.0.2"}]}}`
+	w, r := loopbackReq("POST", "/api/admin/config/import", payload)
+	srv.handleConfigImport(w, r)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "listen") {
+		t.Fatalf("process config import = %d: %s", w.Code, w.Body.String())
+	}
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("거부된 process config import가 설정을 썼음")
+	}
+}
+
+func TestImportRestoresRedactedProtectedSecrets(t *testing.T) {
+	srv, cfgPath := backupTestSrv(t, `{
+		"snmp_community":"top-secret",
+		"trap":{"enabled":true,"community":"trap-secret","port":10162},
+		"clusters":[{"key":"a","mgmt_ip":"10.0.0.1"}]
+	}`)
+	payload := `{
+		"schema":"serverdesk-config/1",
+		"config":{
+			"snmp_community":"",
+			"trap":{"enabled":true,"community":"","port":10162},
+			"clusters":[{"key":"a","mgmt_ip":"10.0.0.1"}]
+		}
+	}`
+	w, r := loopbackReq("POST", "/api/admin/config/import", payload)
+	srv.handleConfigImport(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("redacted protected secret import = %d: %s", w.Code, w.Body.String())
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored["snmp_community"] != "top-secret" ||
+		stored["trap"].(map[string]any)["community"] != "trap-secret" {
+		t.Fatalf("protected secrets were not restored: %+v", stored)
+	}
+}
+
+func TestImportRejectsInvalidUIWithoutConfigWrite(t *testing.T) {
+	srv, cfgPath := backupTestSrv(t, `{"clusters":[{"key":"a","mgmt_ip":"10.0.0.1"}]}`)
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"schema":"serverdesk-config/1","config":{"clusters":[{"key":"a","mgmt_ip":"10.0.0.2"}]},"ui":{"notes":"invalid"}}`
+	w, r := loopbackReq("POST", "/api/admin/config/import", payload)
+	srv.handleConfigImport(w, r)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "ui.notes") {
+		t.Fatalf("invalid UI import = %d: %s", w.Code, w.Body.String())
+	}
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("invalid UI import가 설정을 썼음")
 	}
 }

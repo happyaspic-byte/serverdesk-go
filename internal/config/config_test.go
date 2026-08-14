@@ -16,6 +16,20 @@ func loadFixture(t *testing.T) *Config {
 	return c
 }
 
+func TestValidateAvcliExecutable(t *testing.T) {
+	for _, bin := range []string{`C:\serverdesk\avcli.bat`, `C:\serverdesk\avcli.CMD`} {
+		if err := validateAvcliExecutable("windows", bin); err == nil {
+			t.Errorf("accepted Windows batch launcher %q", bin)
+		}
+	}
+	if err := validateAvcliExecutable("windows", `C:\serverdesk\jre\bin\java.exe`); err != nil {
+		t.Fatalf("rejected direct Windows executable: %v", err)
+	}
+	if err := validateAvcliExecutable("linux", "/opt/serverdesk/avcli-wrapper.cmd"); err != nil {
+		t.Fatalf("non-Windows executable policy changed: %v", err)
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	c := loadFixture(t)
 
@@ -39,7 +53,7 @@ func TestLoadDefaults(t *testing.T) {
 	if c.CacheRefresh != 5 {
 		t.Errorf("cache_refresh = %d, want 5", c.CacheRefresh)
 	}
-	if c.RuntimeDir != "~/.everrun-poller" {
+	if c.RuntimeDir != "data" {
 		t.Errorf("runtime_dir = %q", c.RuntimeDir)
 	}
 	if c.SSHTimeout != 20 {
@@ -47,12 +61,6 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if c.LogLevel != "info" {
 		t.Errorf("log_level = %q", c.LogLevel)
-	}
-	if c.SimDevices != 50 {
-		t.Errorf("sim_devices = %d, want 50", c.SimDevices)
-	}
-	if c.SimSeed != 20260720 {
-		t.Errorf("sim_seed = %d", c.SimSeed)
 	}
 	if c.HTTPTimeout != 30 {
 		t.Errorf("http_timeout = %d, want 30", c.HTTPTimeout)
@@ -180,11 +188,8 @@ func TestEdgeDevices(t *testing.T) {
 }
 
 func TestLoadValidation(t *testing.T) {
-	if _, err := Parse([]byte(`{"clusters": [], "edge_devices": [], "sim_devices": 0}`)); err == nil {
-		t.Error("nothing to collect should fail")
-	}
-	if _, err := Parse([]byte(`{"clusters": [], "sim_devices": 4}`)); err != nil {
-		t.Errorf("empty clusters with sim devices should pass: %v", err)
+	if _, err := Parse([]byte(`{"clusters": [], "edge_devices": []}`)); err != nil {
+		t.Errorf("empty deployment should pass: %v", err)
 	}
 	if _, err := Parse([]byte(`{"clusters": [], "edge_devices": [{"key": "e1", "kind": "nas", "ip": "10.0.0.2"}]}`)); err != nil {
 		t.Errorf("empty clusters with edge devices should pass: %v", err)
@@ -226,7 +231,6 @@ func TestSecretsMasking(t *testing.T) {
 		t.Errorf("Mask empty = %q", got)
 	}
 }
-
 
 func TestParseThresholds(t *testing.T) {
 	// 키 없음 → 기본 78/90

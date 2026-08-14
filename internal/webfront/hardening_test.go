@@ -44,19 +44,6 @@ func TestGateWrite(t *testing.T) {
 		t.Errorf("GateWrite cross = %d %s", rec.Code, rec.Body.String())
 	}
 
-	// 켜짐 + 토큰 설정: 헤더 불일치 → 403, 일치 → 통과.
-	s = New(testFS(), Options{StateDir: t.TempDir(), AllowWrites: true, Token: "sek"})
-	rec = httptest.NewRecorder()
-	if s.GateWrite(rec, mkreq(nil)) {
-		t.Errorf("GateWrite no token = true, want false")
-	}
-	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "X-Serverdesk-Token") {
-		t.Errorf("GateWrite token = %d %s", rec.Code, rec.Body.String())
-	}
-	rec = httptest.NewRecorder()
-	if !s.GateWrite(rec, mkreq(map[string]string{"X-Serverdesk-Token": "sek"})) {
-		t.Errorf("GateWrite with token = false, want true")
-	}
 }
 
 func TestCheckSameOrigin(t *testing.T) {

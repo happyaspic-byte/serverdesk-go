@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -27,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"serverdesk/internal/config"
 	"serverdesk/internal/poller"
 )
 
@@ -66,7 +68,7 @@ func redactSecrets(v any) any {
 }
 
 // mergeSecrets 는 신 문서(newV)의 빈 비밀 필드를 구 문서(oldV)의 같은 경로 값으로 채운다.
-// 배열은 "key" 필드가 있으면 그 값으로, 없으면 인덱스로 짝맞춘다.
+// 배열 요소는 key, name, ip 순서의 유일한 안정 식별자로만 짝맞춘다.
 func mergeSecrets(newV, oldV any) {
 	switch nt := newV.(type) {
 	case map[string]any:
@@ -86,40 +88,61 @@ func mergeSecrets(newV, oldV any) {
 		}
 	case []any:
 		ot, _ := oldV.([]any)
-		// 짝맞춤은 key, 보조로 name 필드 — 둘 다 없는 요소만 인덱스 폴리다.
-		// key/name 이 있는데 구 문서에 없는 신규 항목을 인덱스로 짝맞추면
-		// 남의 자격증명을 물려받는 사고가 나므로 그 경우는 머지하지 않는다.
-		oldByKey := map[string]any{}
+		oldByIdentity := make(map[string]any, len(ot))
+		oldCounts := make(map[string]int, len(ot))
+		newCounts := make(map[string]int, len(nt))
 		for _, ov := range ot {
 			if om, ok := ov.(map[string]any); ok {
-				if key, ok := om["key"].(string); ok {
-					oldByKey["k:"+key] = om
-				}
-				if nm, ok := om["name"].(string); ok {
-					oldByKey["n:"+nm] = om
+				if identity, ok := stableIdentity(om); ok {
+					oldCounts[identity]++
+					oldByIdentity[identity] = om
 				}
 			}
 		}
-		for i, nv := range nt {
+		for _, nv := range nt {
 			if nm, ok := nv.(map[string]any); ok {
-				if key, ok2 := nm["key"].(string); ok2 {
-					if oldByKey["k:"+key] != nil {
-						mergeSecrets(nv, oldByKey["k:"+key])
-					}
-					continue
-				}
-				if nm2, ok2 := nm["name"].(string); ok2 {
-					if oldByKey["n:"+nm2] != nil {
-						mergeSecrets(nv, oldByKey["n:"+nm2])
-					}
-					continue
+				if identity, ok := stableIdentity(nm); ok {
+					newCounts[identity]++
 				}
 			}
-			if i < len(ot) {
-				mergeSecrets(nv, ot[i])
+		}
+		for _, nv := range nt {
+			nm, ok := nv.(map[string]any)
+			if !ok {
+				continue
 			}
+			identity, ok := stableIdentity(nm)
+			if !ok || oldCounts[identity] != 1 || newCounts[identity] != 1 {
+				continue
+			}
+			mergeSecrets(nv, oldByIdentity[identity])
 		}
 	}
+}
+
+// stableIdentity binds configuration objects to both their stable key and endpoint.
+// Endpoint changes intentionally break the match so redacted credentials cannot move to a new host.
+func stableIdentity(m map[string]any) (string, bool) {
+	endpoints := make([]string, 0, 3)
+	for _, field := range []string{"mgmt_ip", "ip", "bmc_ip"} {
+		if value, ok := m[field].(string); ok && value != "" {
+			endpoints = append(endpoints, field+":"+value)
+		}
+	}
+	if key, ok := m["key"].(string); ok && key != "" {
+		identity := "key:" + key
+		if len(endpoints) > 0 {
+			identity += "|" + strings.Join(endpoints, "|")
+		}
+		return identity, true
+	}
+	if len(endpoints) > 0 {
+		return strings.Join(endpoints, "|"), true
+	}
+	if name, ok := m["name"].(string); ok && name != "" {
+		return "name:" + name, true
+	}
+	return "", false
 }
 
 // rawToAny 는 RawMessage 문서를 map[string]any 로 푼다.
@@ -148,7 +171,7 @@ func anyToRaw(m map[string]any) (map[string]json.RawMessage, error) {
 	return out, nil
 }
 
-// validateConfigDoc 은 import 문서의 config 섹션 구조를 검사한다.
+// validateConfigDoc 은 import 문서의 관리 대상 섹션 구조와 고유 키를 검사한다.
 func validateConfigDoc(cfg map[string]any) error {
 	for _, sec := range []string{"clusters", "edge_devices"} {
 		v, ok := cfg[sec]
@@ -159,13 +182,31 @@ func validateConfigDoc(cfg map[string]any) error {
 		if !ok {
 			return fmt.Errorf("%s 가 배열이 아닙니다", sec)
 		}
+		keys := make(map[string]struct{}, len(arr))
 		for i, e := range arr {
 			m, ok := e.(map[string]any)
 			if !ok {
 				return fmt.Errorf("%s[%d] 가 객체가 아닙니다", sec, i)
 			}
-			if key, ok := m["key"].(string); !ok || key == "" {
+			key, ok := m["key"].(string)
+			if !ok || key == "" {
 				return fmt.Errorf("%s[%d] 에 key 가 없습니다", sec, i)
+			}
+			if _, exists := keys[key]; exists {
+				return fmt.Errorf("%s 에 중복 key %q 가 있습니다", sec, key)
+			}
+			keys[key] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// validateImportUIState performs the non-mutating portion of UI import validation.
+func validateImportUIState(ui map[string]any) error {
+	for _, key := range []string{"ack", "maint", "notes", "escal"} {
+		if value, ok := ui[key]; ok {
+			if _, ok := value.(map[string]any); !ok {
+				return fmt.Errorf("ui.%s 가 객체가 아닙니다", key)
 			}
 		}
 	}
@@ -223,18 +264,19 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 		s.send(w, r, 400, map[string]any{"error": "config 섹션이 없습니다"})
 		return
 	}
-	if err := validateConfigDoc(newCfg); err != nil {
-		s.send(w, r, 400, map[string]any{"error": err.Error()})
-		return
-	}
-	// thresholds 가 오면 import 자체를 막기보다 값 검증만 선행한다(파일은 쓰되 라이브 반영 생략은 모순).
-	if th, ok := newCfg["thresholds"].(map[string]any); ok {
-		warn, wok := th["warn"].(float64)
-		crit, cok := th["crit"].(float64)
-		if !wok || !cok || !(warn > 0 && warn < crit && crit <= 100) {
-			s.send(w, r, 400, map[string]any{"error": "thresholds: 0 < warn < crit <= 100 이어야 합니다"})
+	ui, uiApplied := map[string]any(nil), false
+	if rawUI, exists := doc["ui"]; exists {
+		var ok bool
+		ui, ok = rawUI.(map[string]any)
+		if !ok {
+			s.send(w, r, 400, map[string]any{"error": "ui 섹션이 객체가 아닙니다"})
 			return
 		}
+		if err := validateImportUIState(ui); err != nil {
+			s.send(w, r, 400, map[string]any{"error": "콘솔 상태 복구 실패: " + err.Error()})
+			return
+		}
+		uiApplied = true
 	}
 
 	oldDoc, err := s.Store.ReadDoc()
@@ -247,51 +289,95 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 		s.send(w, r, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	// Export redacts secrets in every section, including process-controlled settings.
+	// Resolve those empty placeholders before protected-section comparison so an
+	// unchanged export can round-trip while explicit non-empty changes still fail.
 	mergeSecrets(newCfg, oldPlain)
 
-	// restart_required 계산 — 바뀐 최상위 섹션 중 라이브 반영 불가능한 것들.
-	// 비교는 RawMessage 바이트가 아니라 값 기준이다 — export→import 왕복은
-	// 직렬화 형태(키 순서)만 달라진 동일 내용을 '변경'으로 오인했다.
-	changed := []string{}
-	newRaw, err := anyToRaw(newCfg)
+	candidate := make(map[string]any, len(oldPlain))
+	for key, value := range oldPlain {
+		candidate[key] = value
+	}
+	managedSections := map[string]bool{"clusters": true, "edge_devices": true, "thresholds": true}
+	for key, value := range newCfg {
+		if !managedSections[key] {
+			oldValue, exists := oldPlain[key]
+			if !exists || !reflect.DeepEqual(oldValue, value) {
+				s.send(w, r, 400, map[string]any{"error": "관리 대상이 아닌 설정 " + key + " 는 가져올 수 없습니다"})
+				return
+			}
+			continue
+		}
+		candidate[key] = value
+	}
+	if err := validateConfigDoc(candidate); err != nil {
+		s.send(w, r, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	candidateJSON, err := json.Marshal(candidate)
+	if err != nil {
+		s.send(w, r, 400, map[string]any{"error": "설정 직렬화 실패: " + err.Error()})
+		return
+	}
+	if _, err := config.Parse(candidateJSON); err != nil {
+		s.send(w, r, 400, map[string]any{"error": "설정 검증 실패: " + err.Error()})
+		return
+	}
+	newRaw, err := anyToRaw(candidate)
 	if err != nil {
 		s.send(w, r, 500, map[string]any{"error": err.Error()})
 		return
 	}
-	keys := map[string]bool{}
-	for k := range oldPlain {
-		keys[k] = true
-	}
-	for k := range newCfg {
-		keys[k] = true
-	}
-	for k := range keys {
-		if liveOKSections[k] {
+
+	// restart_required 계산 — 관리 대상 중 라이브 반영 불가능한 변경만 알린다.
+	changed := []string{}
+	for key := range managedSections {
+		if liveOKSections[key] {
 			continue
 		}
-		if !reflect.DeepEqual(oldPlain[k], newCfg[k]) {
-			changed = append(changed, k)
+		if !reflect.DeepEqual(oldPlain[key], candidate[key]) {
+			changed = append(changed, key)
 		}
 	}
 	sort.Strings(changed)
 
-	if err := s.Store.ReplaceDoc(newRaw); err != nil {
+	previousWarn, previousCrit := poller.UsageThresholds()
+	var previousUI map[string]any
+	if uiApplied {
+		previousUI = s.Gate.ExportUIState()
+	}
+	if err := s.Store.CompareAndReplaceDoc(oldDoc, newRaw); err != nil {
+		if errors.Is(err, config.ErrConfigChanged) {
+			s.send(w, r, http.StatusConflict, map[string]any{
+				"error": "검증 중 설정이 변경되었습니다. 최신 백업을 다시 가져오세요",
+			})
+			return
+		}
 		s.send(w, r, 500, map[string]any{"error": "설정 저장 실패: " + err.Error()})
 		return
 	}
 	// thresholds 는 라이브 반영(putThresholds 와 동일 경로).
-	if th, ok := newCfg["thresholds"].(map[string]any); ok {
+	if th, ok := candidate["thresholds"].(map[string]any); ok {
 		warn, _ := th["warn"].(float64)
 		crit, _ := th["crit"].(float64)
 		poller.SetThresholds(warn, crit)
 	}
-	uiApplied := false
-	if ui, ok := doc["ui"].(map[string]any); ok {
+	if uiApplied {
 		if err := s.Gate.ImportUIState(ui); err != nil {
-			s.send(w, r, 400, map[string]any{"error": "콘솔 상태 복구 실패: " + err.Error()})
+			configRollbackErr := s.Store.CompareAndReplaceDoc(newRaw, oldDoc)
+			uiRollbackErr := s.Gate.ImportUIState(previousUI)
+			poller.SetThresholds(previousWarn, previousCrit)
+			if configRollbackErr != nil || uiRollbackErr != nil {
+				s.send(w, r, 500, map[string]any{
+					"error": "콘솔 상태 저장 실패 후 롤백도 실패했습니다",
+				})
+				return
+			}
+			s.send(w, r, 500, map[string]any{
+				"error": "콘솔 상태 저장 실패 — 설정과 콘솔 상태를 이전 값으로 롤백했습니다",
+			})
 			return
 		}
-		uiApplied = true
 	}
 	msg := "복구했습니다"
 	if len(changed) > 0 {

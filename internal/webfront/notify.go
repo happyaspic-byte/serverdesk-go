@@ -48,14 +48,10 @@ func notifyHostAllowed(host string, allowed []string) bool {
 // content 를 읽으므로 둘 다 싣는다(서로 모르는 필드는 무시). 서버가 쏘므로 브라우저
 // CORS 와 무관하다. URL 은 http/https 만 — file:// 같은 스킴 오용을 막는다.
 // 대상 호스트는 defaultNotifyHosts + SERVERDESK_NOTIFY_HOSTS + Options.NotifyHosts 허용
-// 목록 안이어야 한다(무인증 임의 URL 릴리=SSRF 방어). 리다이렉트는 추종하지 않는다.
+// 목록 안이어야 한다. 상위 로그인 미들웨어 인증과 이 제한을 함께 적용해 SSRF를 막는다.
 func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	if !CheckSameOrigin(r) {
 		writeJSONError(w, http.StatusForbidden, "cross-origin notify rejected")
-		return
-	}
-	if !s.CheckToken(r) {
-		writeJSONError(w, http.StatusForbidden, "missing or invalid X-Serverdesk-Token")
 		return
 	}
 	raw, ok := readCappedBody(w, r, maxNotifyBody, "notify body too large")

@@ -151,12 +151,3 @@ func TestNotifyWebhookError(t *testing.T) {
 		t.Errorf("webhook 500 = %d %s, want 502 relay failed", rec.Code, rec.Body.String())
 	}
 }
-
-func TestNotifyTokenGate(t *testing.T) {
-	s := newTestServer(t, Options{Token: "sek", NotifyHosts: []string{"127.0.0.1"}})
-	rec := do(s, "POST", "/notify/test",
-		strings.NewReader(`{"url":"http://127.0.0.1:1/x","text":"x"}`), nil)
-	if rec.Code != 403 {
-		t.Errorf("notify without token = %d, want 403", rec.Code)
-	}
-}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,47 @@ func readDoc(t *testing.T, path string) map[string]any {
 		t.Fatalf("rewritten file is not valid JSON: %v", err)
 	}
 	return doc
+}
+
+func TestCompareAndReplaceDocRejectsStaleExpected(t *testing.T) {
+	path := copyFixture(t)
+	store := NewStore(path)
+	expected, err := store.ReadDoc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := make(map[string]json.RawMessage, len(expected))
+	for key, value := range expected {
+		replacement[key] = value
+	}
+	replacement["_comment"] = json.RawMessage(`"replacement"`)
+
+	if err := store.UpdateDisplayMeta(SectionClusters, "everrun", map[string]string{"label": "concurrent"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndReplaceDoc(expected, replacement); !errors.Is(err, ErrConfigChanged) {
+		t.Fatalf("stale compare-and-replace error = %v", err)
+	}
+	if got := readDoc(t, path)["clusters"].([]any)[0].(map[string]any)["name"]; got != "concurrent" {
+		t.Fatalf("concurrent update was overwritten: %v", got)
+	}
+
+	current, err := store.ReadDoc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndReplaceDoc(current, replacement); err != nil {
+		t.Fatalf("fresh compare-and-replace failed: %v", err)
+	}
+	if got := readDoc(t, path)["_comment"]; got != "replacement" {
+		t.Fatalf("replacement not stored: %v", got)
+	}
+	if err := store.CompareAndReplaceDoc(replacement, current); err != nil {
+		t.Fatalf("semantic compare after formatted write failed: %v", err)
+	}
+	if got := readDoc(t, path)["clusters"].([]any)[0].(map[string]any)["name"]; got != "concurrent" {
+		t.Fatalf("semantic compare replacement did not restore current doc: %v", got)
+	}
 }
 
 func TestUpdateDisplayMetaCluster(t *testing.T) {

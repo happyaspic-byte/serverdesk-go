@@ -108,7 +108,7 @@ func (s *Server) notesEndpoint() deltaEndpoint {
 	return deltaEndpoint{s.notes, "notes", 120, cleanNotes}
 }
 
-// handleStateGet 은 GET /ack·/maint·/notes 공통이다(읽기는 Origin/토큰 검사를 하지 않는다).
+// handleStateGet은 GET /ack·/maint·/notes 공통이다. 상위 로그인 미들웨어가 접근을 인증한다.
 func (s *Server) handleStateGet(w http.ResponseWriter, sf *stateFile) {
 	writeJSON(w, http.StatusOK, sf.read())
 }
@@ -128,10 +128,6 @@ func (s *Server) handleStateGet(w http.ResponseWriter, sf *stateFile) {
 func (s *Server) handleDeltaPut(w http.ResponseWriter, r *http.Request, ep deltaEndpoint) {
 	if !CheckSameOrigin(r) {
 		writeJSONError(w, http.StatusForbidden, "cross-origin "+ep.name+" write rejected")
-		return
-	}
-	if !s.CheckToken(r) {
-		writeJSONError(w, http.StatusForbidden, "missing or invalid X-Serverdesk-Token")
 		return
 	}
 	raw, ok := readCappedBody(w, r, ep.sf.maxBytes, ep.name+" state too large")
@@ -417,10 +413,6 @@ func (s *Server) handleEscalGet(w http.ResponseWriter) {
 func (s *Server) handleEscalPut(w http.ResponseWriter, r *http.Request) {
 	if !CheckSameOrigin(r) {
 		writeJSONError(w, http.StatusForbidden, "cross-origin escal write rejected")
-		return
-	}
-	if !s.CheckToken(r) {
-		writeJSONError(w, http.StatusForbidden, "missing or invalid X-Serverdesk-Token")
 		return
 	}
 	raw, ok := readCappedBody(w, r, maxEscalBytes, "escal state too large")

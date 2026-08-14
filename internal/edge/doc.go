@@ -1,8 +1,8 @@
 // Package edge — 실장비 엣지 디바이스 폴로(프린터·Synology NAS·옴론 PLC·
 // Proxmox VE·일반 랙서버).
 //
-// sim_devices 가 만들던 것과 동일한 프런트 device 스키마(serverdesk/device@1)를
-// 실측으로 채운다. /api/devices 에서 실 FT 클러스터 뒤에 append 된다.
+// 프런트 device 스키마(serverdesk/device@1)를 실측으로 채운다.
+// /api/devices 에서 실 FT 클러스터 뒤에 append 된다.
 //
 // 읽기전용 계약(절대 규칙):
 //   - SNMP 는 GET(v2c) 만 사용. SET 금지.

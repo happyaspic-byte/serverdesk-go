@@ -498,8 +498,8 @@ func bodyNum(body map[string]any, key string, def float64) float64 {
 }
 
 // --- 연결 테스트 (poller.py _conn_test 포트) ----------------------------------
-// 프런트 simTest 와 동일 스키마 {reachable, auth:{ok,error}, transport, version,
-// warnings[]} 를 실측으로 채운다. 전부 읽기전용 프로브다.
+// {reachable, auth:{ok,error}, transport, version, warnings[]}를 실측으로 채운다.
+// 모든 검사는 읽기 전용 프로브다.
 
 func (s *Server) connTest(ctx context.Context, body map[string]any) map[string]any {
 	typ := strings.ToUpper(bodyStr(body, "type"))

@@ -8,13 +8,13 @@ package poller
 //
 // 기본 포트 맵(설치 절차서·관리 경로 기준): BMC 443(Redfish/웹), Standby OS 22(SSH),
 // MGMT UI 443(Endurance Console), Windows 445(또는 RDP 3389).
-// 현재 등록된 실 Endurance 장비는 없으므로 화면의 상태값은 시뮬 가상 응답이다 —
-// 실장비 등록 시 같은 구조(meta.endurance.reach)에 이 프로버의 실측값이 들어간다.
+// 등록된 Endurance 장비에 대해서만 meta.endurance.reach 실측값을 만든다.
 
 import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -45,7 +45,7 @@ func ProbeTCP(ctx context.Context, ip string, port int, timeout time.Duration) R
 	}
 	d := net.Dialer{Timeout: timeout}
 	start := time.Now()
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, itoa(int64(port))))
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)))
 	ms := round1(float64(time.Since(start).Microseconds()) / 1000.0)
 	if err != nil {
 		if errors.Is(err, syscall.ECONNREFUSED) {

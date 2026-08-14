@@ -51,6 +51,7 @@ type Client struct {
 	Mgmt       string // 관리 IP — 직렬화 락 키로도 쓰인다
 	User       string
 	Bin        string        // avcli 바이너리(기본 "avcli")
+	PrefixArgs []string      // avcli 실행 전에 전달할 고정 인수
 	Timeout    time.Duration // 기본 90s — 1콜 실측 15~40초의 상한
 	RetryDelay time.Duration // 빈 응답 재시도 대기(기본 5s)
 
@@ -118,17 +119,19 @@ func (c *Client) bumpStats(f func(*Stats)) {
 // (rc=0 인데 stderr 에 스택트레이스가 있는 경우가 실측됨 — poller.py 와 동일하게
 // stdout 내용으로만 성공을 판정한다).
 func (c *Client) exec(ctx context.Context, command string, xmlMode bool) (string, string) {
-	args := []string{"-H", c.Mgmt, "-u", c.User, "-p", c.pw}
+	args := make([]string, 0, len(c.PrefixArgs)+8)
+	args = append(args, c.PrefixArgs...)
+	args = append(args, "-H", c.Mgmt, "-u", c.User, "-p", c.pw)
 	if xmlMode {
 		args = append(args, "-x")
 	}
 	args = append(args, strings.Fields(command)...)
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
-	cmd := avcliCmd(ctx, c.Bin, args) // 플랫폼 래퍼 — cmdwrap_*.go(Windows 는 cmd /c 경유)
+	cmd := avcliCmd(ctx, c.Bin, args)
 	cmd.Stdin = nil // subprocess.DEVNULL 에 해당
-	// 타임아웃으로 죽인 래퍼 스크립트의 자식(java)이 stdout 파이프를 쥐고 남으면
-	// Wait 가 파이프 EOF 까지 블록된다 — WaitDelay 로 상한을 둔다.
+	// 타임아웃으로 종료한 프로세스가 stdout 파이프를 쥐고 남으면 Wait 가 EOF까지
+	// 블록된다 — WaitDelay 로 상한을 둔다.
 	cmd.WaitDelay = 3 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

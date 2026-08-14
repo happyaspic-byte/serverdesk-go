@@ -1,7 +1,7 @@
 // Package httpapi 는 everrun-poller 의 HTTP 표면(poller.py Handler)의 Go 포트다.
 //
-// 읽기 API 는 무인증 공개(폐쇄망 감시 계약), 쓰기 API(PUT/DELETE/POST)는
-// 루프백 가드 + webfront GateWrite(동일 출처) 이중 방어다.
+// 최상위 webauth 미들웨어가 읽기·쓰기 API를 인증한다. 쓰기 API는 추가로
+// webfront GateWrite의 동일 출처 검사를 거친다.
 // 응답은 compact JSON(HTML 이스케이프 끔 — 한글 원문), Cache-Control: no-store,
 // 1KB 초과 시 gzip(클로이언트 수용 시), CORS 는 설정 allowlist 에만 부여한다.
 package httpapi
@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -222,36 +221,13 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request, code int, payload 
 	_, _ = w.Write(body)
 }
 
-// isLoopback — 루프백 여부만 판정한다. 쓰기 신뢰 경계는 writeGate(프록시 시대의
-// 루프백 강제가 아니라, 통합 서버에서는 동일출처+토큰 게이트가 원격 경로를 담당).
-func isLoopback(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback()
-}
-
-// writeGate 는 쓰기 공통 가드다.
-//
-// Python 시대에는 serve.py(같은 호스트)가 루프백으로 폴섭에 프록시했기 때문에 폴섭의
-// 루프백 검사가 곧 신뢰 경계였다. Go 통합 서버는 프런트와 API 가 같은 프로세스라,
-// 이 검사를 그대로 두면 원격 브라우저의 정상 UI 쓰기까지 전부 403 이 된다(실제 보고된
-// 장애: 원격 콘솔에서 장비 제거 불가). 그래서 경계를 옮긴다:
-//   - 루프백: 허용(로컬 curl/스크립트·기존 운영 도구 경로).
-//   - 원격: GateWrite — 동일출처(Origin/Referer) 확인 + SERVERDESK_TOKEN 설정 시 토큰 일치.
+// writeGate 는 쓰기 공통 가드다. GateWrite는 Origin/Referer가 둘 다 없는
+// 로컬 자동화 요청은 허용하되, 명시된 교차 출처는 RemoteAddr와 무관하게 거부한다.
 func (s *Server) writeGate(w http.ResponseWriter, r *http.Request) bool {
-	if isLoopback(r) {
-		return true
-	}
 	if s.Gate != nil {
 		return s.Gate.GateWrite(w, r) // 응답은 GateWrite 가 작성
 	}
-	s.send(w, r, 403, map[string]any{"error": "원격 쓰기는 비활성화되어 있습니다"})
+	s.send(w, r, 403, map[string]any{"error": "쓰기는 비활성화되어 있습니다"})
 	return false
 }
 
@@ -339,20 +315,10 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 			if s.Avail != nil {
 				s.Avail.Apply(devices)
 			}
-			// ztC Endurance 데모 장비 — sim_devices > 0 이면 4모델 세트를 붙인다
-			// (Python sim_devices.py 계승, 실장비 스키마와 동일하게 생성).
-			sims := []map[string]any{}
-			if s.Cfg != nil && s.Cfg.SimDevices > 0 {
-				sims = poller.EnduranceSimDevices(nowFloat())
-				devices = append(devices, sims...)
-			}
 			out["devices"] = devices
 			out["count"] = len(devices)
 			warnT, critT := poller.UsageThresholds()
 			out["thresholds"] = map[string]any{"warn": warnT, "crit": critT}
-			if len(sims) > 0 {
-				out["sim_devices"] = len(sims)
-			}
 			if s.Events != nil {
 				out["events"] = s.Events.List(150)
 			}
@@ -489,16 +455,7 @@ func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
 		"uptime_secs":    int64(time.Since(s.StartedAt).Seconds()),
 		"cache_age_secs": cacheAge,
 		"clusters":       clusters,
-		// Endurance 데모 세트는 sim_devices > 0 일 때 4대 고정.
-		"simDevices": simCount(s.Cfg),
 	}
-}
-
-func simCount(cfg *config.Config) int {
-	if cfg != nil && cfg.SimDevices > 0 {
-		return len(poller.EnduranceSimDevices(0))
-	}
-	return 0
 }
 
 func platformOr(p, def string) string {

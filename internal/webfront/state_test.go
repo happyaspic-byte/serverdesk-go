@@ -293,8 +293,8 @@ func TestBodyCapsAndChunked(t *testing.T) {
 	}
 }
 
-func TestOriginAndTokenGates(t *testing.T) {
-	s := newTestServer(t, Options{Token: "sek"})
+func TestOriginGates(t *testing.T) {
+	s := newTestServer(t, Options{})
 
 	put := func(hdr map[string]string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("PUT", "/ack", strings.NewReader(`{"set":{"x":"2026-01-01T00:00:00Z"}}`))
@@ -307,54 +307,28 @@ func TestOriginAndTokenGates(t *testing.T) {
 		return rec
 	}
 
-	// 토큰 없음/틀림 → 403. 맞으면 통과.
-	if rec := put(nil); rec.Code != 403 {
-		t.Errorf("no token = %d, want 403", rec.Code)
+	// 상위 로그인 인증 뒤의 Origin 없는 로컬 도구 요청은 통과한다.
+	if rec := put(nil); rec.Code != 200 {
+		t.Errorf("no origin = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if rec := put(map[string]string{"X-Serverdesk-Token": "wrong"}); rec.Code != 403 {
-		t.Errorf("wrong token = %d, want 403", rec.Code)
-	}
-	if rec := put(map[string]string{"X-Serverdesk-Token": "sek"}); rec.Code != 200 {
-		t.Errorf("right token = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-
-	// 교차 출처는 토큰이 맞아도 403.
-	cross := map[string]string{"X-Serverdesk-Token": "sek", "Origin": "http://evil.example"}
-	if rec := put(cross); rec.Code != 403 {
+	if rec := put(map[string]string{"Origin": "http://evil.example"}); rec.Code != 403 {
 		t.Errorf("cross-origin = %d, want 403", rec.Code)
 	}
-	// 같은 출처(대소문자 무관)는 통과.
-	same := map[string]string{"X-Serverdesk-Token": "sek", "Origin": "http://NOC.local:6001"}
-	if rec := put(same); rec.Code != 200 {
+	if rec := put(map[string]string{"Origin": "http://NOC.local:6001"}); rec.Code != 200 {
 		t.Errorf("same-origin = %d, want 200", rec.Code)
 	}
-	// 'Origin: null'·'file://' 는 fail-close.
-	if rec := put(map[string]string{"X-Serverdesk-Token": "sek", "Origin": "null"}); rec.Code != 403 {
+	if rec := put(map[string]string{"Origin": "null"}); rec.Code != 403 {
 		t.Errorf("Origin null = %d, want 403", rec.Code)
 	}
-	// Referer 도 같은 규칙.
-	if rec := put(map[string]string{"X-Serverdesk-Token": "sek", "Referer": "http://evil.example/x"}); rec.Code != 403 {
+	if rec := put(map[string]string{"Referer": "http://evil.example/x"}); rec.Code != 403 {
 		t.Errorf("cross referer = %d, want 403", rec.Code)
 	}
-	if rec := put(map[string]string{"X-Serverdesk-Token": "sek", "Referer": "http://noc.local:6001/ui/"}); rec.Code != 200 {
+	if rec := put(map[string]string{"Referer": "http://noc.local:6001/ui/"}); rec.Code != 200 {
 		t.Errorf("same referer = %d, want 200", rec.Code)
 	}
 
-	// GET 은 토큰/Origin 게이트 대상이 아니다.
+	// GET은 쓰기 Origin 게이트 대상이 아니다.
 	if rec := do(s, "GET", "/ack", nil, nil); rec.Code != 200 {
 		t.Errorf("GET /ack = %d, want 200", rec.Code)
-	}
-}
-
-func TestTokenFromEnv(t *testing.T) {
-	t.Setenv("SERVERDESK_TOKEN", "envtok")
-	s := newTestServer(t, Options{}) // Options.Token 비어 있으면 env 를 읽는다.
-	if rec := putJSON(s, "/ack", `{"set":{"x":"2026-01-01T00:00:00Z"}}`, nil); rec.Code != 403 {
-		t.Errorf("no token with env set = %d, want 403", rec.Code)
-	}
-	rec := putJSON(s, "/ack", `{"set":{"x":"2026-01-01T00:00:00Z"}}`,
-		map[string]string{"X-Serverdesk-Token": "envtok"})
-	if rec.Code != 200 {
-		t.Errorf("env token = %d, want 200", rec.Code)
 	}
 }

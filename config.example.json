@@ -1,96 +1,10 @@
 {
-  "_comment": "serverdesk-go 설정 예시 — config.local.json 으로 복사해 사용(자격증명 입력, chmod 600, 커밋 금지).",
-  "_intervals_note": "avcli 는 호출당 15~60초 + 매 호출이 audit 로그를 남긴다. fast(node/alert 2콜)는 실측 상한이 ~80초라 60초 주기면 사실상 연속 실행이면서 겹치지 않는다. slow 는 6~7콜이라 300초. license 는 하루 1회면 충분. SSH 는 ControlMaster 재사용 시 0.01초라 10초. SNMP 는 생존확인 폴백이라 60초.",
-  "_sim_note": "실장비 2대 뒤에 /api/devices 로 함께 내보낼 시뮬(데모/부하) 장비 수. 0 이면 끔. 시드 기반 결정적 생성이라 재시작해도 같은 fleet. sim_devices.py 참조.",
+  "_comment": "serverdesk 설정 기본 파일 — 장비는 설치 후 관리 화면에서 추가합니다. BOM 없는 UTF-8로 저장하세요.",
   "avcli_bin": "avcli",
   "avcli_timeout": 90,
   "cache_refresh": 5,
-  "clusters": [
-    {
-      "_platform_note": "생략하면 node-info 의 manufacturer/model 로 자동 판별한다. everrun 은 LED-info 를 호출하지 않는다(서버측 NPE).",
-      "admin_password": "",
-      "admin_user": "admin",
-      "company": "루비컴",
-      "key": "everrun",
-      "mgmt_ip": "172.30.1.10",
-      "name": "everRun 8.1.0.2-19",
-      "node_root_password": "",
-      "nodes": [
-        {
-          "ip": "172.30.1.11",
-          "name": "node0",
-          "root_password": "",
-          "root_user": "root"
-        },
-        {
-          "ip": "172.30.1.12",
-          "name": "node1",
-          "root_password": "",
-          "root_user": "root"
-        }
-      ],
-      "snmp_community": ""
-    },
-    {
-      "_note": "EAC 비밀번호가 everRun 과 다르다. Edge 는 LED-info 가 동작하고 SNMP 로 CPU/MEM 도 나온다.",
-      "admin_password": "",
-      "admin_user": "admin",
-      "company": "루비컴",
-      "key": "ztcedge",
-      "mgmt_ip": "172.30.1.70",
-      "name": "ztC Edge",
-      "node_root_password": "",
-      "nodes": [
-        {
-          "ip": "172.30.1.71",
-          "name": "node0",
-          "root_password": "",
-          "root_user": "root"
-        },
-        {
-          "ip": "172.30.1.72",
-          "name": "node1",
-          "root_password": "",
-          "root_user": "root"
-        }
-      ],
-      "snmp_community": ""
-    }
-  ],
-  "edge_devices": [
-    {
-      "community": "",
-      "company": "루비컴",
-      "factory": "172.30.1.0/24",
-      "ip": "172.30.1.113",
-      "key": "printer-c56x",
-      "kind": "printer",
-      "name": "C56x 컬러 프린터",
-      "site": "172.30.1.113",
-      "vendor": "Samsung Electronics",
-      "web_password": "",
-      "web_user": "admin"
-    },
-    {
-      "company": "루비컴",
-      "fins_port": 9600,
-      "fins_src_node": 84,
-      "ip": "192.168.250.1",
-      "key": "plc-nx1p2",
-      "kind": "plc",
-      "name": "옴론 NX1P2",
-      "vendor": "OMRON"
-    },
-    {
-      "community": "",
-      "company": "루비컴",
-      "ip": "172.30.1.99",
-      "key": "nas-happy",
-      "kind": "nas",
-      "name": "nas-happy",
-      "vendor": "Synology"
-    }
-  ],
+  "clusters": [],
+  "edge_devices": [],
   "history_points": 120,
   "intervals": {
     "fast": 60,
@@ -101,9 +15,7 @@
   },
   "listen": "0.0.0.0:6005",
   "log_level": "info",
-  "runtime_dir": "/home/ubuntu/.serverdesk-go",
-  "sim_devices": 4,
-  "sim_seed": 20260720,
+  "runtime_dir": "data",
   "snmp_community": "",
   "snmp_enabled": true,
   "ssh_timeout": 20,
@@ -112,8 +24,8 @@
     "warn": 78
   },
   "trap": {
-    "enabled": true,
-    "mib_dir": "/home/ubuntu/projects/serverdesk-go/docs/mibs",
+    "enabled": false,
+    "mib_dir": "docs/mibs",
     "port": 10162
   }
 }

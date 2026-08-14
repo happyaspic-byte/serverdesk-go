@@ -1,6 +1,7 @@
 package avcli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,33 @@ func newTestClient(bin string) *Client {
 	c.Timeout = 5 * time.Second
 	c.RetryDelay = 10 * time.Millisecond
 	return c
+}
+func TestClientPrefixArgs(t *testing.T) {
+	bin := writeStub(t, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+	c := newTestClient(bin)
+	c.PrefixArgs = []string{"-XX:+IgnoreUnrecognizedVMOptions", "-jar", "/opt/avcli.jar"}
+
+	stdout, stderr := c.exec(context.Background(), "node-info", true)
+	want := strings.Join([]string{
+		"-XX:+IgnoreUnrecognizedVMOptions",
+		"-jar",
+		"/opt/avcli.jar",
+		"-H",
+		"10.9.9.9",
+		"-u",
+		"admin",
+		"-p",
+		"fake-secret",
+		"-x",
+		"node-info",
+		"",
+	}, "\n")
+	if stdout != want || stderr != "" {
+		t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
+	}
+	if got := strings.Join(c.PrefixArgs, "\x00"); got != "-XX:+IgnoreUnrecognizedVMOptions\x00-jar\x00/opt/avcli.jar" {
+		t.Errorf("PrefixArgs mutated: %q", got)
+	}
 }
 
 func TestClientCallXMLSuccess(t *testing.T) {

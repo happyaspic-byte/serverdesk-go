@@ -32,7 +32,7 @@ import (
 	"strings"
 )
 
-// MaxBodyBytes 는 무인증 LAN 요청 바디의 상한(1 MiB, DoS 방지)이다.
+// MaxBodyBytes는 인증된 요청이라도 과도한 본문으로 메모리를 소모하지 못하게 하는 상한(1 MiB)이다.
 // 이 패키지의 상태 엔드포인트는 각자 더 작은 캡(ack 256KiB, maint/notes/escal 128KiB,
 // notify 64KiB)을 쓰므로 여기선 발동하지 않는다 — /api 프록시를 처리하는 패키지가
 // 같은 이유로 이 값을 참조하라고 노출한다(Python MAX_BODY_BYTES).
@@ -125,21 +125,14 @@ type Options struct {
 	// 없으면 작업 디렉터리다.
 	StateDir string
 
-	// AllowWrites 는 /api 계열 쓰기 게이트(GateWrite)가 참조하는 플래그다(Python 의
-	// --allow-writes). 꺼져 있으면 GateWrite 는 모든 쓰기를 403 으로 거부한다.
-	// 콘솔 상태(/ack·/maint·/notes·/escal·/notify)는 장비 설정이 아니므로 Python 과
-	// 같이 이 플래그를 보지 않고 Origin/토큰 검사만 한다.
+	// AllowWrites는 /api 계열 쓰기 게이트(GateWrite)가 참조한다. 꺼져 있으면
+	// 모든 장비 설정 변경을 403으로 거부한다. 콘솔 상태 쓰기는 로그인 미들웨어 인증 후
+	// 각 핸들러의 동일 출처 검사를 거친다.
 	AllowWrites bool
-
-	// Token 이 있으면 모든 mutation(PUT /ack·/maint·/notes·/escal, POST /notify,
-	// GateWrite 를 통과하는 /api 쓰기)은 X-Serverdesk-Token 헤더가 일치해야 한다
-	// (cron 판 하드닝: 상태 쓰기에도 토큰 일관 적용). 비어 있으면 SERVERDESK_TOKEN
-	// 환경변수를 읽는다. 둘 다 없으면 토큰 검사는 꺼진다.
-	Token string
 
 	// NotifyHosts 는 /notify 웹훅 릴리가 추가로 허용할 대상 호스트다(서브도메인 포함).
 	// 기본 허용 hooks.slack.com·discord.com·discordapp.com 과 SERVERDESK_NOTIFY_HOSTS
-	// 환경변수(쉼표 구분)에 더해진다. 무인증 임의 URL 릴리(SSRF) 방어가 목적이라
+	// 환경변수(쉼표 구분)에 더해진다. 로그인 이후에도 SSRF 방어는 별도로 유지하므로
 	// LAN 주소를 올릴 때는 신중해야 한다.
 	NotifyHosts []string
 }
@@ -151,7 +144,6 @@ type Server struct {
 	static fs.FS
 
 	allowWrites bool
-	token       string
 	notifyHosts []string
 
 	// 동시 처리 상한 세마포어(maxConcurrent 슬롯). ServeHTTP 진입 시 비차단으로 얻고,
@@ -170,10 +162,6 @@ func New(static fs.FS, opts Options) *Server {
 	if dir == "" {
 		dir = defaultStateDir()
 	}
-	token := opts.Token
-	if token == "" {
-		token = os.Getenv("SERVERDESK_TOKEN")
-	}
 	hosts := append([]string{}, defaultNotifyHosts...)
 	hosts = append(hosts, splitHosts(os.Getenv("SERVERDESK_NOTIFY_HOSTS"))...)
 	for _, h := range opts.NotifyHosts {
@@ -184,7 +172,6 @@ func New(static fs.FS, opts Options) *Server {
 	s := &Server{
 		static:      static,
 		allowWrites: opts.AllowWrites,
-		token:       token,
 		notifyHosts: hosts,
 		sem:         make(chan struct{}, maxConcurrent),
 		notifyClient: &http.Client{
@@ -231,7 +218,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Python 의 end_headers 에 해당: 정적/상태/오류 응답 모두에 최소 보안 헤더 세트.
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Referrer-Policy", "no-referrer")
+	// 로그아웃 form POST가 실제 Origin을 보내도록 same-origin을 쓴다.
+	// no-referrer는 navigate-mode POST의 Origin을 null로 만들어 정상 로그아웃까지 거부한다.
+	h.Set("Referrer-Policy", "same-origin")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Content-Security-Policy", cspHeader)
 
