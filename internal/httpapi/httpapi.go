@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"serverdesk/internal/config"
+	"serverdesk/internal/deviceview"
 	"serverdesk/internal/poller"
 	"serverdesk/internal/webfront"
 )
@@ -128,12 +129,12 @@ func readCapped(r *http.Request, cap int64) ([]byte, error) {
 
 // DisplayCfg 는 /api/devices 변환용 클러스터 표시 메타 맵이다
 // (poller.py _display_cfg 포트 — 자격증명 제외, 표시 필드만).
-func (s *Server) DisplayCfg() map[string]poller.DisplayMeta {
+func (s *Server) DisplayCfg() map[string]deviceview.DisplayMeta {
 	s.ovlMu.Lock()
 	defer s.ovlMu.Unlock()
-	out := map[string]poller.DisplayMeta{}
+	out := map[string]deviceview.DisplayMeta{}
 	for key, m := range s.displayOverlay {
-		out[key] = poller.DisplayMeta{
+		out[key] = deviceview.DisplayMeta{
 			Label:    m["label"],
 			Company:  m["company"],
 			Factory:  m["factory"],
@@ -302,7 +303,7 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 			fmtQ = lowerASCII(v[0])
 		}
 		if path == "/api/devices" || fmtQ == "devices" || fmtQ == "device" || fmtQ == "serverdesk" {
-			out := poller.BuildDevices(fleet, s.DisplayCfg(), s.refreshSec())
+			out := deviceview.BuildDevices(fleet, s.DisplayCfg(), s.refreshSec())
 			// 실 엣지 디바이스 — FT 클러스터 바로 뒤에 append.
 			devices := []map[string]any{}
 			for _, dv := range listAny(out["devices"]) {
