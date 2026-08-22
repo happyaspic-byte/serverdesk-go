@@ -973,7 +973,18 @@ function render(state, ctx) {
     ? L(ctx, 'Enter a new URL to replace', '새 URL 입력 시 교체')
     : 'https://discord.com/api/webhooks/…';
   dom.hookSave.textContent = S.busy === 'save' ? '…' : L(ctx, 'Save', '저장');
-  dom.hookTest.textContent = S.busy === 'test' ? '…' : L(ctx, 'Send test', '테스트 발송');
+  if (S.busy === 'test') {
+    dom.hookTest.innerHTML = '';
+    const dot = el('span', 'u-dot is-warn pulse');
+    dot.style.marginRight = '6px';
+    dom.hookTest.appendChild(dot);
+    dom.hookTest.appendChild(document.createTextNode(L(ctx, 'Testing…', '테스트 중…')));
+    dom.hookTest.setAttribute('aria-busy', 'true');
+  } else {
+    dom.hookTest.innerHTML = '';
+    dom.hookTest.textContent = L(ctx, 'Send test', '테스트 발송');
+    dom.hookTest.removeAttribute('aria-busy');
+  }
   dom.hookClear.textContent = S.busy === 'clear' ? '…' : L(ctx, 'Clear', '해제');
   dom.hookClear.hidden = !on;
   updateHookButtons(ctx);

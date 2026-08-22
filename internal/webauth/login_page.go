@@ -5,21 +5,29 @@ import (
 	"html/template"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 type loginPageData struct {
-	Error string
-	Next  string
+	Lang        string
+	Title       string
+	Heading     string
+	Intro       string
+	UsernameLab string
+	PasswordLab string
+	SubmitLab   string
+	Error       string
+	Next        string
 }
 
 var loginPageTemplate = template.Must(template.New("login").Parse(`<!doctype html>
-<html lang="ko">
+<html lang="{{.Lang}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#171310">
-<title>로그인 — serverdesk</title>
+<title>{{.Title}}</title>
 <style>
 :root{color-scheme:light dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f1ede4;color:#251d18}
 *{box-sizing:border-box}
@@ -40,30 +48,100 @@ button{width:100%;height:45px;border:0;border-radius:9px;background:#b85c33;colo
     <span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><circle cx="6" cy="6" r=".7" fill="currentColor"></circle><circle cx="6" cy="18" r=".7" fill="currentColor"></circle></svg></span>
     <span><span class="brand-name">serverdesk</span><span class="brand-sub">FT infrastructure console</span></span>
   </div>
-  <h1>관리자 로그인</h1>
-  <p class="intro">등록 장비와 운영 정보를 보려면 로그인하세요.</p>
+  <h1>{{.Heading}}</h1>
+  <p class="intro">{{.Intro}}</p>
   {{if .Error}}<div class="error" role="alert">{{.Error}}</div>{{end}}
   <form method="post" action="/login">
     <input type="hidden" name="next" value="{{.Next}}">
     <div class="group">
-      <label for="username">아이디</label>
+      <label for="username">{{.UsernameLab}}</label>
       <input class="field" id="username" name="username" type="text" value="admin" autocomplete="username" autocapitalize="none" spellcheck="false" required>
     </div>
     <div class="group">
-      <label for="password">비밀번호</label>
+      <label for="password">{{.PasswordLab}}</label>
       <input class="field" id="password" name="password" type="password" autocomplete="current-password" autofocus required>
     </div>
-    <button type="submit">로그인</button>
+    <button type="submit">{{.SubmitLab}}</button>
   </form>
   <p class="foot">Roobicom serverdesk</p>
 </main>
 </body>
 </html>`))
 
+// detectLoginLang은 요청의 Accept-Language 헤더를 파싱하여 ko 또는 en을 결정한다. (기본값 ko)
+func detectLoginLang(r *http.Request) string {
+	if r == nil {
+		return "ko"
+	}
+	al := r.Header.Get("Accept-Language")
+	if al == "" {
+		return "ko"
+	}
+	koQ, enQ := -1.0, -1.0
+	for _, part := range strings.Split(al, ",") {
+		tag := strings.TrimSpace(part)
+		if tag == "" {
+			continue
+		}
+		q := 1.0
+		if idx := strings.Index(tag, ";q="); idx >= 0 {
+			if parsedQ, err := strconv.ParseFloat(strings.TrimSpace(tag[idx+3:]), 64); err == nil {
+				q = parsedQ
+			}
+			tag = strings.TrimSpace(tag[:idx])
+		}
+		tagLower := strings.ToLower(tag)
+		if strings.HasPrefix(tagLower, "ko") && (koQ < 0 || q > koQ) {
+			koQ = q
+		} else if strings.HasPrefix(tagLower, "en") && (enQ < 0 || q > enQ) {
+			enQ = q
+		}
+	}
+	if enQ > 0 && enQ > koQ {
+		return "en"
+	}
+	return "ko"
+}
+
 func (m *Manager) writeLoginPage(w http.ResponseWriter, r *http.Request, status int, errorMessage, next string) {
+	lang := detectLoginLang(r)
+	data := loginPageData{
+		Lang:  lang,
+		Next:  next,
+		Error: errorMessage,
+	}
+
+	if lang == "en" {
+		data.Title = "Login — serverdesk"
+		data.Heading = "Administrator Login"
+		data.Intro = "Sign in to access registered devices and operational metrics."
+		data.UsernameLab = "Username"
+		data.PasswordLab = "Password"
+		data.SubmitLab = "Sign In"
+		switch errorMessage {
+		case "로그인 요청을 읽을 수 없습니다.":
+			data.Error = "Unable to read login request."
+		case "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.":
+			data.Error = "Too many login attempts. Please try again later."
+		case "아이디 또는 비밀번호가 올바르지 않습니다.":
+			data.Error = "Invalid username or password."
+		}
+	} else {
+		data.Title = "로그인 — serverdesk"
+		data.Heading = "관리자 로그인"
+		data.Intro = "등록 장비와 운영 정보를 보려면 로그인하세요."
+		data.UsernameLab = "아이디"
+		data.PasswordLab = "비밀번호"
+		data.SubmitLab = "로그인"
+	}
+
 	var body bytes.Buffer
-	if err := loginPageTemplate.Execute(&body, loginPageData{Error: errorMessage, Next: next}); err != nil {
-		http.Error(w, "로그인 화면을 만들 수 없습니다.", http.StatusInternalServerError)
+	if err := loginPageTemplate.Execute(&body, data); err != nil {
+		errMsg := "로그인 화면을 만들 수 없습니다."
+		if lang == "en" {
+			errMsg = "Unable to render login page."
+		}
+		http.Error(w, errMsg, http.StatusInternalServerError)
 		return
 	}
 	h := w.Header()

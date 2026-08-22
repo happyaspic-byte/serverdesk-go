@@ -285,8 +285,12 @@ function goBack() {
 // 토스트
 // ---------------------------------------------------------------------------
 let toastTimer = null;
-function showToast(msg) {
+let activeToastUndo = null;
+
+function showToast(msg, undoFn, duration) {
   clearTimeout(toastTimer);
+  activeToastUndo = typeof undoFn === 'function' ? undoFn : null;
+  const dur = typeof duration === 'number' ? duration : (undoFn ? 5000 : 2400);
   setState({ toast: msg });
   // 연속 동일 문구 토스트(#616): 각 showToast 호출은 별개의 사용자 작업에 대한 확인이다.
   // announce 의 msg === lastAnnounce 디듑에 두 번째 호출이 삼켜지지 않도록 호출 시점에
@@ -301,7 +305,10 @@ function showToast(msg) {
     void shell.toast.offsetWidth; // reflow 강제 — 애니메이션 재시작
     shell.toast.style.animation = '';
   }
-  toastTimer = setTimeout(() => setState({ toast: null }), 2400);
+  toastTimer = setTimeout(() => {
+    activeToastUndo = null;
+    setState({ toast: null });
+  }, dur);
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +591,21 @@ function renderShell(st) {
   // 토스트
   if (shell.toast) {
     setField('toastText', st.toast || '');
+    let undoBtn = shell.toast.querySelector('[data-action="toastUndo"]');
+    if (activeToastUndo && st.toast) {
+      if (!undoBtn) {
+        undoBtn = document.createElement('button');
+        undoBtn.type = 'button';
+        undoBtn.className = 'toast-undo';
+        undoBtn.setAttribute('data-action', 'toastUndo');
+        undoBtn.style.cssText = 'background:transparent;border:1px solid var(--inverse-accent);color:var(--inverse-accent);border-radius:var(--r-sm);padding:2px 8px;font-size:var(--fs-12);font-weight:var(--fw-semi);cursor:pointer;margin-left:8px;';
+        shell.toast.appendChild(undoBtn);
+      }
+      undoBtn.textContent = L('Undo', '실행 취소');
+      undoBtn.hidden = false;
+    } else if (undoBtn) {
+      undoBtn.hidden = true;
+    }
     shell.toast.hidden = !st.toast;
   }
 
@@ -709,25 +731,130 @@ function applySearchActive() {
 function searchItems(st, m) {
   const q = (st.search || '').trim().toLowerCase();
   if (!q) return [];
-  if (m && Array.isArray(m.searchResults)) return m.searchResults.slice(0, 8);
-  // 폴백: fleet(노드) + alerts 혼합
+
   const out = [];
-  (st.fleet || []).forEach(d => {
-    const hay = [d.host, d.site, d.type, d.id].join(' ').toLowerCase();
-    if (hay.indexOf(q) >= 0) out.push({ kind: 'node', id: d.id, label: d.host || d.id, meta: (d.site || '—') + ' · ' + (d.type || ''), status: d.status });
+
+  // 1. 화면 바로가기 (Navigation shortcuts)
+  const navScreens = [
+    { view: 'overview',  en: 'Overview (Dashboard)',   ko: '개요 (대시보드)',    syn: ['개요', '대시보드', 'overview', 'dashboard', 'home', 'main'] },
+    { view: 'nodes',     en: 'All devices (Nodes)',    ko: '전체 장비 (노드)',   syn: ['노드', '전체 장비', '전체장비', 'nodes', 'devices', 'servers'] },
+    { view: 'topology',  en: 'Topology',               ko: '토폴로지',          syn: ['토폴로지', '망도', '구성도', 'topology', 'topo', 'network'] },
+    { view: 'capacity',  en: 'Capacity',               ko: '용량',              syn: ['용량', '자원', '리소스', 'capacity', 'resource', 'cpu', 'memory', 'disk'] },
+    { view: 'clusters',  en: 'Clusters',               ko: '클러스터',          syn: ['클러스터', '이중화', 'ha', 'ft', 'clusters', 'cluster'] },
+    { view: 'incidents', en: 'Alerts & log (Incidents)', ko: '경보 · 로그 (인시던트)', syn: ['인시던트', '경보', '알림', '로그', 'incidents', 'alerts', 'logs'] },
+    { view: 'manage',    en: 'Device management',      ko: '장비 관리',          syn: ['관리', '장비 관리', '장비관리', 'manage', 'management', 'admin'] },
+    { view: 'settings',  en: 'Settings',               ko: '설정',              syn: ['설정', '환경설정', '테마', '언어', 'settings', 'preferences', 'config'] },
+  ];
+
+  navScreens.forEach((s) => {
+    const hay = [s.view, s.en, s.ko, ...s.syn].join(' ').toLowerCase();
+    if (hay.indexOf(q) >= 0) {
+      out.push({
+        kind: 'nav',
+        id: s.view,
+        view: s.view,
+        label: L(s.en, s.ko),
+        meta: L('Screen', '화면 바로가기'),
+        tone: 'info',
+      });
+    }
   });
-  (st.fleet || []).forEach(d => {
-    ((d.meta && d.meta.alerts) || []).forEach(a => {
-      const txt = ((a.name || '') + ' ' + (a.desc || '')).trim();
-      if (txt.toLowerCase().indexOf(q) >= 0) {
-        // 모델 경로(compute.js)와 정합 — status 는 심각도 문자열, tone 은 sevTone(neg|warn|info).
-        const sev = a.sev || 'info';
-        out.push({ kind: 'alert', id: d.id, label: txt, meta: d.host || d.id,
-          status: sev, tone: sev === 'critical' ? 'neg' : sev === 'warning' ? 'warn' : 'info' });
+
+  // 2. 빠른 액션 (Quick actions)
+  const unackedAlerts = [];
+  if (m && Array.isArray(m.alerts)) {
+    m.alerts.forEach((a) => {
+      const k = a.ackKey || (a.hostId + ':' + (a.name || a.msg || ''));
+      if (k && !(st.ackedAlerts && st.ackedAlerts[k])) unackedAlerts.push(k);
+    });
+  } else if (st.fleet) {
+    st.fleet.forEach((d) => {
+      ((d.meta && d.meta.alerts) || []).forEach((a) => {
+        const k = d.id + ':' + (a.name || a.desc || '');
+        if (!(st.ackedAlerts && st.ackedAlerts[k])) unackedAlerts.push(k);
+      });
+    });
+  }
+  const ackKeysStr = unackedAlerts.join('\u0002');
+
+  const actions = [
+    {
+      action: 'toggleLang',
+      label: L('Switch language: 한국어', '언어 전환: English'),
+      meta: L('Quick action', '빠른 액션'),
+      syn: ['언어', '언어전환', '한글', '영어', 'lang', 'language', 'korean', 'english', 'togglelang'],
+      tone: 'info',
+    },
+    {
+      action: 'ackAllVisible',
+      ackKeys: ackKeysStr,
+      label: unackedAlerts.length > 0
+        ? L('Acknowledge all alerts (' + unackedAlerts.length + ')', '전체 경보 확인 (' + unackedAlerts.length + '건)')
+        : L('Acknowledge all alerts', '전체 경보 확인'),
+      meta: L('Quick action', '빠른 액션'),
+      syn: ['확인', '전체확인', '일괄확인', '전체 확인', '경보 확인', 'ack', 'ackall', 'acknowledge', 'clear alerts'],
+      tone: 'pos',
+    },
+    {
+      action: 'toggleRail',
+      label: L(st.railOpen ? 'Collapse sidebar' : 'Expand sidebar', st.railOpen ? '사이드바 접기' : '사이드바 펼치기'),
+      meta: L('Quick action', '빠른 액션'),
+      syn: ['사이드바', '레일', '메뉴', '접기', '펼치기', 'sidebar', 'rail', 'collapse', 'expand'],
+      tone: 'info',
+    },
+    {
+      action: 'togglePause',
+      label: L(st.logPaused ? 'Resume live updates' : 'Pause live updates', st.logPaused ? '실시간 갱신 재개' : '실시간 갱신 일시정지'),
+      meta: L('Quick action', '빠른 액션'),
+      syn: ['일시정지', '정지', '재개', 'pause', 'resume', 'freeze'],
+      tone: 'warn',
+    },
+  ];
+
+  actions.forEach((a) => {
+    const hay = [a.action, a.label, ...a.syn].join(' ').toLowerCase();
+    if (hay.indexOf(q) >= 0) {
+      out.push({
+        kind: 'action',
+        id: a.action,
+        action: a.action,
+        ackKeys: a.ackKeys || '',
+        label: a.label,
+        meta: a.meta,
+        tone: a.tone,
+      });
+    }
+  });
+
+  // 3. 노드 및 경보 검색 결과
+  if (m && Array.isArray(m.searchResults)) {
+    (m.searchResults || []).forEach((r) => {
+      out.push(r);
+    });
+  } else {
+    // 폴백: fleet(노드) + alerts 혼합
+    (st.fleet || []).forEach((d) => {
+      const hay = [d.host, d.site, d.type, d.id].join(' ').toLowerCase();
+      if (hay.indexOf(q) >= 0) {
+        out.push({ kind: 'node', id: d.id, label: d.host || d.id, meta: (d.site || '—') + ' · ' + (d.type || ''), status: d.status });
       }
     });
-  });
-  return out.slice(0, 8);
+    (st.fleet || []).forEach((d) => {
+      ((d.meta && d.meta.alerts) || []).forEach((a) => {
+        const txt = ((a.name || '') + ' ' + (a.desc || '')).trim();
+        if (txt.toLowerCase().indexOf(q) >= 0) {
+          // 모델 경로(compute.js)와 정합 — status 는 심각도 문자열, tone 은 sevTone(neg|warn|info).
+          const sev = a.sev || 'info';
+          out.push({
+            kind: 'alert', id: d.id, label: txt, meta: d.host || d.id,
+            status: sev, tone: sev === 'critical' ? 'neg' : sev === 'warning' ? 'warn' : 'info',
+          });
+        }
+      });
+    });
+  }
+
+  return out.slice(0, 10);
 }
 
 function renderSearch(st, m) {
@@ -743,8 +870,8 @@ function renderSearch(st, m) {
   // 재빌드 스킵 키에는 상태 재료(status/tone — 도트 색)와 meta(호스트·시각 표기)도 넣는다.
   // kind:id:label 만으로 만들면 검색어가 그대로인 채 배경 틱(1.2s)으로 장비 상태가
   // op→down 등으로 바뀌어도 열린 드롭다운의 도트 색·meta 가 갱신되지 않았다(#519).
-  const key = (open ? 'q|' : '') + items.map(i =>
-    i.kind + ':' + i.id + ':' + i.label + ':' + (i.status || '') + ':' + (i.tone || '') + ':' + (i.meta || '')
+  const key = (open ? 'q|' : '') + items.map((i) =>
+    i.kind + ':' + (i.id || '') + ':' + (i.view || '') + ':' + (i.action || '') + ':' + i.label + ':' + (i.status || '') + ':' + (i.tone || '') + ':' + (i.meta || '')
   ).join('|');
   if (key !== prevSearchKey) {
     prevSearchKey = key;
@@ -758,22 +885,29 @@ function renderSearch(st, m) {
       d.textContent = L('No results', '결과 없음');
       shell.searchResults.appendChild(d);
     }
-    searchNodes = items.map(it => {
+    searchNodes = items.map((it) => {
       const n = document.getElementById('tpl-search-item').content.firstElementChild.cloneNode(true);
-      n.dataset.searchGo = it.id;
+      if (it.kind === 'nav') {
+        n.dataset.searchView = it.view;
+      } else if (it.kind === 'action') {
+        n.dataset.searchAction = it.action;
+        if (it.ackKeys) n.dataset.ackKeys = it.ackKeys;
+      } else {
+        n.dataset.searchGo = it.id;
+      }
       n.setAttribute('role', 'option');
       n.setAttribute('aria-selected', 'false');
       const dot = n.querySelector('.u-dot');
       if (dot) {
-        dot.classList.remove('is-pos', 'is-warn', 'is-neg');
+        dot.classList.remove('is-pos', 'is-warn', 'is-neg', 'is-info');
         // node 항목의 status 는 장비 상태(op|deg|down)지만, incident/alert 항목은 compute 가
         // 심각도 문자열(critical|warning|info)을 status 로 납품한다(compute.js searchResults).
-        // 그대로 장비 매핑에 넣으면 critical 경볼에도 is-pos(정상 녹색)이 붙으므로,
+        // 그대로 장비 매핑에 넣으면 critical 경보에도 is-pos(정상 녹색)이 붙으므로,
         // 경보 항목은 함께 납품되는 tone(sevTone: neg|warn|info)으로 매핑하고
         // info 는 중립(색 클래스 없음)으로 둔다(#518).
         const cls = it.kind === 'node'
           ? (it.status === 'down' ? 'is-neg' : it.status === 'deg' ? 'is-warn' : 'is-pos')
-          : (it.tone === 'neg' ? 'is-neg' : it.tone === 'warn' ? 'is-warn' : null);
+          : (it.tone === 'neg' ? 'is-neg' : it.tone === 'warn' ? 'is-warn' : (it.tone === 'pos' ? 'is-pos' : (it.tone === 'info' ? 'is-info' : null)));
         if (cls) dot.classList.add(cls);
       }
       n.querySelector('.hd-search-item-name').textContent = it.label;
@@ -822,6 +956,17 @@ export function announce(msg) {
 // ---------------------------------------------------------------------------
 // 전역 data-action 위임 스위치 (§5.2)
 // ---------------------------------------------------------------------------
+function executeSearchItem(target) {
+  if (!target) return;
+  if (target.dataset.searchView) {
+    goView(target.dataset.searchView);
+  } else if (target.dataset.searchAction) {
+    handleAction(target.dataset.searchAction, target);
+  } else if (target.dataset.searchGo) {
+    goDetail(target.dataset.searchGo);
+  }
+}
+
 function handleAction(action, el) {
   switch (action) {
     case 'toggleLang':
@@ -840,6 +985,16 @@ function handleAction(action, el) {
     case 'togglePause': setState(s => ({ logPaused: !s.logPaused })); break;
     case 'clearSearch': setState({ search: '' }); break;
     case 'toast': showToast((el && el.dataset.toastMsg) || ''); break;
+    case 'toastUndo': {
+      if (typeof activeToastUndo === 'function') {
+        const fn = activeToastUndo;
+        activeToastUndo = null;
+        clearTimeout(toastTimer);
+        setState({ toast: null });
+        fn();
+      }
+      break;
+    }
     // 경보 확인/해제 — 원본은 지우지 않고 확인 표시만 토글한다(폴러는 해제 API 가 없다).
     // 값은 확인 시각(ISO) — 나중에 '확인한 지 N일' 표기에 쓸 수 있게 boolean 대신 타임스탬프.
     // 점검 창 설정/해제 — data-maint-id + data-maint-hours(0이면 해제).
@@ -847,6 +1002,7 @@ function handleAction(action, el) {
       const id = el && el.dataset.maintId;
       if (!id) break;
       const hours = Number(el.dataset.maintHours || 0);
+      const prevMaintEntry = getState().maint && getState().maint[id];
       setState((st) => {
         const next = Object.assign({}, st.maint);
         if (hours > 0) {
@@ -861,9 +1017,23 @@ function handleAction(action, el) {
         }
         return { maint: next };
       });
-      showToast(hours > 0
-        ? L('Maintenance window set (' + hours + 'h)', '점검 모드 ' + hours + '시간 설정')
-        : L('Maintenance window cleared', '점검 모드를 해제했습니다'));
+      if (hours > 0) {
+        showToast(
+          L('Maintenance window set (' + hours + 'h)', '점검 모드 ' + hours + '시간 설정'),
+          () => {
+            setState((st) => {
+              const next = Object.assign({}, st.maint);
+              if (prevMaintEntry) next[id] = prevMaintEntry;
+              else delete next[id];
+              return { maint: next };
+            });
+            showToast(L('Maintenance window restored', '점검 모드 설정을 취소했습니다'));
+          },
+          5000
+        );
+      } else {
+        showToast(L('Maintenance window cleared', '점검 모드를 해제했습니다'));
+      }
       break;
     }
     case 'ackAlert': {
@@ -883,13 +1053,28 @@ function handleAction(action, el) {
     case 'ackAllVisible': {
       const keys = String((el && el.dataset.ackKeys) || '').split('\u0002').filter(Boolean);
       if (!keys.length) break;
+      const prevAcked = Object.assign({}, getState().ackedAlerts || {});
       setState((s) => {
         const next = Object.assign({}, s.ackedAlerts);
         const now = new Date().toISOString();
         keys.forEach((k) => { next[k] = now; });
         return { ackedAlerts: next };
       });
-      showToast(L(keys.length + ' alerts acknowledged', '경보 ' + keys.length + '건을 확인 처리했습니다'));
+      showToast(
+        L(keys.length + ' alerts acknowledged', '경보 ' + keys.length + '건을 확인 처리했습니다'),
+        () => {
+          setState((s) => {
+            const next = Object.assign({}, s.ackedAlerts);
+            keys.forEach((k) => {
+              if (prevAcked[k]) next[k] = prevAcked[k];
+              else delete next[k];
+            });
+            return { ackedAlerts: next };
+          });
+          showToast(L('Alert acknowledgements undone', '일괄 확인을 취소했습니다'));
+        },
+        5000
+      );
       break;
     }
     // 일괄 해제 — 버튼의 data-ack-keys(incidents.js bulkAckKeys, #27)에 실린 '현재 필터
@@ -925,8 +1110,8 @@ document.addEventListener('click', e => {
     }
     return;
   }
-  if ((el = t.closest('[data-search-go]'))) {
-    goDetail(el.dataset.searchGo);
+  if ((el = t.closest('[data-search-go], [data-search-view], [data-search-action]'))) {
+    executeSearchItem(el);
     setState({ search: '' });
     if (shell.searchInput) shell.searchInput.value = '';
     return;
@@ -1004,9 +1189,9 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && document.activeElement === shell.searchInput) {
     // 화살표로 이동했으면 활성 항목, 아니면 기존대로 첫 결과.
     const target = (searchNavigated && searchNodes[searchActive]) ||
-      (shell.searchResults && shell.searchResults.querySelector('[data-search-go]'));
+      (shell.searchResults && shell.searchResults.querySelector('[data-search-go], [data-search-view], [data-search-action]'));
     if (target) {
-      goDetail(target.dataset.searchGo);
+      executeSearchItem(target);
       setState({ search: '' });
       shell.searchInput.value = '';
     }
