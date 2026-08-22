@@ -1,10 +1,100 @@
 {
-  "_comment": "serverdesk 설정 기본 파일 — 장비는 설치 후 관리 화면에서 추가합니다. BOM 없는 UTF-8로 저장하세요.",
+  "_comment": "serverdesk 설정 기본 파일 — 장비는 설치 후 관리 화면에서 추가하거나 아래 예시 스키마를 참고하여 작성합니다. BOM 없는 UTF-8로 저장하세요.",
   "avcli_bin": "avcli",
   "avcli_timeout": 90,
   "cache_refresh": 5,
   "clusters": [],
+  "_clusters_comment": "clusters 스키마 예시: everRun / ztC Edge FT 클러스터",
+  "_clusters_example": [
+    {
+      "_comment": "everRun/ztC Edge 클러스터 스키마 예시",
+      "key": "cluster-1",
+      "name": "everRun 8.1",
+      "mgmt_ip": "10.0.0.10",
+      "admin_user": "admin",
+      "admin_password": "admin-password",
+      "node_root_password": "node-root-password",
+      "snmp_enabled": true,
+      "snmp_community": "public",
+      "platform": "everrun",
+      "site": "본사",
+      "company": "고객사",
+      "factory": "1공장",
+      "nodes": [
+        { "name": "node0", "ip": "10.0.0.11", "root_user": "root", "root_password": "pw" },
+        { "name": "node1", "ip": "10.0.0.12", "root_user": "root", "root_password": "pw" }
+      ]
+    }
+  ],
   "edge_devices": [],
+  "_edge_devices_comment": "edge_devices 스키마 예시 (kind: printer | nas | plc | proxmox | server)",
+  "_edge_devices_example": [
+    {
+      "_comment": "프린터 (SNMP + 웹 관리자 계정)",
+      "key": "printer-1",
+      "kind": "printer",
+      "name": "사무실 복합기",
+      "ip": "10.0.0.113",
+      "community": "public",
+      "web_user": "admin",
+      "web_password": "web-password",
+      "vendor": "Samsung",
+      "company": "고객사",
+      "factory": "1공장",
+      "site": "본사"
+    },
+    {
+      "_comment": "NAS (SNMP + 보조 인터페이스 IP)",
+      "key": "nas-1",
+      "kind": "nas",
+      "name": "백업 NAS",
+      "ip": "10.0.0.99",
+      "community": "public",
+      "extra_ips": ["10.0.0.98"],
+      "company": "고객사",
+      "factory": "1공장",
+      "site": "본사"
+    },
+    {
+      "_comment": "PLC (Omron FINS/UDP — 읽기 전용)",
+      "key": "plc-1",
+      "kind": "plc",
+      "name": "생산라인 PLC",
+      "ip": "192.168.250.1",
+      "fins_port": 9600,
+      "fins_src_node": 84,
+      "company": "고객사",
+      "factory": "1공장",
+      "site": "본사"
+    },
+    {
+      "_comment": "Proxmox VE 노드 (HTTPS API)",
+      "key": "pve-1",
+      "kind": "proxmox",
+      "name": "PVE 노드1",
+      "ip": "10.0.0.21",
+      "user": "root@pam",
+      "password": "pve-password",
+      "company": "고객사",
+      "factory": "1공장",
+      "site": "본사"
+    },
+    {
+      "_comment": "일반 서버 (OS SNMP + Redfish BMC)",
+      "key": "srv-1",
+      "kind": "server",
+      "name": "HPE DL380",
+      "ip": "10.0.0.31",
+      "community": "public",
+      "bmc_ip": "10.0.0.131",
+      "bmc_user": "Administrator",
+      "bmc_password": "bmc-password",
+      "vendor": "HPE",
+      "company": "고객사",
+      "factory": "1공장",
+      "site": "본사"
+    }
+  ],
   "history_points": 120,
   "intervals": {
     "fast": 60,

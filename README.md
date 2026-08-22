@@ -24,7 +24,7 @@ cp config.example.json config.local.json   # 자격증명 입력, chmod 600
 
 - HTTP: `listen`(기본 예시 0.0.0.0:6005) — 로그인 후 콘솔 UI + /api/* 사용
 - SNMP 트랩: `trap.port`(10162/udp). EAC 가 보내는 162/udp 를 받으려면 리다이렉트가 필요하다 —
-  `serverdesk-net.service`(everrun-poller 리포)가 162→10162 REDIRECT 와 PLC 서브넷 보조 IP를 담당한다.
+  `deploy/serverdesk-net.service`(내재화)가 162→10162 REDIRECT 와 PLC 서브넷 보조 IP를 담당한다.
 - 웹 로그인: `-init-auth`가 auth 저장소마다 고유한 관리자 자격증명을 생성하고
   `ADMIN_USERNAME`/`ADMIN_PASSWORD`로 출력한다. `auth.json`에는 PBKDF2-HMAC-SHA256
   검증값만 저장한다. `-auth auth.json -check-auth`는 동일한 엄격한 런타임 규칙으로 파일을
@@ -34,16 +34,24 @@ cp config.example.json config.local.json   # 자격증명 입력, chmod 600
   역프록시로 종단하고 `X-Forwarded-Proto`와 실제 client IP가 마지막 값인 `X-Forwarded-For`를 전달한다.
 ## Linux 고객 설치
 
-패키지 디렉터리에서 다음을 실행한다. 최초 설치는 비대화식으로 고유한 관리자 자격증명을
+배포 패키지 디렉터리(`deploy/packaging/`)에서 다음을 실행하거나 프로젝트 루트에서 경로를 지정해 실행한다. 최초 설치는 비대화식으로 고유한 관리자 자격증명을
 생성해 `/var/lib/serverdesk/initial-login.txt`에 기록한다. 이 파일은 `serverdesk` 서비스
 계정 소유, mode `0600`이므로 안전하게 기록한 뒤 삭제하거나 비밀번호를 교체한다. 재설치와
 업데이트는 기존 `auth.json`과 자격증명을 보존한다.
 
 ```bash
-sudo sh install-linux.sh
-sudo sh update-linux.sh
-sudo sh uninstall-linux.sh          # 코드와 unit만 제거, /var/lib/serverdesk 상태 보존
-sudo sh uninstall-linux.sh --full   # 코드·상태·서비스 계정까지 제거
+sudo sh deploy/packaging/install-linux.sh
+sudo sh deploy/packaging/update-linux.sh
+sudo sh deploy/packaging/uninstall-linux.sh          # 코드와 unit만 제거, /var/lib/serverdesk 상태 보존
+sudo sh deploy/packaging/uninstall-linux.sh --full   # 코드·상태·서비스 계정까지 제거
+```
+
+신규 서버 설치 시 네트워크/트랩 준비(`deploy/serverdesk-net.service`)를 포함하여 등록한다:
+
+```bash
+sudo cp deploy/serverdesk-net.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now serverdesk-net.service
 ```
 
 고객 설치의 실행 파일은 `/opt/serverdesk/serverdesk`(root 소유)이고, `config.local.json`,
