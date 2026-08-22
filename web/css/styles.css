@@ -1,11 +1,11 @@
 /* ============================================================
-   serverdesk — Server Monitoring (navy shell + cool-gray palette)
+   serverdesk — Server Monitoring (espresso shell + warm-paper palette)
    css/styles.css — 공용 CSS ONLY (F5).
-   방향: 고정 네이비 셸 + 라이트·다크 쿨그레이 콘텐츠 계층.
+   방향: 고정 에스프레소 셸 + 라이트·다크 웜 페이퍼 콘텐츠 계층.
    표면 간 명도와 헤어라인으로 깊이를 만들고 그림자는 필요한 오버레이에만 제한한다.
-   강조: 브랜드 인디고(#3A4FD8 계열)는 선택·CTA·포커스 전용, 세만틱 색은 실제 상태 신호 전용.
-   INK-FILL 토큰: primary CTA와 활성 세그먼트에만 쓰는 브랜드 인디고 필.
-   순백 대면적 사용을 피하고 쿨그레이 surface 계층으로 중첩 깊이를 구분한다.
+   강조: 브랜드 테라코타(#B85C33/#9A4A28 계열)는 선택·CTA·포커스 전용, 세만틱 색은 실제 상태 신호 전용.
+   INK-FILL 토큰: primary CTA와 활성 세그먼트에만 쓰는 브랜드 테라코타 필.
+   순백 대면적 사용을 피하고 웜 페이퍼 surface 계층으로 중첩 깊이를 구분한다.
    화면별 클래스(sc-*)는 이 파일에 넣지 않는다 — css/screens/*.css가 각자 담당.
    ⚠ fmt.js COLOR{pos,warn,neg,info,ink,muted,softTrack}는 아래 토큰과 동기화 필요(보고 참조).
    ============================================================ */
@@ -406,7 +406,7 @@ main[data-screen-root],
 .hd-search-results{ position:absolute; top:calc(100% + 8px); left:50%; translate:-50% 0; width:min(500px,46vw); max-height:60vh; overflow-y:auto; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-xl); box-shadow:var(--shadow-lg); padding:8px; z-index:30; animation:popin var(--dur) var(--ease-spring); }
 .hd-search-empty{ padding:20px; text-align:center; font-size:var(--fs-12); color:var(--muted); }
 
-/* 셸 세그먼트: 네이비 컨테이너 + 중립 활성 썸 — 블루필 아님. */
+/* 셸 세그먼트: 에스프레소 컨테이너 + 중립 활성 썸 — 테라코타필 아님. */
 .hd-lang{ display:flex; background:var(--shell-2); border-radius:var(--r-sm); padding:3px; gap:2px; flex-shrink:0; border:1px solid var(--shell-line); }
 .hd-lang-btn{ display:inline-flex; align-items:center; justify-content:center; border-radius:calc(var(--r-sm) - 3px); padding:5px 11px; font-size:var(--fs-12); font-weight:var(--fw-semi); color:var(--shell-muted); cursor:pointer; transition:background var(--dur) var(--ease),color var(--dur) var(--ease); }
 .hd-lang-btn.is-active{ background:var(--shell-hover); color:var(--shell-ink); box-shadow:var(--hairline-highlight); }
@@ -741,9 +741,9 @@ table.table{ width:100%; border-collapse:collapse; font-size:var(--fs-13); }
 .u-badge .u-muted{ color:inherit; opacity:.82; }
 
 /* ============================================================
-   21. RESPONSIVE (최소 1280px 기준, 라이트 전용 — 다크모드 쿼리 없음)
+   21. RESPONSIVE (4단 표준화: ≤1440 / ≤1024 / ≤768 / ≤560)
    ============================================================ */
-@media (max-width:1439px){
+@media (max-width: 1440px){
   /* 좁은 데스크탑 티어: 페이지 여백·검색 폭 축소(토큰 경유 — 화면 10개 자동 적용). */
   :root{ --page-pad:20px 24px 32px; }
   .hd-search{ width:min(380px,40vw); }
@@ -856,7 +856,7 @@ body.is-dense .kpi{ padding:12px 14px; }
 }
 
 /* ============================================================
-   RESPONSIVE MEDIA QUERIES (1024px / 768px)
+   RESPONSIVE MEDIA QUERIES (≤1440 / ≤1024 / ≤768 / ≤560 표준화)
    ============================================================ */
 
 /* 태블릿 (<= 1024px) */
