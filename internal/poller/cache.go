@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"serverdesk/internal/topology"
@@ -18,15 +19,21 @@ import (
 // 유지한다 — 프런트·외부 감시 도구가 이 값을 비교할 수 있기 때문이다.
 const Version = "1.0.0"
 
+// cacheSnapshot 은 RCU 패턴을 위한 불변 스냅샷이다.
+type cacheSnapshot struct {
+	fleet      map[string]any
+	topology   map[string]any
+	topoFull   map[string]any
+	typedViews []topology.ClusterView
+	ts         float64
+}
+
 // FleetCache 는 fleet/평면 토폴로지/상세 토폴로지의 마지막 성공 스냅샷이다.
+// atomic.Pointer 기반 불변 스냅샷(RCU 패턴)을 사용해 조회 시 락 경합을 제거한다.
 type FleetCache struct {
-	mu          sync.Mutex
-	fleet       map[string]any
-	emptyLogged bool // '클러스터 0대 배포' 안내는 1회만(매 갱신 주기마다 찍지 않음)
-	topology    map[string]any
-	topoFull    map[string]any
-	typedViews  []topology.ClusterView // 직전 갱신의 타입 뷰(상세 토폴로지 입력)
-	ts          float64
+	snap        atomic.Pointer[cacheSnapshot]
+	updateMu    sync.Mutex // Update 간 직렬화 및 emptyLogged 보호
+	emptyLogged bool       // '클러스터 0대 배포' 안내는 1회만(매 갱신 주기마다 찍지 않음)
 }
 
 // NewFleetCache 는 빈 캐시를 만든다.
@@ -38,24 +45,27 @@ func NewFleetCache() *FleetCache { return &FleetCache{} }
 // 클러스터를 개별 recover 로 감싼다. 실패한 클러스터는 직전 스냅샷(있으면)을
 // stale 로 표시해 유지하고, 최초 실패라 이전 데이터가 없으면 생략한다.
 func (c *FleetCache) Update(states []*ClusterState) {
-	c.mu.Lock()
+	c.updateMu.Lock()
+	defer c.updateMu.Unlock()
+
+	curr := c.snap.Load()
+
 	prevClusters := map[string]map[string]any{}
-	if c.fleet != nil {
-		for _, cv := range listVal(c.fleet["clusters"]) {
+	if curr != nil && curr.fleet != nil {
+		for _, cv := range listVal(curr.fleet["clusters"]) {
 			if cm := dictVal(cv); cm != nil {
 				prevClusters[strVal(cm["key"])] = cm
 			}
 		}
 	}
 	prevTopo := map[string]any{}
-	if c.topology != nil {
-		for _, tv := range listVal(c.topology["clusters"]) {
+	if curr != nil && curr.topology != nil {
+		for _, tv := range listVal(curr.topology["clusters"]) {
 			if tm := dictVal(tv); tm != nil {
 				prevTopo[strVal(tm["cluster"])] = tv
 			}
 		}
 	}
-	c.mu.Unlock()
 
 	clusters := make([]any, 0, len(states))
 	typed := make([]topology.ClusterView, 0, len(states))
@@ -131,16 +141,23 @@ func (c *FleetCache) Update(states []*ClusterState) {
 		topoFull = buildFullTopologyMap(typed, generatedAt)
 	}()
 
-	c.mu.Lock()
-	c.fleet = fleet
-	c.topology = topo
-	// 상세 빌드 실패 시 직전본 유지(Python: 새 값이 None 이고 이전도 None 일 때만 덮음).
-	if topoFull != nil || c.topoFull == nil {
-		c.topoFull = topoFull
+	var finalTopoFull map[string]any
+	if curr != nil {
+		finalTopoFull = curr.topoFull
 	}
-	c.typedViews = typed
-	c.ts = nowFloat()
-	c.mu.Unlock()
+	// 상세 빌드 실패 시 직전본 유지(Python: 새 값이 None 이고 이전도 None 일 때만 덮음).
+	if topoFull != nil || finalTopoFull == nil {
+		finalTopoFull = topoFull
+	}
+
+	newSnap := &cacheSnapshot{
+		fleet:      fleet,
+		topology:   topo,
+		topoFull:   finalTopoFull,
+		typedViews: typed,
+		ts:         nowFloat(),
+	}
+	c.snap.Store(newSnap)
 }
 
 // safeBuildViews 는 클러스터 1대의 뷰 빌드를 recover 로 감싼다.
@@ -185,20 +202,23 @@ func staleCluster(prev map[string]any) map[string]any {
 
 // Snapshot 은 (fleet, 평면 topology, 갱신 시각)을 돌려준다.
 // fleet 이 nil 이면 아직 한 번도 수집되지 않은 것이다.
+// RCU 패턴(atomic.Pointer 로드)으로 락 경합 없이 즉시 반환한다.
 func (c *FleetCache) Snapshot() (fleet, topo map[string]any, ts float64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.fleet == nil {
+	snap := c.snap.Load()
+	if snap == nil || snap.fleet == nil {
 		return nil, nil, 0
 	}
-	return c.fleet, c.topology, c.ts
+	return snap.fleet, snap.topology, snap.ts
 }
 
 // SnapshotFull 은 (상세 topology, 갱신 시각)을 돌려준다.
+// RCU 패턴(atomic.Pointer 로드)으로 락 경합 없이 즉시 반환한다.
 func (c *FleetCache) SnapshotFull() (map[string]any, float64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.topoFull, c.ts
+	snap := c.snap.Load()
+	if snap == nil {
+		return nil, 0
+	}
+	return snap.topoFull, snap.ts
 }
 
 // buildFullTopologyMap 은 topology.BuildFullTopology 결과를 맵으로 변환하고

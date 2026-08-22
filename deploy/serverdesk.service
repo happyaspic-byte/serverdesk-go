@@ -8,6 +8,8 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/projects/serverdesk-go
+# Go 런타임 메모리 상한 설정 (OOM 방지 및 GC 목표 힙 제한)
+Environment=GOMEMLIMIT=400MiB
 # gitignore 된 로컬 env 파일은 PATH 등 호스트별 실행 환경에만 사용한다.
 # 웹 인증은 로컬 auth.json의 관리자 비밀번호와 서버 세션이 담당한다.
 EnvironmentFile=-/home/ubuntu/projects/serverdesk-go/serverdesk.local.env

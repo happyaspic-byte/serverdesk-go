@@ -2,8 +2,10 @@ package poller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"serverdesk/internal/avcli"
@@ -58,7 +60,7 @@ func (w *AvcliWorker) Start(ctx context.Context) {
 		now = time.Now()
 		for _, tier := range []struct {
 			name string
-			fn   func()
+			fn   func(context.Context)
 			iv   time.Duration
 		}{
 			{"static", w.tierStatic, w.static},
@@ -79,7 +81,7 @@ func (w *AvcliWorker) Start(ctx context.Context) {
 							tier.name, r, debug.Stack()))
 					}
 				}()
-				tier.fn()
+				tier.fn(ctx)
 			}()
 			due[tier.name] = time.Now().Add(tier.iv)
 			break
@@ -95,16 +97,17 @@ func (w *AvcliWorker) Start(ctx context.Context) {
 // RunTiersOnce 는 fast/slow/static 티어를 순서대로 1회씩 실행한다(--once 진단 모드).
 // Python 의 `w.tier_fast(); w.tier_slow(); w.tier_static()` 직렬 호출에 해당한다.
 func (w *AvcliWorker) RunTiersOnce() {
-	w.tierFast()
-	w.tierSlow()
-	w.tierStatic()
+	ctx := context.Background()
+	w.tierFast(ctx)
+	w.tierSlow(ctx)
+	w.tierStatic(ctx)
 }
 
 // tierFast 는 node-info + alert-info 를 수집한다(poller.py tier_fast).
-func (w *AvcliWorker) tierFast() {
+func (w *AvcliWorker) tierFast(ctx context.Context) {
 	ok := true
 	errMsg := ""
-	root, e1, _ := w.cli.CallXML3("node-info")
+	root, e1, _ := w.cli.CallXML3(ctx, "node-info")
 	if root != nil {
 		nodes := avcli.ParseNodeInfo(root)
 		// Python `if nodes:` — 빈 파싱 결과로 이전 성공분을 덮지 않는다.
@@ -120,7 +123,7 @@ func (w *AvcliWorker) tierFast() {
 		ok = false
 		errMsg = errString(e1)
 	}
-	root, e2, _ := w.cli.CallXML3("alert-info")
+	root, e2, _ := w.cli.CallXML3(ctx, "alert-info")
 	if root != nil {
 		w.st.setAlerts(avcli.ParseAlertInfo(root))
 	} else {
@@ -138,16 +141,16 @@ func (w *AvcliWorker) tierFast() {
 // tierSlow 는 unit/vm/network/storage/volume/image-container(+Edge LED)를 수집한다
 // (poller.py tier_slow). 치명 오류(인증 실패·도달 불가)가 나오면 같은 이유로
 // 실패할 나머지 콜을 건너뛰고 조기 종료한다(도달불가 클러스터에서 slow 7콜 = 수 분).
-func (w *AvcliWorker) tierSlow() {
+func (w *AvcliWorker) tierSlow(ctx context.Context) {
 	ok := true
 	lastErr := ""
 	aborted := false
 
 	grab := func(cmd string, set func(root *avcli.Element)) {
-		if aborted {
+		if aborted || ctx.Err() != nil {
 			return
 		}
-		root, err, fatal := w.cli.CallXML3(cmd)
+		root, err, fatal := w.cli.CallXML3(ctx, cmd)
 		if root == nil {
 			ok = false
 			lastErr = errString(err)
@@ -165,10 +168,10 @@ func (w *AvcliWorker) tierSlow() {
 	grab("network-info", func(r *avcli.Element) { w.st.setNetworks(avcli.ParseNetworkInfo(r)) })
 
 	// storage-info-v2 가 노드별 논리디스크 + 볼륨까지 준다. 실패하면 구버전으로 폭백.
-	if !aborted {
-		root, err, fatal := w.cli.CallXML3("storage-info-v2 --disks --volumes")
-		if root == nil && !fatal {
-			root, err, fatal = w.cli.CallXML3("storage-info")
+	if !aborted && ctx.Err() == nil {
+		root, err, fatal := w.cli.CallXML3(ctx, "storage-info-v2 --disks --volumes")
+		if root == nil && !fatal && ctx.Err() == nil {
+			root, err, fatal = w.cli.CallXML3(ctx, "storage-info")
 		}
 		if root != nil {
 			w.st.setStorageGroups(avcli.ParseStorageInfo(root))
@@ -197,8 +200,8 @@ func (w *AvcliWorker) tierSlow() {
 	}()
 
 	// LED-info 는 ztC Edge 에서만. everRun 은 서버측 NPE 로 항상 실패한다.
-	if w.st.GetPlatform() == "ztcedge" && !aborted {
-		if root, _ := w.cli.CallXML("LED-info"); root != nil {
+	if w.st.GetPlatform() == "ztcedge" && !aborted && ctx.Err() == nil {
+		if root, _ := w.cli.CallXML(ctx, "LED-info"); root != nil {
 			w.st.setLED(avcli.ParseLEDInfo(root))
 		}
 	}
@@ -210,8 +213,8 @@ func (w *AvcliWorker) tierSlow() {
 }
 
 // tierStatic 은 license-info 를 수집한다(poller.py tier_static).
-func (w *AvcliWorker) tierStatic() {
-	root, err := w.cli.CallXML("license-info")
+func (w *AvcliWorker) tierStatic(ctx context.Context) {
+	root, err := w.cli.CallXML(ctx, "license-info")
 	if root == nil {
 		w.st.Mark("static", errString(err))
 		return
@@ -239,8 +242,13 @@ func NewOsMetricsWorker(st *ClusterState, ssh *sshmetrics.Runner) *OsMetricsWork
 }
 
 // Start 는 ctx 종료까지 interval 주기로 전 대상을 수집한다.
+// 단일 노드 행/지연이 타 노드 수집을 지연시키지 않도록 sync.WaitGroup 기반으로
+// 병렬 수집하며, 노드당 고루틴 상한은 세마포어(8)로 제한한다.
 func (w *OsMetricsWorker) Start(ctx context.Context) {
 	logf("info", w.st.Key, fmt.Sprintf("OS 메트릭 워커 시작 interval=%ds", int(w.interval.Seconds())))
+	const maxConcurrency = 8
+	sem := make(chan struct{}, maxConcurrency)
+
 	for ctx.Err() == nil {
 		func() {
 			// 라운드 전체를 감싼다 — 대상 조회/개별 수집의 패닉이 워커를 죽이지 못하게.
@@ -249,12 +257,30 @@ func (w *OsMetricsWorker) Start(ctx context.Context) {
 					logf("error", w.st.Key, fmt.Sprintf("OS 메트릭 라운드 예외: %v\n%s", r, debug.Stack()))
 				}
 			}()
-			for _, tgt := range w.st.NodeTargets() {
+			targets := w.st.NodeTargets()
+			var wg sync.WaitGroup
+			for _, tgt := range targets {
 				if ctx.Err() != nil {
 					break
 				}
-				w.collect(ctx, tgt)
+				wg.Add(1)
+				go func(target NodeTarget) {
+					defer wg.Done()
+					defer func() {
+						if r := recover(); r != nil {
+							logf("error", w.st.Key, fmt.Sprintf("OS 노드 개별 수집 예외(%s): %v\n%s", target.IP, r, debug.Stack()))
+						}
+					}()
+					select {
+					case sem <- struct{}{}:
+						defer func() { <-sem }()
+					case <-ctx.Done():
+						return
+					}
+					w.collect(ctx, target)
+				}(tgt)
 			}
+			wg.Wait()
 		}()
 		select {
 		case <-ctx.Done():
@@ -281,6 +307,9 @@ func (w *OsMetricsWorker) collect(ctx context.Context, tgt NodeTarget) {
 	if err != nil || m == nil {
 		if err != nil {
 			logf("debug", w.st.Key, fmt.Sprintf("OS 수집 실패 %s: %v", ip, err))
+			if errors.Is(err, sshmetrics.ErrHostKeyChanged) {
+				logf("error", w.st.Key, fmt.Sprintf("[SECURITY] OS 수집 호스트 키 불일치 %s: %v", ip, err))
+			}
 		}
 		w.st.failNodeOS(ip, tgt.Name)
 		return
