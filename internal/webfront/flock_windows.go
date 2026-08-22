@@ -9,4 +9,4 @@ import "os"
 // 다만 같은 상태 파일을 여는 두 프로세스 간 상호 배제는 Unix 만큼 강하지 않다 —
 // Windows 배포는 단일 인스턴스 전제로 쓴다.
 func lockFile(fd *os.File) bool { return true }
-func unlockFile(fd *os.File)   {}
+func unlockFile(fd *os.File)    {}

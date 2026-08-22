@@ -18,13 +18,15 @@ import (
 const (
 	credentialVersion     = 1
 	credentialAlgorithm   = "PBKDF2-HMAC-SHA256"
-	credentialIterations  = 600_000
 	credentialSaltBytes   = 16
 	credentialDigestBytes = 32
 	credentialFileMaxSize = 4 << 10
-	minimumPasswordBytes  = 15
+	minimumPasswordBytes  = 8 /* 정책 완화: 운영 요청으로 15→8 (2026-08-22) */
 	maximumPasswordBytes  = 1024
 )
+
+// credentialIterations는 PBKDF2 키 파생 반복 횟수이다. (테스트 시 오버라이드 가능하도록 var로 선언)
+var credentialIterations = 600_000
 
 // Credentials holds the derived administrator credential material.
 type Credentials struct {

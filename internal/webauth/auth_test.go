@@ -16,7 +16,14 @@ import (
 
 const fixedTestPassword = "test-admin-password"
 
-var testCredentials = mustTestCredentials()
+var testCredentials Credentials
+
+// TestMain은 테스트 실행 속도 개선을 위해 PBKDF2 반복수를 1000으로 오버라이드한다. (프로덕션 기본값 600_000은 불변)
+func TestMain(m *testing.M) {
+	credentialIterations = 1000
+	testCredentials = mustTestCredentials()
+	os.Exit(m.Run())
+}
 
 func mustTestCredentials() Credentials {
 	digest, err := pbkdf2.Key(sha256.New, fixedTestPassword, []byte("test-salt-123456"), credentialIterations, credentialDigestBytes)
