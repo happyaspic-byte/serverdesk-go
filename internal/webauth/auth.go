@@ -89,6 +89,11 @@ func (m *Manager) Handler(next http.Handler) http.Handler {
 			path = "/"
 		}
 
+		// CORS Preflight(OPTIONS) 요청과 헬스체크는 인증 검사 전에 통과시켜 정당한 브라우저 API 호출 및 시동 확인이 차단되지 않게 한다.
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path == "/api/health" && r.URL.EscapedPath() == "/api/health" &&
 			(r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			next.ServeHTTP(w, r)

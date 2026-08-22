@@ -440,6 +440,39 @@ func TestFileBackedManagerConcurrentHandling(t *testing.T) {
 	}
 }
 
+func TestOptionsPreflightPassesBeforeAuth(t *testing.T) {
+	manager := New(testCredentials)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("protected:" + r.URL.Path))
+	})
+	handler := manager.Handler(next)
+
+	// 인증되지 않은 OPTIONS Preflight 요청은 인증 미들웨어를 통과하여 204를 반환해야 한다.
+	optReq := serve(handler, http.MethodOptions, "/api/devices", nil, "")
+	if optReq.Code != http.StatusNoContent {
+		t.Fatalf("unauthenticated OPTIONS preflight = %d, want 204", optReq.Code)
+	}
+
+	// OPTIONS 통과 후 실제 인증되지 않은 GET 요청은 여전히 401 및 인증 요구를 반환해야 한다.
+	getReq := serve(handler, http.MethodGet, "/api/devices", nil, "")
+	if getReq.Code != http.StatusUnauthorized || !strings.Contains(getReq.Body.String(), "authentication required") {
+		t.Fatalf("unauthenticated GET = %d %s, want 401", getReq.Code, getReq.Body.String())
+	}
+
+	// 기타 API 경로(/ack, /login 등)에 대한 OPTIONS 요청도 인증 없이 통과해야 한다.
+	for _, path := range []string{"/ack", "/maint", "/notes", "/escal", "/notify", "/login", "/logout"} {
+		res := serve(handler, http.MethodOptions, path, nil, "")
+		if res.Code != http.StatusNoContent {
+			t.Errorf("unauthenticated OPTIONS on %s = %d, want 204", path, res.Code)
+		}
+	}
+}
+
 func login(handler http.Handler, username, password, next string) *httptest.ResponseRecorder {
 	values := url.Values{"username": {username}, "password": {password}, "next": {next}}
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(values.Encode()))
