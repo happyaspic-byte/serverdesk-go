@@ -707,7 +707,8 @@ func ParseImageContainerInfo(root *Element) []ImageContainer {
 //
 // 컨테이너 이름 규칙: <vm internal-name>_<볼륨역할>_<uuid>. internal-name 은
 // 점 등이 제거되어 변형될 수 있으므로(예: 26.04 → 2604) 가장 긴 접두어가 일치하는
-// VM 에 붙인다. 매칭 실패는 조용히 무시(orphan).
+// VM 에 붙인다. 매칭 실패(orphan 컨테이너) 시 명시적 로그를 남기고,
+// 다른 VM의 UUID와 충돌 시 불일치 매칭을 방어한다.
 func JoinImageContainers(vms []*VMInfo, containers []*ImageContainer) {
 	if len(vms) == 0 || len(containers) == 0 {
 		return
@@ -729,18 +730,52 @@ func JoinImageContainers(vms []*VMInfo, containers []*ImageContainer) {
 		}
 	}
 	slices.SortStableFunc(keys, func(a, b key) int { return len(b.prefix) - len(a.prefix) })
+
+	// 다른 VM 의 UUID 집합 구성 (UUID 불일치 오매칭 방어용)
+	vmByUUID := make(map[string]*VMInfo)
+	for _, vm := range vms {
+		if vm != nil && vm.UUID != nil && *vm.UUID != "" {
+			norm := strings.ToLower(strings.ReplaceAll(*vm.UUID, "-", ""))
+			if len(norm) >= 8 {
+				vmByUUID[norm] = vm
+			}
+		}
+	}
+
 	for _, c := range containers {
 		if c == nil {
 			continue
 		}
 		cname := strVal(c.Name)
+		matched := false
 		for _, k := range keys {
 			if strings.HasPrefix(cname, k.prefix+"_") || cname == k.prefix {
+				// UUID 불일치 방어: 컨테이너 이름에 포함된 UUID 토큰이 다른 VM의 UUID와 명백히 일치하고 현재 매칭 대상과 다르면 건너뜀
+				parts := strings.Split(cname, "_")
+				if len(parts) >= 2 {
+					token := strings.ToLower(strings.ReplaceAll(parts[len(parts)-1], "-", ""))
+					if len(token) >= 8 {
+						conflict := false
+						for otherUUID, otherVM := range vmByUUID {
+							if otherVM != k.vm && (strings.HasPrefix(otherUUID, token) || strings.HasPrefix(token, otherUUID)) {
+								conflict = true
+								break
+							}
+						}
+						if conflict {
+							continue
+						}
+					}
+				}
 				c.VmID = k.vm.ID
 				c.VmName = k.vm.Name
 				k.vm.ImageContainers = append(k.vm.ImageContainers, strVal(c.ID))
+				matched = true
 				break
 			}
+		}
+		if !matched {
+			Logf("warn", "avcli", fmt.Sprintf("orphan image-container: name=%q id=%q", cname, strVal(c.ID)))
 		}
 	}
 }

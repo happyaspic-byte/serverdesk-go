@@ -137,11 +137,11 @@ func pveNet(rows []any) []map[string]any {
 	}
 	order := map[string]int{"eth": 0, "bond": 1, "bridge": 2}
 	sort.SliceStable(out, func(i, j int) bool {
-		oi, oj := order[out[i]["kind"].(string)], order[out[j]["kind"].(string)]
+		oi, oj := order[js(out[i]["kind"])], order[js(out[j]["kind"])]
 		if oi != oj {
 			return oi < oj
 		}
-		return out[i]["name"].(string) < out[j]["name"].(string)
+		return js(out[i]["name"]) < js(out[j]["name"])
 	})
 	return out
 }
@@ -172,7 +172,7 @@ func pveDisks(rows []any) []map[string]any {
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i]["dev"].(string) < out[j]["dev"].(string)
+		return js(out[i]["dev"]) < js(out[j]["dev"])
 	})
 	return out
 }
@@ -203,7 +203,7 @@ func pveStorage(rows []any) []map[string]any {
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i]["name"].(string) < out[j]["name"].(string)
+		return js(out[i]["name"]) < js(out[j]["name"])
 	})
 	return out
 }
@@ -251,20 +251,21 @@ func pveHealth(disks, storage []map[string]any) (string, []string) {
 	reasons := []string{}
 	level := "ok"
 	for _, dk := range disks {
-		h := strings.ToUpper(dk["health"].(string))
-		if dk["kind"].(string) != "usb" && h != "" && h != "PASSED" && h != "OK" && h != "UNKNOWN" {
-			reasons = append(reasons, fmt.Sprintf("%s SMART %s", dk["dev"], dk["health"]))
+		h := strings.ToUpper(js(dk["health"]))
+		if js(dk["kind"]) != "usb" && h != "" && h != "PASSED" && h != "OK" && h != "UNKNOWN" {
+			reasons = append(reasons, fmt.Sprintf("%s SMART %s", js(dk["dev"]), js(dk["health"])))
 			level = "critical"
-		} else if w, ok := dk["wearout"].(int64); ok && w <= 10 {
-			reasons = append(reasons, fmt.Sprintf("%s 수명 %d%%", dk["dev"], w))
+		} else if w, ok := ji(dk["wearout"]); ok && w <= 10 {
+			reasons = append(reasons, fmt.Sprintf("%s 수명 %d%%", js(dk["dev"]), w))
 			if level != "critical" {
 				level = "warning"
 			}
 		}
 	}
 	for _, sp := range storage {
-		if sp["pct"].(int64) >= 90 {
-			reasons = append(reasons, fmt.Sprintf("%s %d%%", sp["name"], sp["pct"]))
+		pct := jiOr(sp["pct"], 0)
+		if pct >= 90 {
+			reasons = append(reasons, fmt.Sprintf("%s %d%%", js(sp["name"]), pct))
 			if level != "critical" {
 				level = "warning"
 			}
@@ -431,7 +432,7 @@ func pveMap(pc *pollCtx, dev DeviceConfig, st *pveStatic, raw pveRaw) (map[strin
 	}
 	running := 0
 	for _, v := range vms {
-		if strings.EqualFold(v["state"].(string), "running") {
+		if strings.EqualFold(js(v["state"]), "running") {
 			running++
 		}
 	}

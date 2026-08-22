@@ -2,8 +2,9 @@ package snmp
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"net"
 	"time"
 )
@@ -59,6 +60,15 @@ func concat(parts ...[]byte) []byte {
 	return out
 }
 
+// newReqID 는 [1, 2^30-1] 범위의 암호학적 난수 요청 ID를 생성한다.
+func newReqID() int64 {
+	n, err := rand.Int(rand.Reader, big.NewInt(1<<30-1))
+	if err != nil {
+		return 1
+	}
+	return n.Int64() + 1
+}
+
 // Get은 단일 UDP GET으로 여러 OID를 묶어 조회한다. timeout은 호출 전체 상한.
 //
 // 반환 맵은 요청한 OID 중 에이전트가 응답한 것만 담는다. everRun 의 MIB view
@@ -75,45 +85,84 @@ func Get(ctx context.Context, ip string, port int, community string, oids []stri
 	if raddr.IP == nil {
 		return nil, fmt.Errorf("snmp: 잘못된 IP %q", ip)
 	}
-	reqID := int64(rand.Intn(1<<30-1) + 1) // 파이썬 random.randint(1, 2**30)
-	pkt, err := buildGetRequest(reqID, community, oids)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.ListenUDP("udp", nil)
-	if err != nil {
-		return nil, fmt.Errorf("snmp: UDP 소켓 생성 실패: %w", err)
-	}
-	defer conn.Close()
 
-	deadline := time.Now().Add(timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
+	overallDeadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(overallDeadline) {
+		overallDeadline = d
 	}
-	_ = conn.SetDeadline(deadline)
-	// ctx 취소가 타임아웃보다 먼저 오면 소켓을 닫아 Read 를 깨운다.
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
+
+	const maxAttempts = 3 // 최초 1회 + 최대 2회 재전송
+	var lastErr error
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		now := time.Now()
+		if !now.Before(overallDeadline) {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, fmt.Errorf("snmp: %s:%d 응답 대기 실패: timeout", ip, port)
+		}
+
+		remainingTotal := overallDeadline.Sub(now)
+		// 각 시도별 타임아웃: 지수 백오프(예: 남은 시도 횟수로 균등/점증 배분)
+		attemptTimeout := remainingTotal / time.Duration(maxAttempts-attempt)
+		if attemptTimeout < 50*time.Millisecond {
+			attemptTimeout = remainingTotal
+		}
+		attemptDeadline := now.Add(attemptTimeout)
+		if attemptDeadline.After(overallDeadline) {
+			attemptDeadline = overallDeadline
+		}
+
+		reqID := newReqID()
+		pkt, err := buildGetRequest(reqID, community, oids)
+		if err != nil {
+			return nil, err
+		}
+
+		conn, err := net.ListenUDP("udp", nil)
+		if err != nil {
+			return nil, fmt.Errorf("snmp: UDP 소켓 생성 실패: %w", err)
+		}
+
+		_ = conn.SetDeadline(attemptDeadline)
+		stop := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				conn.Close()
+			case <-stop:
+			}
+		}()
+
+		_, writeErr := conn.WriteToUDP(pkt, raddr)
+		if writeErr != nil {
+			close(stop)
 			conn.Close()
-		case <-stop:
+			return nil, fmt.Errorf("snmp: %s:%d 전송 실패: %w", ip, port, writeErr)
 		}
-	}()
 
-	if _, err = conn.WriteToUDP(pkt, raddr); err != nil {
-		return nil, fmt.Errorf("snmp: %s:%d 전송 실패: %w", ip, port, err)
-	}
-	buf := make([]byte, 65535)
-	n, _, err := conn.ReadFromUDP(buf)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		buf := make([]byte, 65535)
+		n, _, readErr := conn.ReadFromUDP(buf)
+		close(stop)
+		conn.Close()
+
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lastErr = fmt.Errorf("snmp: %s:%d 응답 대기 실패: %w", ip, port, readErr)
+			// UDP 패킷 유실 대비 1~2회 타임아웃 백오프 재전송 루프
+			continue
 		}
-		return nil, fmt.Errorf("snmp: %s:%d 응답 대기 실패: %w", ip, port, err)
+
+		return parseGetResponse(buf[:n])
 	}
-	return parseGetResponse(buf[:n])
+
+	return nil, lastErr
 }
 
 // parseGetResponse 는 GetResponse-PDU 를 {oid: Value} 맵으로 디코드한다
