@@ -237,13 +237,17 @@ func (w *Worker) pollServer(pc *pollCtx, dev DeviceConfig, st *srvStatic) (map[s
 	var rf *rfSystem
 	rfErr := ""
 	if useRF {
+		rfClient := pc.rf
+		if dev.TLSFingerprint != "" {
+			rfClient = DeviceHTTPClient(redfishTimeout, dev.TLSFingerprint)
+		}
 		var err error
-		rf, err = fetchRedfishSystem(pc.ctx, pc.rf, bmcIP, bmcUser, bmcPW)
+		rf, err = fetchRedfishSystem(pc.ctx, rfClient, bmcIP, bmcUser, bmcPW)
 		if err != nil {
 			rfErr = errClass(err)
 		} else {
 			if pc.refresh || !st.ThermalTried {
-				if th, terr := fetchRedfishThermal(pc.ctx, pc.rf, bmcIP, bmcUser, bmcPW); terr == nil {
+				if th, terr := fetchRedfishThermal(pc.ctx, rfClient, bmcIP, bmcUser, bmcPW); terr == nil {
 					st.Thermal = th
 					st.ThermalTried = true
 				} else if !st.ThermalTried {

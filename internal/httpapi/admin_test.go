@@ -8,9 +8,19 @@ package httpapi
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"serverdesk/internal/config"
 	"serverdesk/internal/edge"
@@ -303,6 +314,20 @@ func TestAddDeviceEdgeHotAdd(t *testing.T) {
 			},
 			expectedKind: "server",
 		},
+		{
+			name: "Proxmox Server with TLS Fingerprint",
+			payload: map[string]any{
+				"type":            "SRV",
+				"platform":        "proxmox",
+				"key":             "edge-pve-pinned",
+				"mgmt":            "192.168.2.70",
+				"label":           "Pinned PVE",
+				"admin_user":      "root@pam",
+				"admin_pass":      "pvesecret",
+				"tls_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			},
+			expectedKind: "proxmox",
+		},
 	}
 
 	for _, tc := range tests {
@@ -327,6 +352,12 @@ func TestAddDeviceEdgeHotAdd(t *testing.T) {
 			}
 			if !found {
 				t.Fatalf("%s: key %s not found in s.Cfg.EdgeDevices", tc.name, keyStr)
+			}
+			if expFP, ok := tc.payload["tls_fingerprint"].(string); ok {
+				edgeDev := f.srv.findEdgeCfg(keyStr)
+				if edgeDev == nil || edgeDev.TLSFingerprint != expFP {
+					t.Fatalf("%s: expected TLSFingerprint %q, got %+v", tc.name, expFP, edgeDev)
+				}
 			}
 		})
 	}
@@ -956,6 +987,146 @@ func TestConnTestFTAndSNMPWarnings(t *testing.T) {
 	}
 }
 
+// generateAdminSelfSignedCert 는 테스트용 x509 자체서명 인증서와 SPKI SHA-256 지문을 생성한다.
+func generateAdminSelfSignedCert(t *testing.T) (tls.Certificate, string, string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey 실패: %v", err)
+	}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(2001),
+		Subject: pkix.Name{
+			Organization: []string{"ServerDesk Admin Test"},
+			CommonName:   "127.0.0.1",
+		},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate 실패: %v", err)
+	}
+	parsed, err := x509.ParseCertificate(derBytes)
+	if err != nil {
+		t.Fatalf("x509.ParseCertificate 실패: %v", err)
+	}
+	spkiHash := sha256.Sum256(parsed.RawSubjectPublicKeyInfo)
+	hexFP := hex.EncodeToString(spkiHash[:])
+	b64FP := base64.StdEncoding.EncodeToString(spkiHash[:])
+	tlsCert := tls.Certificate{
+		Certificate: [][]byte{derBytes},
+		PrivateKey:  priv,
+	}
+	return tlsCert, hexFP, b64FP
+}
+
+// TestConnTestTLSFingerprintPinning 은 /api/clusters/test 에서 tls_fingerprint 옵트인 피닝 동작을 검증한다.
+func TestConnTestTLSFingerprintPinning(t *testing.T) {
+	serverCert, hexFP, b64FP := generateAdminSelfSignedCert(t)
+	_, otherHexFP, _ := generateAdminSelfSignedCert(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/redfish/v1/Systems", func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if ok && u == "admin" && p == "bmcpass" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"@odata.id":"/redfish/v1/Systems","Members":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	ts := httptest.NewUnstartedServer(mux)
+	ts.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+	}
+	ts.StartTLS()
+	defer ts.Close()
+
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bmcHost := u.Host
+
+	f := newAdminTestFixture(t, "")
+
+	// 1. Redfish: hex 핑거프린트 일치 -> 성공
+	t.Run("Redfish_PinMatch_Hex", func(t *testing.T) {
+		body := map[string]any{
+			"type":            "SRV",
+			"mgmt":            "127.0.0.1",
+			"bmc_ip":          bmcHost,
+			"bmc_user":        "admin",
+			"bmc_pass":        "bmcpass",
+			"tls_fingerprint": hexFP,
+		}
+		rec, res := execRequest(f.srv, http.MethodPost, "/api/clusters/test", body, "")
+		if rec.Code != http.StatusOK || res["reachable"] != true {
+			t.Fatalf("expected reachable=true for matching hex pin, got code=%d res=%+v", rec.Code, res)
+		}
+		if res["transport"] != "redfish" {
+			t.Fatalf("expected transport=redfish, got %v", res["transport"])
+		}
+	})
+
+	// 2. Redfish: base64 핑거프린트 일치 -> 성공
+	t.Run("Redfish_PinMatch_Base64", func(t *testing.T) {
+		body := map[string]any{
+			"type":            "SRV",
+			"mgmt":            "127.0.0.1",
+			"bmc_ip":          bmcHost,
+			"bmc_user":        "admin",
+			"bmc_pass":        "bmcpass",
+			"tls_fingerprint": b64FP,
+		}
+		rec, res := execRequest(f.srv, http.MethodPost, "/api/clusters/test", body, "")
+		if rec.Code != http.StatusOK || res["reachable"] != true {
+			t.Fatalf("expected reachable=true for matching base64 pin, got code=%d res=%+v", rec.Code, res)
+		}
+	})
+
+	// 3. Redfish: 핑거프린트 불일치 -> 연결 실패
+	t.Run("Redfish_PinMismatch_Fail", func(t *testing.T) {
+		body := map[string]any{
+			"type":            "SRV",
+			"mgmt":            "127.0.0.1",
+			"bmc_ip":          bmcHost,
+			"bmc_user":        "admin",
+			"bmc_pass":        "bmcpass",
+			"tls_fingerprint": otherHexFP,
+		}
+		_, res := execRequest(f.srv, http.MethodPost, "/api/clusters/test", body, "")
+		if res["reachable"] == true {
+			t.Fatalf("expected reachable=false for mismatched pin, got %+v", res)
+		}
+		warns := res["warnings"].([]any)
+		if len(warns) == 0 {
+			t.Fatal("expected warnings for pin mismatch")
+		}
+	})
+
+	// 4. Redfish: 핑거프린트 미지정 -> 자체서명 허용(성공)
+	t.Run("Redfish_NoPin_Success", func(t *testing.T) {
+		body := map[string]any{
+			"type":     "SRV",
+			"mgmt":     "127.0.0.1",
+			"bmc_ip":   bmcHost,
+			"bmc_user": "admin",
+			"bmc_pass": "bmcpass",
+		}
+		rec, res := execRequest(f.srv, http.MethodPost, "/api/clusters/test", body, "")
+		if rec.Code != http.StatusOK || res["reachable"] != true {
+			t.Fatalf("expected reachable=true without pin, got code=%d res=%+v", rec.Code, res)
+		}
+	})
+}
+
 // TestAdminUnitHelpers 는 admin.go 내부 헬퍼 함수들(tcpOK, finsProbe, pveTicket, redfishGet, errClass, bodyNum, orUnknown)을 직접 검증한다.
 func TestAdminUnitHelpers(t *testing.T) {
 	ctx := context.Background()
@@ -1009,11 +1180,11 @@ func TestAdminUnitHelpers(t *testing.T) {
 	}))
 	defer ts.Close()
 	u, _ := url.Parse(ts.URL)
-	code, err := redfishGet(ctx, u.Host, "user", "pass", "/ok")
+	code, err := redfishGet(ctx, u.Host, "user", "pass", "/ok", "")
 	if err != nil || code != 0 {
 		t.Fatalf("redfishGet ok expected 0/nil, got %d/%v", code, err)
 	}
-	code, err = redfishGet(ctx, u.Host, "user", "pass", "/err")
+	code, err = redfishGet(ctx, u.Host, "user", "pass", "/err", "")
 	if code != 403 || err == nil {
 		t.Fatalf("redfishGet forbidden expected 403/err, got %d/%v", code, err)
 	}
@@ -1024,7 +1195,7 @@ func TestAdminUnitHelpers(t *testing.T) {
 	}))
 	defer tsPVE.Close()
 	// pveTicket 은 자체적으로 포트 8006을 붙이므로 잘못된 URL 테스트로 오류 경로 검증
-	code, err = pveTicket(ctx, "256.256.256.256", "u", "p")
+	code, err = pveTicket(ctx, "256.256.256.256", "u", "p", "")
 	if err == nil {
 		t.Fatalf("pveTicket expected error for invalid IP, got code=%d", code)
 	}

@@ -32,6 +32,8 @@ type DeviceConfig struct {
 	BMCIP       string `json:"bmc_ip"`   // server kind Redfish BMC
 	BMCUser     string `json:"bmc_user"` // 설정 시 Redfish 활성
 	BMCPassword string `json:"bmc_password"`
+
+	TLSFingerprint string `json:"tls_fingerprint,omitempty"` // TLS 인증서 SPKI SHA-256 피닝 (선택)
 }
 
 // kind 는 kind/type 둘 중 설정된 쪽을 돌려준다 (kind 우선).

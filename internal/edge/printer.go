@@ -368,12 +368,16 @@ func (w *Worker) printerRefreshStatic(pc *pollCtx, dev DeviceConfig, comm string
 		}
 		trays = append(trays, &trayInfo{Name: name, Max: vnumPtr(ti[mx]), Level: vnumPtr(ti[lv])})
 	}
+	swsClient := pc.sws
+	if dev.TLSFingerprint != "" {
+		swsClient = DeviceHTTPClient(5*time.Second, dev.TLSFingerprint)
+	}
 	n := &printerStatic{
 		Model:  vstr(sr[oPrtModel]),
 		Serial: vstr(sr[oPrtSerial]),
 		Sup:    sup,
 		Trays:  trays,
-		Web:    fetchSyncThru(pc.ctx, pc.sws, ip),
+		Web:    fetchSyncThru(pc.ctx, swsClient, ip),
 	}
 	// shrink-guard: 재조회가 일시 실패로 빈약하면 기존 유지.
 	if prev != nil {

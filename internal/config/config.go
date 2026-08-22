@@ -164,9 +164,10 @@ type EdgeDevice struct {
 	Password string `json:"password,omitempty"`
 
 	// server: Redfish BMC — community(OS SNMP) 와 둘 중 하나 이상 필요
-	BmcIP       string `json:"bmc_ip,omitempty"`
-	BmcUser     string `json:"bmc_user,omitempty"`
-	BmcPassword string `json:"bmc_password,omitempty"`
+	BmcIP          string `json:"bmc_ip,omitempty"`
+	BmcUser        string `json:"bmc_user,omitempty"`
+	BmcPassword    string `json:"bmc_password,omitempty"`
+	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
 }
 
 // UnmarshalJSON 은 kind / type 두 판별 키를 모두 허용한다.

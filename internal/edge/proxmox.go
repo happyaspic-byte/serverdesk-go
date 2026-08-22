@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -50,7 +51,7 @@ type pveRaw struct {
 func pveAPI(ctx context.Context, cl *http.Client, ip, path string, form url.Values, ticket string) (any, error) {
 	u := "https://" + ip + ":8006/api2/json" + path
 	method := http.MethodGet
-	var body *strings.Reader
+	var body io.Reader
 	if form != nil {
 		method = http.MethodPost
 		body = strings.NewReader(form.Encode())
@@ -318,8 +319,12 @@ func (w *Worker) pveFetch(pc *pollCtx, dev DeviceConfig, st *pveStatic) (pveRaw,
 	if user == "" {
 		user = "root@pam"
 	}
+	cl := pc.pve
+	if dev.TLSFingerprint != "" {
+		cl = DeviceHTTPClient(pveHTTPTimeout, dev.TLSFingerprint)
+	}
 	api := func(path string, form url.Values, ticket string) (any, error) {
-		return pveAPI(pc.ctx, pc.pve, ip, path, form, ticket)
+		return pveAPI(pc.ctx, cl, ip, path, form, ticket)
 	}
 	// 티켓 재사용(90분) — 만료 전 재발급으로 폴싱 라운드당 인증 왕복 제거.
 	if st.Ticket == "" || pc.now-st.TicketTS > pveTicketMaxAge {

@@ -407,6 +407,9 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 	}
 
 	comm := bodyStr(body, "community")
+	if fp := bodyStr(body, "tls_fingerprint"); fp != "" {
+		entry["tls_fingerprint"] = fp
+	}
 	switch kind {
 	case "printer", "nas":
 		if comm == "" {
@@ -543,6 +546,7 @@ func (s *Server) connTest(ctx context.Context, body map[string]any) map[string]a
 		}
 		return out
 	}
+	fp := bodyStr(body, "tls_fingerprint")
 	if typ == "SRV" && bodyStr(body, "platform") == "proxmox" {
 		out["transport"] = "pve-api"
 		user := bodyStr(body, "admin_user")
@@ -550,7 +554,7 @@ func (s *Server) connTest(ctx context.Context, body map[string]any) map[string]a
 			user = "root@pam"
 		}
 		pw := bodyStr(body, "admin_pass")
-		code, err := pveTicket(ctx, ip, user, pw)
+		code, err := pveTicket(ctx, ip, user, pw, fp)
 		switch {
 		case err == nil:
 			out["reachable"] = true
@@ -593,7 +597,7 @@ func (s *Server) connTest(ctx context.Context, body map[string]any) map[string]a
 		} else {
 			out["transport"] = t + "+redfish"
 		}
-		code, err := redfishGet(ctx, bmcIP, bmcUser, bodyStr(body, "bmc_pass"), "/redfish/v1/Systems")
+		code, err := redfishGet(ctx, bmcIP, bmcUser, bodyStr(body, "bmc_pass"), "/redfish/v1/Systems", fp)
 		switch {
 		case err == nil:
 			out["reachable"] = true
@@ -666,7 +670,7 @@ var insecureHTTP = &http.Client{
 
 // pveTicket 은 Proxmox 티켓 발급 POST 다(읽기 목적의 인증 프로브).
 // 반환: (HTTP 상태코드, 오류). 상태코드가 0 이면 전송 자체 실패다.
-func pveTicket(ctx context.Context, ip, user, pw string) (int, error) {
+func pveTicket(ctx context.Context, ip, user, pw, fp string) (int, error) {
 	form := url.Values{"username": {user}, "password": {pw}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://"+ip+":8006/api2/json/access/ticket", strings.NewReader(form))
@@ -674,7 +678,11 @@ func pveTicket(ctx context.Context, ip, user, pw string) (int, error) {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := insecureHTTP.Do(req)
+	cl := insecureHTTP
+	if fp != "" {
+		cl = edge.DeviceHTTPClient(5*time.Second, fp)
+	}
+	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -687,13 +695,17 @@ func pveTicket(ctx context.Context, ip, user, pw string) (int, error) {
 }
 
 // redfishGet 은 Redfish GET 프로브다(기본 인증). (상태코드, 오류) 반환.
-func redfishGet(ctx context.Context, host, user, pw, path string) (int, error) {
+func redfishGet(ctx context.Context, host, user, pw, path, fp string) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+path, nil)
 	if err != nil {
 		return 0, err
 	}
 	req.SetBasicAuth(user, pw)
-	resp, err := insecureHTTP.Do(req)
+	cl := insecureHTTP
+	if fp != "" {
+		cl = edge.DeviceHTTPClient(5*time.Second, fp)
+	}
+	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, err
 	}
