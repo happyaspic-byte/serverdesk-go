@@ -18,6 +18,39 @@ import (
 // defaultTimeout 은 Python SshRunner.run 의 timeout=20 과 같은 기본값이다.
 const defaultTimeout = 20 * time.Second
 
+// Logf 는 호스트 로거 연결 훅이다(level 은 "debug"/"warn"/"error" 등). 기본 no-op.
+var Logf = func(level, host, msg string) {}
+
+// ErrHostKeyChanged 는 SSH 연결 시 대상 호스트의 호스트 키가 known_hosts 와 일치하지 않아
+// 검증에 실패했음을 나타낸다(장비 재이미징 또는 MITM 감지).
+var ErrHostKeyChanged = errors.New("ssh host key verification failed")
+
+// HostKeyError 는 호스트 키 검증 실패에 대한 전용 에러 타입이다.
+// 일반 네트워크/인증 실패와 구분하여 관리자가 호스트키 변경(재이미징/MITM)을 즉시 인지하도록 한다.
+type HostKeyError struct {
+	Host   string
+	User   string
+	Detail string
+}
+
+func (e *HostKeyError) Error() string {
+	return fmt.Sprintf("ssh %s@%s: [HOST_KEY_VERIFICATION_FAILED] 호스트 키 검증 실패: %s", e.User, e.Host, e.Detail)
+}
+
+func (e *HostKeyError) Unwrap() error {
+	return ErrHostKeyChanged
+}
+
+func (e *HostKeyError) Is(target error) bool {
+	return target == ErrHostKeyChanged
+}
+
+func isHostKeyFailure(stderr string) bool {
+	return strings.Contains(stderr, "Host key verification failed") ||
+		strings.Contains(stderr, "REMOTE HOST IDENTIFICATION HAS CHANGED") ||
+		strings.Contains(stderr, "HOST IDENTIFICATION HAS CHANGED")
+}
+
 // Runner 는 노드 SSH 실행기다. 비밀번호는 env(SSH_PW)로만 전달하고 로그·인자에
 // 남기지 않는다.
 //
@@ -167,6 +200,7 @@ func (r *Runner) execSSH(ctx context.Context, host string, port int, user, passw
 	cmd := sshCmd(ctx, args) // 플랫폼별 래퍼 — sshwrap_*.go(Windows 는 setsid 없이 직접 호출)
 	// Stdin nil = /dev/null(Python 의 stdin=DEVNULL). TTY 가 없어야 askpass 로 간다.
 	cmd.Stdin = nil
+	cmd.WaitDelay = 3 * time.Second
 	env := os.Environ()
 	env = setEnv(env, "SSH_PW", password)
 	env = setEnv(env, "SSH_ASKPASS", r.askpass)
@@ -181,6 +215,11 @@ func (r *Runner) execSSH(ctx context.Context, host string, port int, user, passw
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	runErr := cmd.Run()
 	out := stdout.String()
+	stderrStr := stderr.String()
+	if isHostKeyFailure(stderrStr) {
+		Logf("error", host, fmt.Sprintf("[SECURITY] 호스트 키 검증 실패(Host key verification failed): %s@%s — known_hosts 불일치 또는 MITM 위험 (%s)", user, host, truncate(stderrStr, 200)))
+		return "", &HostKeyError{Host: host, User: user, Detail: truncate(stderrStr, 200)}
+	}
 	if runErr != nil {
 		if err := ctx.Err(); err != nil {
 			return "", fmt.Errorf("ssh %s@%s: %w", user, host, err)
@@ -189,7 +228,7 @@ func (r *Runner) execSSH(ctx context.Context, host string, port int, user, passw
 		if errors.As(runErr, &exitErr) {
 			if strings.TrimSpace(out) == "" {
 				return "", fmt.Errorf("ssh %s@%s: rc=%d: %s",
-					user, host, exitErr.ExitCode(), truncate(stderr.String(), 200))
+					user, host, exitErr.ExitCode(), truncate(stderrStr, 200))
 			}
 			return out, nil
 		}

@@ -41,6 +41,7 @@ func setupFakeSSH(t *testing.T, mode string) (envDump, argsDump, outFile string)
 case "$FAKE_MODE" in
 partial) cat "$FAKE_OUT"; exit 1 ;;
 fail) echo "Permission denied, please try again." >&2; exit 255 ;;
+hostkey) echo "Host key verification failed." >&2; exit 255 ;;
 empty) exit 0 ;;
 sleep) exec sleep 30 ;;
 *) cat "$FAKE_OUT" ;;
@@ -337,5 +338,45 @@ func TestSetEnv(t *testing.T) {
 	env = setEnv(env, "C", "3")
 	if got := strings.Join(env, ","); got != "A=9,B=2,C=3" {
 		t.Errorf("setEnv 추가 = %s", got)
+	}
+}
+
+// TestCollectHostKeyVerificationFailed 는 호스트 키 불일치 시 ErrHostKeyChanged 및 HostKeyError 전용 타입 반환을 검증한다.
+func TestCollectHostKeyVerificationFailed(t *testing.T) {
+	_, _, _ = setupFakeSSH(t, "hostkey")
+	r, err := NewRunner(t.TempDir(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var loggedLevel, loggedHost, loggedMsg string
+	Logf = func(level, host, msg string) {
+		loggedLevel = level
+		loggedHost = host
+		loggedMsg = msg
+	}
+	defer func() { Logf = func(level, host, msg string) {} }()
+
+	ctx := context.Background()
+	m, err := r.Collect(ctx, "10.0.0.99", 22, "root", "secret")
+	if m != nil {
+		t.Errorf("m = %+v, want nil on error", m)
+	}
+	if err == nil {
+		t.Fatal("호스트키 불일치는 에러여야 한다")
+	}
+	if !errors.Is(err, ErrHostKeyChanged) {
+		t.Errorf("err should match ErrHostKeyChanged, got: %v", err)
+	}
+	var hkErr *HostKeyError
+	if !errors.As(err, &hkErr) {
+		t.Errorf("err should be *HostKeyError, got: %T (%v)", err, err)
+	} else {
+		if hkErr.Host != "10.0.0.99" || hkErr.User != "root" {
+			t.Errorf("unexpected HostKeyError content: %+v", hkErr)
+		}
+	}
+	if loggedLevel != "error" || loggedHost != "10.0.0.99" || !strings.Contains(loggedMsg, "Host key verification failed") {
+		t.Errorf("Logf not called properly: level=%s host=%s msg=%s", loggedLevel, loggedHost, loggedMsg)
 	}
 }

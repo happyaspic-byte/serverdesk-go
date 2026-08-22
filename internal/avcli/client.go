@@ -140,6 +140,9 @@ func (c *Client) exec(ctx context.Context, command string, xmlMode bool) (string
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Sprintf("timeout after %ds", int(c.Timeout.Seconds()))
 	}
+	if ctx.Err() == context.Canceled {
+		return "", "context canceled"
+	}
 	if err != nil {
 		// PATH 검색 실패(exec.ErrNotFound)와 명시 경로 부재(ENOENT) 모두
 		// "binary not found" 다(Python FileNotFoundError 에 해당).
@@ -213,8 +216,8 @@ func IsFatalErr(err string) bool {
 // CallXML 은 XML 모드로 호출해 파싱된 루트를 반환한다. 실패 시 (nil, err).
 //
 // 치명 여부는 CallXML3 로 받아야 정확하다 — 아래 주석 참조.
-func (c *Client) CallXML(command string) (*Element, error) {
-	root, err, _ := c.CallXML3(command)
+func (c *Client) CallXML(ctx context.Context, command string) (*Element, error) {
+	root, err, _ := c.CallXML3(ctx, command)
 	return root, err
 }
 
@@ -224,18 +227,24 @@ func (c *Client) CallXML(command string) (*Element, error) {
 // 세션/동시접속 이슈로 간헐 발생하므로 치명이 아닐 때만 RetryDelay 후 1회 재시도한다.
 // 인증 실패·도달 불가처럼 원인이 확정된 오류는 재시도해도 같은 결과다 — 무의미한
 // 재호출은 장비 감사 로그에 로그인 레코드만 더 남긴다.
-func (c *Client) CallXML3(command string) (*Element, error, bool) {
+func (c *Client) CallXML3(ctx context.Context, command string) (*Element, error, bool) {
 	mu := lockFor(c.Mgmt)
 	mu.Lock()
 	t0 := time.Now()
 	c.bumpStats(func(s *Stats) { s.Calls++ })
-	out, rawErr := c.exec(context.Background(), command, true)
-	if strings.TrimSpace(out) == "" && !IsFatalErr(rawErr) {
+	out, rawErr := c.exec(ctx, command, true)
+	if strings.TrimSpace(out) == "" && !IsFatalErr(rawErr) && ctx.Err() == nil {
 		c.bumpStats(func(s *Stats) { s.Retries++ })
 		Logf("debug", c.Key, "빈 응답, 재시도: "+command)
-		time.Sleep(c.RetryDelay)
-		c.bumpStats(func(s *Stats) { s.Calls++ })
-		out, rawErr = c.exec(context.Background(), command, true)
+		select {
+		case <-ctx.Done():
+			rawErr = "context canceled"
+		case <-time.After(c.RetryDelay):
+			if ctx.Err() == nil {
+				c.bumpStats(func(s *Stats) { s.Calls++ })
+				out, rawErr = c.exec(ctx, command, true)
+			}
+		}
 	}
 	dur := time.Since(t0).Round(100 * time.Millisecond)
 	fatal := IsFatalErr(rawErr)
@@ -262,10 +271,10 @@ func (c *Client) CallXML3(command string) (*Element, error, bool) {
 
 // CallText 는 텍스트 모드 폴백(-x 없이)이다.
 // snmp-info 처럼 XML 생성이 깨지는 명령용. 반환 map 은 ParseTextKV 결과다.
-func (c *Client) CallText(command string) (map[string]any, error) {
+func (c *Client) CallText(ctx context.Context, command string) (map[string]any, error) {
 	mu := lockFor(c.Mgmt)
 	mu.Lock()
-	out, rawErr := c.exec(context.Background(), command, false)
+	out, rawErr := c.exec(ctx, command, false)
 	mu.Unlock()
 	if strings.TrimSpace(out) == "" {
 		if rawErr == "" {

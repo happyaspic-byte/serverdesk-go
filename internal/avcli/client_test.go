@@ -58,7 +58,7 @@ func TestClientPrefixArgs(t *testing.T) {
 func TestClientCallXMLSuccess(t *testing.T) {
 	bin := writeStub(t, "#!/bin/sh\ncat <<'EOF'\n"+`<avance><node><name>node0</name><state>running</state></node></avance>`+"\nEOF\n")
 	c := newTestClient(bin)
-	root, err, fatal := c.CallXML3("node-info")
+	root, err, fatal := c.CallXML3(context.Background(), "node-info")
 	if err != nil || fatal {
 		t.Fatalf("err=%v fatal=%v", err, fatal)
 	}
@@ -86,7 +86,7 @@ echo '<avance><node><name>node0</name></node></avance>'
 	state := filepath.Join(t.TempDir(), "state")
 	t.Setenv("AVCLI_STATE", state)
 	c := newTestClient(bin)
-	root, err, fatal := c.CallXML3("node-info")
+	root, err, fatal := c.CallXML3(context.Background(), "node-info")
 	if err != nil || fatal {
 		t.Fatalf("err=%v fatal=%v", err, fatal)
 	}
@@ -110,7 +110,7 @@ Caused by: java.net.ConnectException: Connection refused
 EOF
 `)
 	c := newTestClient(bin)
-	root, err, fatal := c.CallXML3("volume-info")
+	root, err, fatal := c.CallXML3(context.Background(), "volume-info")
 	if root != nil || err == nil {
 		t.Fatalf("root=%v err=%v", root, err)
 	}
@@ -134,7 +134,7 @@ func TestClientTimeout(t *testing.T) {
 	bin := writeStub(t, "#!/bin/sh\nexec sleep 30\n")
 	c := newTestClient(bin)
 	c.Timeout = 1 * time.Second
-	_, err, fatal := c.CallXML3("node-info")
+	_, err, fatal := c.CallXML3(context.Background(), "node-info")
 	if err == nil || !strings.Contains(err.Error(), "timeout after 1s") {
 		t.Errorf("err = %v", err)
 	}
@@ -148,7 +148,7 @@ func TestClientTimeout(t *testing.T) {
 
 func TestClientBinaryNotFound(t *testing.T) {
 	c := newTestClient(filepath.Join(t.TempDir(), "no-such-avcli"))
-	_, err, fatal := c.CallXML3("node-info")
+	_, err, fatal := c.CallXML3(context.Background(), "node-info")
 	if err == nil || !strings.Contains(err.Error(), "binary not found") {
 		t.Errorf("err = %v", err)
 	}
@@ -157,12 +157,30 @@ func TestClientBinaryNotFound(t *testing.T) {
 	}
 }
 
+func TestClientContextCancel(t *testing.T) {
+	bin := writeStub(t, "#!/bin/sh\nexec sleep 30\n")
+	c := newTestClient(bin)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err, _ := c.CallXML3(ctx, "node-info")
+	if err == nil {
+		t.Fatal("context cancel 은 에러여야 한다")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Errorf("취소가 즉시 반영되지 않음: %v", time.Since(start))
+	}
+}
+
 func TestClientCallText(t *testing.T) {
 	bin := writeStub(t, `#!/bin/sh
 printf '  -> Community : public\nUptime : 1234\n'
 `)
 	c := newTestClient(bin)
-	m, err := c.CallText("snmp-info")
+	m, err := c.CallText(context.Background(), "snmp-info")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +191,7 @@ printf '  -> Community : public\nUptime : 1234\n'
 	// 빈 stdout 은 에러
 	bin2 := writeStub(t, "#!/bin/sh\nexit 0\n")
 	c2 := newTestClient(bin2)
-	if _, err := c2.CallText("snmp-info"); err == nil {
+	if _, err := c2.CallText(context.Background(), "snmp-info"); err == nil {
 		t.Error("빈 텍스트 응답은 에러")
 	}
 }
