@@ -198,7 +198,7 @@
     --pos-on-tint:var(--pos-bright); --warn-on-tint:var(--warn-bright); --neg-on-tint:#E0847F; --blue-on-tint:#E0A587;
     /* 밝은 다크 상태 필 위 텍스트는 딥 ink를 쓴다. */
     --ink-on-fill:#1A140F;
-    --ink-fill:#C46940; --ink-fill-ink:#FAF7F1; --ink-fill-hover:#D07A4E;
+    --ink-fill:#C46940; --ink-fill-ink:#1A140F; --ink-fill-hover:#D07A4E;
     --accent:#D99A7E; --accent-ink:#2A1810; --accent-deep:#E4B49C; --accent-soft:#33231B;
     --pos:#7FBC8C; --pos-bright:#8FC99B; --warn:#DDA93E; --warn-bright:#E8B954; --neg:#DE7A74; --blue:#D99A7E;
     --orange:#D98F55; --teal:#6BB3AA; --purple:#A79BD6;
@@ -245,7 +245,7 @@
   --pos-on-tint:var(--pos-bright); --warn-on-tint:var(--warn-bright); --neg-on-tint:#E0847F; --blue-on-tint:#E0A587;
   /* 밝은 다크 상태 필 위 텍스트는 딥 ink를 쓴다. */
   --ink-on-fill:#1A140F;
-  --ink-fill:#C46940; --ink-fill-ink:#FAF7F1; --ink-fill-hover:#D07A4E;
+  --ink-fill:#C46940; --ink-fill-ink:#1A140F; --ink-fill-hover:#D07A4E;
   --accent:#D99A7E; --accent-ink:#2A1810; --accent-deep:#E4B49C; --accent-soft:#33231B;
   --pos:#7FBC8C; --pos-bright:#8FC99B; --warn:#DDA93E; --warn-bright:#E8B954; --neg:#DE7A74; --blue:#D99A7E;
   --orange:#D98F55; --teal:#6BB3AA; --purple:#A79BD6;
