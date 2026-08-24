@@ -445,9 +445,10 @@ fi
 
 if command -v pwsh >/dev/null 2>&1; then
   for script in deploy/packaging/*.ps1; do
-    pwsh -NoProfile -NonInteractive -Command \
-      '$errors=$null; [void][Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$null,[ref]$errors); if($errors.Count){$errors | ForEach-Object {Write-Error $_}; exit 1}' \
-      "$script" || fail "PowerShell parser: $script"
+    SERVERDESK_POWERSHELL_SCRIPT="$repo_root/$script" \
+      pwsh -NoProfile -NonInteractive -Command \
+      '$tokens=$null; $errors=$null; [void][Management.Automation.Language.Parser]::ParseFile($env:SERVERDESK_POWERSHELL_SCRIPT,[ref]$tokens,[ref]$errors); if($errors.Count){$errors | ForEach-Object {Write-Error $_}; exit 1}' ||
+      fail "PowerShell parser: $script"
   done
 fi
 
