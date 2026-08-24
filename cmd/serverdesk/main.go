@@ -38,6 +38,9 @@ var logLevels = map[string]int{"debug": 10, "info": 20, "warn": 30, "error": 40}
 
 var logLevel = 20
 
+// version is replaced by the release workflow with -ldflags "-X main.version=...".
+var version = "dev"
+
 // logMsg 는 poller.py log() 포트다: ISO 타임스탬프 + 레벨 + 클러스터키.
 // 어떤 경로로든 비밀이 섞일 수 있는 문자열은 config.Mask 를 반드시 통과시킨다.
 func logMsg(level, cluster, msg string) {
@@ -76,9 +79,16 @@ func main() {
 		setAuthPassword bool
 		checkAuth       bool
 		listen          string
+		tlsCert         string
+		tlsKey          string
+		allowHTTP       bool
+		migrateSecrets  string
+		setDeviceSecret string
+		credentialsDir  string
 		logLevelFlag    string
 		once            bool
 		allowArgv       bool
+		showVersion     bool
 	)
 	flag.StringVar(&cfgPath, "c", "config.json", "설정 JSON 경로")
 	flag.StringVar(&cfgPath, "config", "config.json", "설정 JSON 경로")
@@ -88,20 +98,64 @@ func main() {
 	flag.BoolVar(&setAuthPassword, "set-auth-password", false, "stdin에서 웹 관리자 암호를 설정")
 	flag.BoolVar(&checkAuth, "check-auth", false, "웹 관리자 인증 파일을 엄격히 검증")
 	flag.StringVar(&listen, "listen", "", "바인드 주소 (host:port), 설정보다 우선")
+	flag.StringVar(&tlsCert, "tls-cert", "", "직접 HTTPS 리스너 인증서 PEM 경로 (tls_cert_file보다 우선)")
+	flag.StringVar(&tlsKey, "tls-key", "", "직접 HTTPS 리스너 개인키 PEM 경로 (tls_key_file보다 우선)")
+	flag.BoolVar(&allowHTTP, "allow-insecure-http", false,
+		"비루프백 평문 HTTP 호환 모드를 명시 승인(break-glass, 운영 비권장)")
+	flag.StringVar(&migrateSecrets, "migrate-secrets", "",
+		"평문 장비 자격증명을 secret:// 참조로 바꾸고 지정 디렉터리에 안전하게 저장한 뒤 종료")
+	flag.StringVar(&setDeviceSecret, "set-device-secret", "", "stdin의 장비 credential을 지정 이름으로 생성 후 종료")
+	flag.StringVar(&credentialsDir, "credentials-dir", "", "-set-device-secret 대상 디렉터리")
 	flag.StringVar(&logLevelFlag, "log-level", "", "로그 레벨(debug/info/warn/error)")
 	flag.BoolVar(&once, "once", false, "1회 수집 후 fleet JSON 을 stdout 에 출력하고 종료(진단용)")
 	flag.BoolVar(&allowArgv, "allow-argv-exposure", false,
 		"avcli 암호가 ps 에 노출되는 환경(/proc hidepid 미적용 + 다른 로그인 계정 존재)에서도 강제로 기동한다")
+	flag.BoolVar(&showVersion, "version", false, "버전 출력 후 종료")
 	flag.Parse()
+	if showVersion {
+		fmt.Printf("serverdesk %s\n", version)
+		return
+	}
 	authOperations := 0
-	for _, enabled := range []bool{initAuth, setAuthPassword, checkAuth} {
+	for _, enabled := range []bool{initAuth, setAuthPassword, checkAuth, migrateSecrets != "", setDeviceSecret != ""} {
 		if enabled {
 			authOperations++
 		}
 	}
 	if authOperations > 1 {
-		fmt.Fprintln(os.Stderr, "-init-auth, -set-auth-password, and -check-auth are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "credential maintenance operations are mutually exclusive")
 		os.Exit(1)
+	}
+	if setDeviceSecret != "" {
+		secret, err := readPassword(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "장비 credential 입력 실패: %v\n", err)
+			os.Exit(1)
+		}
+		if err := config.StoreCredential(credentialsDir, setDeviceSecret, secret); err != nil {
+			fmt.Fprintf(os.Stderr, "장비 credential 저장 실패: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("CREDENTIAL=%s\nREFERENCE=secret://%s\n", setDeviceSecret, setDeviceSecret)
+		return
+	}
+	if migrateSecrets != "" {
+		if _, err := os.Stat(cfgPath); err != nil && cfgPath == "config.json" {
+			if _, fallbackErr := os.Stat("config.local.json"); fallbackErr == nil {
+				cfgPath = "config.local.json"
+			}
+		}
+		result, err := config.MigratePlaintextSecrets(cfgPath, migrateSecrets)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "자격증명 마이그레이션 실패: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Migrated %d credentials.\n", result.Count)
+		for _, name := range result.Names {
+			fmt.Printf("CREDENTIAL=%s\n", name)
+		}
+		fmt.Printf("Set SERVERDESK_CREDENTIALS_DIRECTORY=%s (or map these names with systemd LoadCredential).\n", migrateSecrets)
+		return
 	}
 	if initAuth {
 		password, err := webauth.InitializeCredentials(authPath)
@@ -151,6 +205,8 @@ func main() {
 	poller.Logf = func(level, cluster, msg string) { logMsg(normalizeLevel(level), cluster, msg) }
 	httpapi.Logf = func(level, cluster, msg string) { logMsg(normalizeLevel(level), cluster, msg) }
 	config.Warnf = func(format string, args ...any) { logMsg("warn", "config", fmt.Sprintf(format, args...)) }
+	auditLog := func(message string) { logMsg("info", "audit", message) }
+	authSrv.SetAuditLogger(auditLog)
 
 	if _, err := os.Stat(cfgPath); err != nil {
 		// 기본값(config.json)이 없을 때 config.local.json 이 있으면 그것으로 폴리 —
@@ -191,6 +247,25 @@ func main() {
 
 	if listen == "" {
 		listen = cfg.Listen
+	}
+	if tlsCert == "" {
+		tlsCert = cfg.TLSCertFile
+	}
+	if tlsKey == "" {
+		tlsKey = cfg.TLSKeyFile
+	}
+	transport := listenerTransport{
+		addr: listen, certFile: tlsCert, keyFile: tlsKey,
+		allowInsecureHTTP: allowHTTP || cfg.AllowInsecureHTTP,
+	}
+	if !once {
+		if err := transport.validate(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if !once && !transport.tlsEnabled() && transport.allowInsecureHTTP && !transport.loopback() {
+		logMsg("warn", "-", "비루프백 평문 HTTP break-glass 모드입니다; forwarded header를 신뢰하지 않으므로 운영에서는 직접 TLS 또는 루프백 프록시를 사용하십시오")
 	}
 	runtimeDir := poller.ExpandUser(cfg.RuntimeDir)
 
@@ -364,7 +439,8 @@ func main() {
 		}
 		webSrv.ServeHTTP(w, r)
 	})
-	srv := &http.Server{Addr: listen, Handler: authSrv.Handler(root)}
+	srv := &http.Server{Addr: listen, Handler: authSrv.Handler(webauth.AuditMutations(root, auditLog))}
+	transport.configureServerTLS(srv)
 	webfront.ApplyHardening(srv)
 
 	// 그레이스풀 셧다운: 워커 정지 → avail flush → 트랩 수신기 닫기.
@@ -377,8 +453,14 @@ func main() {
 		_ = srv.Shutdown(context.Background())
 	}()
 
-	logMsg("info", "-", fmt.Sprintf("HTTP 리스닝 http://%s (fleet/topology/health + webfront)", listen))
-	serveErr := srv.ListenAndServe()
+	var serveErr error
+	if transport.tlsEnabled() {
+		logMsg("info", "-", fmt.Sprintf("HTTPS 리스닝 https://%s (fleet/topology/health + webfront)", listen))
+		serveErr = srv.ListenAndServeTLS(transport.certFile, transport.keyFile)
+	} else {
+		logMsg("info", "-", fmt.Sprintf("HTTP 리스닝 http://%s (fleet/topology/health + webfront)", listen))
+		serveErr = srv.ListenAndServe()
+	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		if errors.Is(serveErr, syscall.EADDRINUSE) || strings.Contains(serveErr.Error(), "Only one usage of each socket address") {
 			logMsg("error", "-", "HTTP 서버 실패: 포트가 이미 사용 중입니다 — 실행 중인 serverdesk 인스턴스를 확인하세요 (Windows: schtasks /End /TN serverdesk 후 재실행): "+serveErr.Error())
@@ -450,14 +532,15 @@ func convertEdgeDevices(in []config.EdgeDevice) []edge.DeviceConfig {
 			Name: d.Name, IP: d.IP, Community: d.Community,
 			Vendor: d.Vendor, Company: d.Company, Factory: d.Factory,
 			Site: d.Site, AssetTag: d.AssetTag, FloorPos: d.FloorPos,
-			ExtraIPs:    append([]string{}, d.ExtraIPs...),
-			FinsPort:    d.FinsPort,
-			FinsSrcNode: d.FinsSrcNode,
-			User:        d.User,
-			Password:    d.Password,
-			BMCIP:       d.BmcIP,
-			BMCUser:     d.BmcUser,
-			BMCPassword: d.BmcPassword,
+			ExtraIPs:       append([]string{}, d.ExtraIPs...),
+			FinsPort:       d.FinsPort,
+			FinsSrcNode:    d.FinsSrcNode,
+			User:           d.User,
+			Password:       d.Password,
+			BMCIP:          d.BmcIP,
+			BMCUser:        d.BmcUser,
+			BMCPassword:    d.BmcPassword,
+			TLSFingerprint: d.TLSFingerprint,
 		})
 	}
 	return out

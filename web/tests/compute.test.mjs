@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import compute, {
   clamp, cmpKo, langOf, makeL,
   statusTone, statusLabel, statusAnim, pctTone, pctToneAlloc,
-  typeIconOf, typeInfo, usageOf, syncInfo, isMaint,
+  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint,
   fmtAvailN, fmtDowntimeYr, fmtUptimeD,
   tsNorm, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
@@ -20,7 +20,9 @@ import compute, {
   worstOf, buildClusters, buildCapacity, buildManageTree, buildSearch,
   COMPANY_PALETTE, buildCompanyColors, r1, orthPath, polyMid,
   deriveStatus, deriveSync, availN,
+  normalizeCapabilities, clusterActionAvailability,
 } from '../js/model/compute.js';
+import { controlActionGate, postAction } from '../js/screens/detail.js';
 
 test('1. clamp: 숫자 범위 제한 및 유효하지 않은 입력 방어', () => {
   assert.equal(clamp(50, 0, 100), 50);
@@ -284,4 +286,102 @@ test('20. deriveStatus & deriveSync: 장비/노드 상태 파생 일관성', () 
 
   const nodesDown = [{ state: 'stopped', standing: 'normal' }];
   assert.equal(deriveStatus(nodesDown), 'down');
+});
+
+test('21. cluster action capability: 누락·부분 광고는 fail-closed', () => {
+  const missing = normalizeCapabilities(null).cluster_actions;
+  assert.equal(missing.supported, false);
+  assert.deepEqual(missing.actions, []);
+  assert.ok(missing.reason.length > 0);
+
+  const caps = normalizeCapabilities({
+    cluster_actions: {
+      supported: true,
+      actions: ['node-reboot', 'node-reboot', '', 42],
+      reason: 'not available',
+    },
+  });
+  assert.deepEqual(caps.cluster_actions.actions, ['node-reboot']);
+  assert.equal(clusterActionAvailability(caps, 'node-reboot').supported, true);
+  const denied = clusterActionAvailability(caps, 'node-shutdown');
+  assert.equal(denied.supported, false);
+  assert.match(denied.reason, /node-shutdown/);
+
+  // supported=true라도 allowlist가 없으면 전체 허용으로 확대하지 않는다.
+  assert.equal(clusterActionAvailability({ cluster_actions: { supported: true } }, 'node-reboot').supported, false);
+});
+
+test('22. detail action gate: 미지원 action은 fetch 전에 차단', async () => {
+  const unsupported = {
+    capability: { supported: false, actions: [], reason: 'not implemented', reason_ko: '미구현' },
+  };
+  assert.equal(controlActionGate(unsupported, 'node-reboot').supported, false);
+
+  let calls = 0;
+  await assert.rejects(
+    postAction('cluster one', 'node-reboot', 'node0', () => { calls += 1; }, unsupported),
+    /not implemented/,
+  );
+  assert.equal(calls, 0);
+
+  const supported = {
+    capability: { supported: true, actions: ['node-reboot'] },
+    availability: { 'node-reboot': { supported: true, reason: '', reason_ko: '' } },
+  };
+  let sent = null;
+  const response = { ok: true, status: 200 };
+  const got = await postAction('cluster one', 'node-reboot', 'node0', (url, opts) => {
+    sent = { url, opts };
+    return Promise.resolve(response);
+  }, supported);
+  assert.equal(got, response);
+  assert.equal(sent.url, '/api/clusters/cluster%20one/action');
+  assert.equal(sent.opts.method, 'POST');
+  assert.deepEqual(JSON.parse(sent.opts.body), { action: 'node-reboot', target: 'node0' });
+});
+
+test('23. nodeMaint: 분리 모듈 간 점검 상태 판정이 런타임에 연결됨', () => {
+  assert.equal(nodeMaint({ standing: 'maintenance' }), true);
+  assert.equal(nodeMaint({ mode: 'MAINTENANCE' }), true);
+  assert.equal(nodeMaint({ standing: 'normal', mode: 'running' }), false);
+  assert.equal(isMaint({ meta: { nodes: [{ standing: 'normal' }, { mode: 'maintenance' }] } }), true);
+  assert.equal(compute.nodeMaint({ standing: 'maintenance' }), true);
+});
+
+test('24. 핵심 모델 빌더: 실제형 FT 장비로 overview/detail/topology 계산', () => {
+  const device = {
+    id: 'ft-a', host: 'ft-a.local', type: 'EV', status: 'op', sync: 'sync',
+    availN: 99.99, cpu0: 12, mem0: 34, cpuNA: false, memNA: false,
+    uptime: 42, histCpu: [10, 12], histMem: [30, 34], histRtt: [1, 2],
+    meta: {
+      label: 'Acme FT-A', company: 'Acme', factory: 'Plant 1', site: 'Seoul',
+      mgmt: '192.0.2.10', platform: 'everrun', alerts: [], traps: [],
+      nodes: [
+        { name: 'node0', ip: '192.0.2.11', state: 'running', standing: 'normal', mode: 'production', primary: true, cpu_pct: 0, cpu_pct1: 0.4, mem_pct: 31 },
+        { name: 'node1', ip: '192.0.2.12', state: 'running', standing: 'normal', mode: 'production', primary: false, cpu_pct: 8, mem_pct: 35 },
+      ],
+      snmp: [], vms: 2, vmRunning: 2,
+      unit: { totVcpu: 8, usedVcpu: 2, totMem: 32, usedMem: 8, version: '1.0' },
+      license: { licensed: true },
+    },
+  };
+  const state = {
+    fleet: [device], lang: 'ko', lastPoll: 1724472000000, selected: device.id,
+    hist: {}, ackedAlerts: {}, maint: {}, notes: {}, collapsed: {}, companyColors: {},
+    setg: {}, capabilities: normalizeCapabilities(null),
+  };
+
+  const model = compute.buildModel(state);
+  assert.equal(model.total, 1);
+  assert.equal(model.servers[0].id, device.id);
+  assert.deepEqual(model.servers[0].cpuHist, [10, 12]);
+
+  const detail = compute.buildDetail(state, device.id);
+  assert.equal(detail.id, device.id);
+  assert.equal(detail.nodes.length, 2);
+  assert.equal(detail.nodes[0].cpu, '<1%');
+
+  const topo = compute.buildTopo(state);
+  assert.ok(Array.isArray(topo.boxes) && topo.boxes.length > 0);
+  assert.ok(Array.isArray(topo.links));
 });

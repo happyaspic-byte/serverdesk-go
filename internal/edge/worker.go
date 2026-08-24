@@ -49,9 +49,9 @@ type Worker struct {
 func NewWorker(devices []DeviceConfig) *Worker {
 	w := &Worker{
 		SNMPGet: nil,
-		sws:     insecureClient(5 * time.Second),
-		pve:     insecureClient(pveHTTPTimeout),
-		rf:      insecureClient(redfishTimeout),
+		sws:     verifiedClient(5 * time.Second),
+		pve:     verifiedClient(pveHTTPTimeout),
+		rf:      verifiedClient(redfishTimeout),
 		latest:  []map[string]any{},
 		static:  map[string]any{},
 		hist:    map[string]*devHist{},

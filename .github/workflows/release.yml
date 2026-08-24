@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify signed tag and production gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+      - name: Require a signed annotated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          object_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" --jq '.object.type')
+          test "$object_type" = tag
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" --jq '.object.sha')
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.verification.verified')
+          test "$verified" = true
+      - name: Run full quality gates
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          test -z "$unformatted" || { echo "$unformatted"; exit 1; }
+          go vet ./...
+          test "$(go list -m all | wc -l)" -eq 1
+          go test -race -covermode=atomic -coverprofile=coverage.out ./...
+          coverage=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
+          echo "Go statement coverage: ${coverage}%"
+          awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 80) exit 1 }'
+          node --test web/tests/
+          sh deploy/packaging/validate-deployment.sh
+      - name: Verify workflow and secret hygiene
+        shell: bash
+        run: |
+          refs=$(grep -R -n -E --include='*.yml' 'uses:[[:space:]]+[^[:space:]]+@' .github/workflows || true)
+          if printf '%s\n' "$refs" | grep -v -E '@[0-9a-f]{40}([[:space:]]|$)'; then
+            echo 'Workflow actions must be pinned to an exact 40-character commit SHA.' >&2
+            exit 1
+          fi
+          if git grep -n -E 'BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY' -- ':!docs/mibs/**'; then
+            echo 'Private-key material is forbidden in the repository.' >&2
+            exit 1
+          fi
+      - name: Run vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            binary: serverdesk-linux-amd64
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            binary: serverdesk-windows-amd64.exe
+            archive: zip
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build reproducible binary
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          mkdir -p stage dist
+          go build -trimpath -buildvcs=true -ldflags "-s -w -X main.version=${version}" -o "stage/${{ matrix.binary }}" ./cmd/serverdesk
+          cp config.example.json README.md NOTICE SECURITY.md stage/
+          cp -R deploy docs stage/
+          mkdir -p stage/licenses
+          cp web/fonts/LICENSE-*.txt stage/licenses/
+          if [ "${{ matrix.goos }}" = windows ]; then
+            cp deploy/packaging/install-windows.ps1 deploy/packaging/update.ps1 \
+              deploy/packaging/uninstall.ps1 deploy/packaging/setup.bat stage/
+          fi
+          sh deploy/packaging/validate-release-payload.sh "${{ matrix.goos }}" stage
+          source_date_epoch=$(git show -s --format=%ct HEAD)
+          find stage -exec touch -h -d "@${source_date_epoch}" {} +
+          archive="serverdesk-${GITHUB_REF_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}"
+          make_archive() {
+            if [ "${{ matrix.archive }}" = "zip" ]; then
+              (cd stage && find . -type f -print | LC_ALL=C sort | zip -X -q "../dist/${archive}" -@)
+            else
+              tar --sort=name --mtime="@${source_date_epoch}" --owner=0 --group=0 --numeric-owner \
+                -C stage -cf - . | gzip -n > "dist/${archive}"
+            fi
+          }
+          make_archive
+          cp "dist/${archive}" /tmp/serverdesk-archive-first
+          rm "dist/${archive}"
+          make_archive
+          cmp /tmp/serverdesk-archive-first "dist/${archive}"
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: stage
+          format: cyclonedx-json
+          output-file: dist/serverdesk-${{ matrix.goos }}-${{ matrix.goarch }}.cdx.json
+          upload-artifact: false
+      - name: Upload release inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish checksummed, attested release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download release inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: (cd dist && sha256sum * | sort -k2 > SHA256SUMS)
+      - name: Attest release provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

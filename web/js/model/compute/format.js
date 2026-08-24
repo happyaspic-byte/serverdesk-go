@@ -3,9 +3,9 @@
 // 순수 함수만. DOM 접근 0건.
 // ---------------------------------------------------------------------------
 
-import { TYPES, FT_TYPES } from '../data.js';
+import { TYPES, FT_TYPES, isFT, isNoTel } from '../data.js';
 import { usageThresholds } from '../../util/fmt.js';
-import { _num, _arr, DASH, makeL, clamp } from './base.js';
+import { _meta, _num, _arr, DASH, makeL, clamp } from './base.js';
 
 /* ===========================================================================
  * 1. 상태/동기화/타입 표기 헬퍼
@@ -70,7 +70,7 @@ export function typeInfo(type, L) {
  *  동일 규약. 이 파일에서 '<1%' 문자열을 만드는 유일한 지점 — usageOf(장비 CPU/MEM)와
  *  nodeRow(노드별 cpu_pct, buildDetail §9)가 둘 다 이 함수를 거친다(이전엔 두 곳에 따로
  *  구현돼 같은 장비가 화면마다 다른 값을 보였다). */
-function subPctText(val, sub) {
+export function subPctText(val, sub) {
   return (val === 0 && _num(sub) > 0) ? '<1%' : val + '%';
 }
 
@@ -107,13 +107,13 @@ export function syncInfo(dev, L) {
 
 /** 노드 하나가 점검(maintenance) 중인지 — standing/mode 두 필드를 본다.
  *  이 판정은 아래 7곳(isMaint, maintCnt, buildDetail·토폴로지 노드 행 등)이 공유한다. */
-function _nodeMaint(n) {
-  return /mainten/i.test(((n && n.standing) || '') + ' ' + ((n && n.mode) || ''));
+export function nodeMaint(n) {
+	return /mainten/i.test(((n && n.standing) || '') + ' ' + ((n && n.mode) || ''));
 }
 
 /** 점검(maintenance) 중인 노드가 하나라도 있는지. */
 export function isMaint(dev) {
-  return _arr(_meta(dev).nodes).some(_nodeMaint);
+	return _arr(_meta(dev).nodes).some(nodeMaint);
 }
 
 /** 가용성 숫자 → 문자열(99.990%). */
@@ -141,7 +141,7 @@ export function fmtDowntimeYr(a, L) {
 
 /** 장비 라벨에서 회사 프리픽스를 벗긴 고유 장비코드를 반환한다.
  * 프리픽스가 없으면 라벨을 그대로 유지한다. */
-function deviceCode(label, company) {
+export function deviceCode(label, company) {
   let s = String(label == null ? '' : label).trim();
   const co = String(company == null ? '' : company).trim();
   if (co && s.indexOf(co) === 0) s = s.slice(co.length).trim();
@@ -157,4 +157,3 @@ export function fmtUptimeD(d) {
   if (n < 1) return '<1d';
   return Math.floor(n) + 'd';
 }
-

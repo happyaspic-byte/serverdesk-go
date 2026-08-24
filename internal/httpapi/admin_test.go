@@ -85,6 +85,20 @@ func newAdminTestFixture(t *testing.T, initialCfgJSON string) *adminTestFixture 
 			"thresholds": {"warn": 75, "crit": 90}
 		}`
 	}
+	// Admin API fixtures intentionally exercise legacy plaintext migration paths.
+	// Production examples/installers use require-references.
+	var fixtureDoc map[string]any
+	if err := json.Unmarshal([]byte(initialCfgJSON), &fixtureDoc); err != nil {
+		t.Fatalf("invalid fixture JSON: %v", err)
+	}
+	if _, exists := fixtureDoc["secret_policy"]; !exists {
+		fixtureDoc["secret_policy"] = config.SecretPolicyAllowPlaintext
+	}
+	fixtureBytes, err := json.Marshal(fixtureDoc)
+	if err != nil {
+		t.Fatalf("marshal fixture JSON: %v", err)
+	}
+	initialCfgJSON = string(fixtureBytes)
 
 	if err := os.WriteFile(cfgPath, []byte(initialCfgJSON), 0o600); err != nil {
 		t.Fatal(err)
@@ -360,6 +374,76 @@ func TestAddDeviceEdgeHotAdd(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAddDeviceHotAddResolvesSecretReference(t *testing.T) {
+	credentialDir := filepath.Join(t.TempDir(), "credentials")
+	if err := os.Mkdir(credentialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := "runtime-pve-secret"
+	if err := os.WriteFile(filepath.Join(credentialDir, "pve-password"), []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CREDENTIALS_DIRECTORY", "")
+	t.Setenv("SERVERDESK_CREDENTIALS_DIRECTORY", credentialDir)
+	f := newAdminTestFixture(t, `{
+		"listen":"127.0.0.1:6005",
+		"secret_policy":"require-references",
+		"clusters":[],
+		"edge_devices":[]
+	}`)
+	payload := map[string]any{
+		"type": "SRV", "platform": "proxmox", "key": "pve-ref",
+		"mgmt": "192.0.2.30", "admin_user": "root@pam",
+		"admin_pass": "secret://pve-password",
+	}
+	rec, _ := execRequest(f.srv, http.MethodPost, "/api/clusters", payload, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("hot-add status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stored := f.srv.findEdgeCfg("pve-ref")
+	if stored == nil || stored.Password != secret {
+		t.Fatalf("runtime config did not resolve reference: %+v", stored)
+	}
+	foundWorker := false
+	for _, device := range f.edgeMgr.Devices() {
+		if device.Key == "pve-ref" {
+			foundWorker = true
+			if device.Password != secret {
+				t.Fatalf("worker password=%q, want resolved value", device.Password)
+			}
+		}
+	}
+	if !foundWorker {
+		t.Fatal("hot-added worker device missing")
+	}
+	data, err := os.ReadFile(f.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), secret) || !strings.Contains(string(data), "secret://pve-password") {
+		t.Fatalf("persisted config did not retain only the reference: %s", data)
+	}
+	if masked := config.Mask("failure: " + secret); strings.Contains(masked, secret) {
+		t.Fatalf("resolved hot-add secret was not registered for log masking: %q", masked)
+	}
+
+	missing := map[string]any{
+		"type": "SRV", "platform": "proxmox", "key": "pve-missing",
+		"mgmt": "192.0.2.31", "admin_pass": "secret://missing",
+	}
+	rec, _ = execRequest(f.srv, http.MethodPost, "/api/clusters", missing, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing reference status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	data, err = os.ReadFile(f.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "pve-missing") {
+		t.Fatal("invalid reference was persisted before validation")
 	}
 }
 
@@ -836,16 +920,18 @@ func TestConnTestProxmox(t *testing.T) {
 	tlsServer.Listener = ln
 	tlsServer.StartTLS()
 	defer tlsServer.Close()
+	tlsFingerprint := adminTLSServerFingerprint(t, tlsServer)
 
 	f := newAdminTestFixture(t, "")
 
 	// 1. 성공 케이스
 	bodySuccess := map[string]any{
-		"type":       "SRV",
-		"platform":   "proxmox",
-		"mgmt":       "127.0.0.1",
-		"admin_user": "root@pam",
-		"admin_pass": "goodpass",
+		"type":            "SRV",
+		"platform":        "proxmox",
+		"mgmt":            "127.0.0.1",
+		"admin_user":      "root@pam",
+		"admin_pass":      "goodpass",
+		"tls_fingerprint": tlsFingerprint,
 	}
 	rec, res := execRequest(f.srv, http.MethodPost, "/api/clusters/test", bodySuccess, "")
 	if rec.Code != http.StatusOK || res["reachable"] != true {
@@ -857,11 +943,12 @@ func TestConnTestProxmox(t *testing.T) {
 
 	// 2. 인증 실패 케이스 (401)
 	bodyAuthFail := map[string]any{
-		"type":       "SRV",
-		"platform":   "proxmox",
-		"mgmt":       "127.0.0.1",
-		"admin_user": "root@pam",
-		"admin_pass": "wrongpass",
+		"type":            "SRV",
+		"platform":        "proxmox",
+		"mgmt":            "127.0.0.1",
+		"admin_user":      "root@pam",
+		"admin_pass":      "wrongpass",
+		"tls_fingerprint": tlsFingerprint,
 	}
 	_, resAuthFail := execRequest(f.srv, http.MethodPost, "/api/clusters/test", bodyAuthFail, "")
 	if resAuthFail["reachable"] != true {
@@ -895,16 +982,18 @@ func TestConnTestRedfish(t *testing.T) {
 		t.Fatal(err)
 	}
 	bmcHost := u.Host // host:port
+	tlsFingerprint := adminTLSServerFingerprint(t, ts)
 
 	f := newAdminTestFixture(t, "")
 
 	// 1. 성공 케이스
 	bodySuccess := map[string]any{
-		"type":     "SRV",
-		"mgmt":     "127.0.0.1",
-		"bmc_ip":   bmcHost,
-		"bmc_user": "admin",
-		"bmc_pass": "bmcpass",
+		"type":            "SRV",
+		"mgmt":            "127.0.0.1",
+		"bmc_ip":          bmcHost,
+		"bmc_user":        "admin",
+		"bmc_pass":        "bmcpass",
+		"tls_fingerprint": tlsFingerprint,
 	}
 	rec, res := execRequest(f.srv, http.MethodPost, "/api/clusters/test", bodySuccess, "")
 	if rec.Code != http.StatusOK || res["reachable"] != true {
@@ -916,11 +1005,12 @@ func TestConnTestRedfish(t *testing.T) {
 
 	// 2. BMC 인증 실패 (401)
 	bodyAuthFail := map[string]any{
-		"type":     "SRV",
-		"mgmt":     "127.0.0.1",
-		"bmc_ip":   bmcHost,
-		"bmc_user": "admin",
-		"bmc_pass": "wrongpass",
+		"type":            "SRV",
+		"mgmt":            "127.0.0.1",
+		"bmc_ip":          bmcHost,
+		"bmc_user":        "admin",
+		"bmc_pass":        "wrongpass",
+		"tls_fingerprint": tlsFingerprint,
 	}
 	_, resAuthFail := execRequest(f.srv, http.MethodPost, "/api/clusters/test", bodyAuthFail, "")
 	if resAuthFail["reachable"] != true {
@@ -1025,6 +1115,19 @@ func generateAdminSelfSignedCert(t *testing.T) (tls.Certificate, string, string)
 	return tlsCert, hexFP, b64FP
 }
 
+func adminTLSServerFingerprint(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	if ts.TLS == nil || len(ts.TLS.Certificates) == 0 || len(ts.TLS.Certificates[0].Certificate) == 0 {
+		t.Fatal("test TLS server certificate unavailable")
+	}
+	cert, err := x509.ParseCertificate(ts.TLS.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatalf("parse test TLS server certificate: %v", err)
+	}
+	hash := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return hex.EncodeToString(hash[:])
+}
+
 // TestConnTestTLSFingerprintPinning 은 /api/clusters/test 에서 tls_fingerprint 옵트인 피닝 동작을 검증한다.
 func TestConnTestTLSFingerprintPinning(t *testing.T) {
 	serverCert, hexFP, b64FP := generateAdminSelfSignedCert(t)
@@ -1111,8 +1214,8 @@ func TestConnTestTLSFingerprintPinning(t *testing.T) {
 		}
 	})
 
-	// 4. Redfish: 핑거프린트 미지정 -> 자체서명 허용(성공)
-	t.Run("Redfish_NoPin_Success", func(t *testing.T) {
+	// 4. Redfish: 핑거프린트 미지정 -> 기본 CA 검증으로 자체서명 거부
+	t.Run("Redfish_NoPin_SelfSignedRejected", func(t *testing.T) {
 		body := map[string]any{
 			"type":     "SRV",
 			"mgmt":     "127.0.0.1",
@@ -1121,8 +1224,8 @@ func TestConnTestTLSFingerprintPinning(t *testing.T) {
 			"bmc_pass": "bmcpass",
 		}
 		rec, res := execRequest(f.srv, http.MethodPost, "/api/clusters/test", body, "")
-		if rec.Code != http.StatusOK || res["reachable"] != true {
-			t.Fatalf("expected reachable=true without pin, got code=%d res=%+v", rec.Code, res)
+		if rec.Code != http.StatusOK || res["reachable"] == true {
+			t.Fatalf("expected self-signed endpoint rejection without pin, got code=%d res=%+v", rec.Code, res)
 		}
 	})
 }
@@ -1180,11 +1283,12 @@ func TestAdminUnitHelpers(t *testing.T) {
 	}))
 	defer ts.Close()
 	u, _ := url.Parse(ts.URL)
-	code, err := redfishGet(ctx, u.Host, "user", "pass", "/ok", "")
+	tlsFingerprint := adminTLSServerFingerprint(t, ts)
+	code, err := redfishGet(ctx, u.Host, "user", "pass", "/ok", tlsFingerprint)
 	if err != nil || code != 0 {
 		t.Fatalf("redfishGet ok expected 0/nil, got %d/%v", code, err)
 	}
-	code, err = redfishGet(ctx, u.Host, "user", "pass", "/err", "")
+	code, err = redfishGet(ctx, u.Host, "user", "pass", "/err", tlsFingerprint)
 	if code != 403 || err == nil {
 		t.Fatalf("redfishGet forbidden expected 403/err, got %d/%v", code, err)
 	}

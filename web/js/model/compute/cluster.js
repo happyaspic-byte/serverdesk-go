@@ -6,9 +6,10 @@
 import {
   TYPES, FT_TYPES, isFT, isNoTel, deriveStatus, deriveSync, availN,
 } from '../data.js';
+import { usageThresholds } from '../../util/fmt.js';
 import {
   clamp, cmpKo, langOf, makeL, SEV_RANK, STALE_ALERT_DAYS,
-  sevInfo, histOf, _meta, _arr, _num, DASH,
+  sevInfo, histOf, _meta, _arr, _num, DASH, _resolve,
 } from './base.js';
 import {
   statusTone, statusLabel, statusAnim, pctTone, pctToneAlloc,
@@ -30,7 +31,7 @@ import { buildModel } from './kpi.js';
  * 8. clusters / capacity / manage-tree / search
  * ======================================================================== */
 
-function buildClusterRows(rows, fleet, S, L, ko) {
+export function buildClusterRows(rows, fleet, S, L, ko) {
   const filter = S.clustersFilter || 'all';
   const ftRows = rows.filter((r) => r.isFT);
   const list = (filter === 'all' ? ftRows : ftRows.filter((r) => r.status === filter)).map((r) => {
@@ -66,7 +67,7 @@ function buildClusterRows(rows, fleet, S, L, ko) {
   return { list, filters, counts, total: ftRows.length };
 }
 
-function buildCapacityModel(rows, fleet, resAgg, L, ko) {
+export function buildCapacityModel(rows, fleet, resAgg, L, ko) {
   const usable = rows.filter((r) => !r.noTel);
   const cpuRank = usable.filter((r) => !r.cpu.na).sort((a, b) => b.cpuVal - a.cpuVal)
     .map((r) => ({ id: r.id, host: r.label, typeLabel: r.typeLabel, typeIcon: r.typeIcon, val: r.cpuVal, text: r.cpuText, width: r.cpu.width, tone: r.cpu.tone }));
@@ -122,7 +123,7 @@ function buildCapacityModel(rows, fleet, resAgg, L, ko) {
 }
 
 /** manage 화면용 회사▸공장▸장비 3단 트리. */
-function buildTree(rows, S, L) {
+export function buildTree(rows, S, L) {
   const collapsed = (S && S.manageCollapsed) || {};
   // buildTopo 의 #432 와 같은 계약 — 그룹 키(접힘 상태 'co:'·'fa:'의 재료)는 언어 중립
   // 슬러그로 고정하고, 지역화는 표시 name 에만 적용한다. 리터럴 '미분류'를 키·표시
@@ -165,7 +166,7 @@ export function worstOf(list) {
 }
 
 /** 전역 검색 — 노드 + 경보 혼합. F1 계약: {kind,id,label,meta,status}. */
-function buildSearchList(fleet, alertsAll, S, L, ko, today) {
+export function buildSearchList(fleet, alertsAll, S, L, ko, today) {
   const q = String((S && S.search) || '').trim().toLowerCase();
   const out = [];
   if (!q) return out;
@@ -229,4 +230,3 @@ export function buildSearch(a, b) {
   const m = buildModel(fleet, state);
   return m.searchResults;
 }
-

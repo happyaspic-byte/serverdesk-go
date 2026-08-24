@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -112,7 +113,54 @@ func TestParseFingerprint(t *testing.T) {
 	}
 }
 
-// TestTLSFingerprintPinning — httptest.NewUnstartedServer + TLS 환경에서 핀 일치/불일치/미지정 검증.
+func TestDefaultTLSConfigUsesCertificateVerification(t *testing.T) {
+	cfg, err := NewTLSConfig("")
+	if err != nil {
+		t.Fatalf("NewTLSConfig(default): %v", err)
+	}
+	if cfg.InsecureSkipVerify {
+		t.Fatal("default TLS configuration disables certificate verification")
+	}
+	if cfg.MinVersion < tls.VersionTLS12 {
+		t.Fatalf("default minimum TLS version = %x, want TLS 1.2 or newer", cfg.MinVersion)
+	}
+}
+
+func TestDeviceHTTPRedirectAndResponseLimits(t *testing.T) {
+	parse := func(raw string) *url.URL {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	if !sameHTTPSOrigin(parse("https://device.example/api"), parse("https://DEVICE.example:443/root")) {
+		t.Fatal("equivalent HTTPS origins did not match")
+	}
+	for _, target := range []string{
+		"http://device.example/api", "https://other.example/api", "https://device.example:8443/api",
+	} {
+		if sameHTTPSOrigin(parse(target), parse("https://device.example/api")) {
+			t.Fatalf("unsafe origin matched: %s", target)
+		}
+	}
+	client := DeviceHTTPClient(time.Second, "")
+	original := &http.Request{URL: parse("https://device.example/api")}
+	if err := client.CheckRedirect(&http.Request{URL: parse("https://device.example/next")}, []*http.Request{original}); err != nil {
+		t.Fatalf("same-origin redirect rejected: %v", err)
+	}
+	if err := client.CheckRedirect(&http.Request{URL: parse("https://evil.example/next")}, []*http.Request{original}); err == nil {
+		t.Fatal("cross-origin redirect accepted")
+	}
+	if got, err := readLimitedBody(strings.NewReader("1234"), 4); err != nil || string(got) != "1234" {
+		t.Fatalf("exact-limit body=%q, %v", got, err)
+	}
+	if _, err := readLimitedBody(strings.NewReader("12345"), 4); err == nil {
+		t.Fatal("oversized body accepted")
+	}
+}
+
+// TestTLSFingerprintPinning — httptest.NewUnstartedServer + TLS 환경에서 핀 일치/불일치/기본 CA 검증을 검증.
 func TestTLSFingerprintPinning(t *testing.T) {
 	serverCert, hexFP, b64FP := generateSelfSignedCert(t)
 	_, otherHexFP, _ := generateSelfSignedCert(t)
@@ -187,16 +235,11 @@ func TestTLSFingerprintPinning(t *testing.T) {
 		}
 	})
 
-	// 5. 핑거프린트 미지정("") -> 기존 InsecureSkipVerify 동작(성공)
-	t.Run("NoPin_InsecureSkipVerify", func(t *testing.T) {
+	// 5. 핑거프린트 미지정("") -> 시스템 CA 검증이 기본이며 자체서명은 거부
+	t.Run("NoPin_SelfSignedRejected", func(t *testing.T) {
 		client := DeviceHTTPClient(3*time.Second, "")
-		resp, err := client.Get(ts.URL + "/ping")
-		if err != nil {
-			t.Fatalf("미지정 시 자체서명 허용 실패: %v", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("상태코드 불일치: %d", resp.StatusCode)
+		if _, err := client.Get(ts.URL + "/ping"); err == nil {
+			t.Fatal("핀 없는 기본 클라이언트가 자체서명 인증서를 허용함")
 		}
 	})
 

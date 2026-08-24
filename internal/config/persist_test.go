@@ -200,6 +200,42 @@ func TestAddEntry(t *testing.T) {
 	}
 }
 
+func TestStoreProtectsNewSecretsWhenReferencesRequired(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentialDir := filepath.Join(dir, "credentials")
+	if err := os.Mkdir(credentialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SERVERDESK_CREDENTIALS_DIRECTORY", credentialDir)
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"secret_policy":"require-references","clusters":[],"edge_devices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	if err := store.AddEntry(SectionEdgeDevices, map[string]any{
+		"key": "pve-a", "kind": "proxmox", "password": "new-device-password",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "new-device-password") || !strings.Contains(string(data), "secret://") {
+		t.Fatalf("stored config did not protect secret: %s", data)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EdgeDevices[0].Password != "new-device-password" {
+		t.Fatalf("resolved password = %q", loaded.EdgeDevices[0].Password)
+	}
+}
+
 func TestRemoveEdgeDevice(t *testing.T) {
 	path := copyFixture(t)
 	s := NewStore(path)

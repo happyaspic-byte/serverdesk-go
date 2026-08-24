@@ -46,3 +46,16 @@ func TestProductionAssetsContainNoSimulationData(t *testing.T) {
 		}
 	}
 }
+
+func TestDOMHelperHasNoRawHTMLAttributePath(t *testing.T) {
+	data, err := FS.ReadFile("js/util/dom.js")
+	if err != nil {
+		t.Fatalf("read DOM helper: %v", err)
+	}
+	text := string(data)
+	for _, forbidden := range []string{"k === 'html'", "node.innerHTML", "html → innerHTML"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("DOM helper reintroduced raw HTML attribute path %q", forbidden)
+		}
+	}
+}

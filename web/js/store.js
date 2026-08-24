@@ -67,6 +67,14 @@ export const initialState = {
   liveEventLog: null,      // 폴러 events[] 이력(로그 tail 정본). 미수신 시 null — compute 는 배열로 방어
   pollerOverall: null,     // 폴러 계산 플릿 총평 'ok'|'warning'|'critical'|null
   cacheAgeSec: null,       // 폴러가 실장비를 읽은 뒤 흐른 초(null=미제공)
+  // 서버가 명시적으로 광고한 변경 기능. 누락 시 cluster actions는 fail-closed.
+  capabilities: {
+    cluster_actions: {
+      supported: false, actions: [], endpoint: '/api/clusters/{id}/action',
+      reason: 'Server did not advertise cluster action support.',
+      reason_ko: '서버가 클러스터 제어 지원을 알리지 않았습니다.',
+    },
+  },
   alertView: 'cards',      // incidents 화면 탭 'cards'(경보)|'log'(로그)|'stats'(통계). 해시(#/logs)와 바인딩
   alertExpanded: false,    // incidents 카드 '더 보기' 펼침 상태(§4.1 — setState 동적 추가 금지)
   hist: {},                // { [id]: {cpu:[], mem:[], rtt:[]} } 최대 48

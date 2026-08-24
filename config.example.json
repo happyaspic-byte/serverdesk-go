@@ -1,5 +1,6 @@
 {
   "_comment": "serverdesk 설정 기본 파일 — 장비는 설치 후 관리 화면에서 추가하거나 아래 예시 스키마를 참고하여 작성합니다. BOM 없는 UTF-8로 저장하세요.",
+  "secret_policy": "require-references",
   "avcli_bin": "avcli",
   "avcli_timeout": 90,
   "cache_refresh": 5,
@@ -12,8 +13,8 @@
       "name": "everRun 8.1",
       "mgmt_ip": "10.0.0.10",
       "admin_user": "admin",
-      "admin_password": "admin-password",
-      "node_root_password": "node-root-password",
+      "admin_password": "secret://cluster-1-admin-password",
+      "node_root_password": "secret://cluster-1-node-root-password",
       "snmp_enabled": true,
       "snmp_community": "public",
       "platform": "everrun",
@@ -21,8 +22,8 @@
       "company": "고객사",
       "factory": "1공장",
       "nodes": [
-        { "name": "node0", "ip": "10.0.0.11", "root_user": "root", "root_password": "pw" },
-        { "name": "node1", "ip": "10.0.0.12", "root_user": "root", "root_password": "pw" }
+        { "name": "node0", "ip": "10.0.0.11", "root_user": "root", "root_password": "secret://cluster-1-node0-root-password" },
+        { "name": "node1", "ip": "10.0.0.12", "root_user": "root", "root_password": "secret://cluster-1-node1-root-password" }
       ]
     }
   ],
@@ -37,7 +38,7 @@
       "ip": "10.0.0.113",
       "community": "public",
       "web_user": "admin",
-      "web_password": "web-password",
+      "web_password": "secret://printer-1-web-password",
       "vendor": "Samsung",
       "company": "고객사",
       "factory": "1공장",
@@ -74,7 +75,8 @@
       "name": "PVE 노드1",
       "ip": "10.0.0.21",
       "user": "root@pam",
-      "password": "pve-password",
+      "password": "secret://pve-1-password",
+      "_tls_fingerprint_comment": "자체서명 인증서는 장비 SPKI SHA-256 지문을 tls_fingerprint에 설정해야 합니다.",
       "company": "고객사",
       "factory": "1공장",
       "site": "본사"
@@ -88,7 +90,8 @@
       "community": "public",
       "bmc_ip": "10.0.0.131",
       "bmc_user": "Administrator",
-      "bmc_password": "bmc-password",
+      "bmc_password": "secret://srv-1-bmc-password",
+      "_tls_fingerprint_comment": "자체서명 인증서는 장비 SPKI SHA-256 지문을 tls_fingerprint에 설정해야 합니다.",
       "vendor": "HPE",
       "company": "고객사",
       "factory": "1공장",
@@ -103,7 +106,8 @@
     "snmp": 60,
     "static": 86400
   },
-  "listen": "0.0.0.0:6005",
+  "_transport_comment": "기본은 루프백 HTTP입니다. 외부 공개는 tls_cert_file/tls_key_file로 직접 HTTPS를 사용하거나 신뢰된 TLS 역프록시를 사용하세요.",
+  "listen": "127.0.0.1:6005",
   "log_level": "info",
   "runtime_dir": "data",
   "snmp_community": "",

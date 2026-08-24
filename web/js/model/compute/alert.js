@@ -58,7 +58,7 @@ function alertMsgKo(name, desc) {
 
 // 검증용 임시 픽스처 호스트(예: srv-evt-test) — 실장비가 아니다. 하드 삭제 대신 플래그만
 // 세워 화면이 숨길지 고르게 한다(데이터 손실 금지). buildModel·autoAckDue 가 공용.
-const TEST_FIXTURE_RE = /^srv-evt-test$/i;
+export const TEST_FIXTURE_RE = /^srv-evt-test$/i;
 
 // 최초 발생 시각 보존(폴링마다 '방금'으로 리셋되지 않도록). 복구된 항목은 매 실행마다 정리.
 // 키: 합성 상태 경보는 `장비id|down` / `장비id|deg`, time 결측 폴리 경보는
@@ -73,7 +73,7 @@ const _alertOnsetKind = (a) => 'alert|' + (a.name || '') + '|' + (a.desc || a.na
    싣던 자리다. 세션마다 다른 시각이라 리로드 시 확인이 풀리고 /ack 공유가 성립하지 않았다.
    표시용 time 은 onset 을 유지하되, 키 재료는 세션 무관 고정 문자열로 분리한다.
    (tsNorm 은 실 시각을 보존하므로 이 값과 충돌하지 않는다.) */
-const ACK_TIME_MISSING = 'no-time';
+export const ACK_TIME_MISSING = 'no-time';
 
 function collectAlerts(fleet, L) {
   const now = _nowStamp();

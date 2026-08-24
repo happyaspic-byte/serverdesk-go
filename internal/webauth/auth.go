@@ -48,6 +48,19 @@ type Manager struct {
 	failures        map[string]loginFailure
 	now             func() time.Time
 	random          io.Reader
+	auditf          func(string)
+}
+
+// SetAuditLogger installs a body/query-free security-event sink. It must be
+// configured before Handler begins serving requests.
+func (m *Manager) SetAuditLogger(logf func(string)) { m.auditf = logf }
+
+func (m *Manager) auditSecurity(event string, status int, r *http.Request) {
+	if m.auditf == nil {
+		return
+	}
+	m.auditf("event=" + event + " operator=admin status=" + strconv.Itoa(status) +
+		" remote=" + TrustedClientIP(r))
 }
 
 // New creates an authentication manager for the supplied administrator credentials.
@@ -101,7 +114,7 @@ func (m *Manager) Handler(next http.Handler) http.Handler {
 		}
 		if m.credentialsPath != "" {
 			if err := m.reloadCredentials(); err != nil {
-				m.authenticationUnavailable(w)
+				m.authenticationUnavailable(w, r)
 				return
 			}
 		}
@@ -133,11 +146,13 @@ func (m *Manager) handleLogin(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		if !sameOrigin(r) {
 			http.Error(w, "cross-origin login rejected", http.StatusForbidden)
+			m.auditSecurity("login_rejected_origin", http.StatusForbidden, r)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxLoginBody)
 		if err := r.ParseForm(); err != nil {
 			m.writeLoginPage(w, r, http.StatusBadRequest, "로그인 요청을 읽을 수 없습니다.", "/")
+			m.auditSecurity("login_bad_request", http.StatusBadRequest, r)
 			return
 		}
 		next := safeNext(r.PostForm.Get("next"))
@@ -145,19 +160,23 @@ func (m *Manager) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if blocked, wait := m.loginBlocked(client); blocked {
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Round(time.Second).Seconds())))
 			m.writeLoginPage(w, r, http.StatusTooManyRequests, "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.", next)
+			m.auditSecurity("login_blocked", http.StatusTooManyRequests, r)
 			return
 		}
 		if !m.validCredentials(r.PostForm.Get("username"), r.PostForm.Get("password")) {
 			m.recordFailure(client)
 			m.writeLoginPage(w, r, http.StatusUnauthorized, "아이디 또는 비밀번호가 올바르지 않습니다.", next)
+			m.auditSecurity("login_failed", http.StatusUnauthorized, r)
 			return
 		}
 		m.clearFailures(client)
 		if err := m.startSession(w, r); err != nil {
 			http.Error(w, "세션을 만들 수 없습니다.", http.StatusInternalServerError)
+			m.auditSecurity("login_session_error", http.StatusInternalServerError, r)
 			return
 		}
 		http.Redirect(w, r, next, http.StatusSeeOther)
+		m.auditSecurity("login_success", http.StatusSeeOther, r)
 	default:
 		w.Header().Set("Allow", "GET, HEAD, POST")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -172,6 +191,7 @@ func (m *Manager) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if !sameOrigin(r) {
 		http.Error(w, "cross-origin logout rejected", http.StatusForbidden)
+		m.auditSecurity("logout_rejected_origin", http.StatusForbidden, r)
 		return
 	}
 	m.endSession(r)
@@ -186,6 +206,7 @@ func (m *Manager) handleLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	m.auditSecurity("logout", http.StatusSeeOther, r)
 }
 
 func (m *Manager) requireLogin(w http.ResponseWriter, r *http.Request) {
@@ -399,9 +420,10 @@ func (m *Manager) reloadCredentials() error {
 	return nil
 }
 
-func (m *Manager) authenticationUnavailable(w http.ResponseWriter) {
+func (m *Manager) authenticationUnavailable(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, "authentication temporarily unavailable", http.StatusServiceUnavailable)
+	m.auditSecurity("credential_reload_failed", http.StatusServiceUnavailable, r)
 }
 
 func clientKey(r *http.Request) string {
@@ -417,6 +439,10 @@ func clientKey(r *http.Request) string {
 	}
 	return "unknown"
 }
+
+// TrustedClientIP returns the direct peer, or the validated right-most client
+// address supplied by a loopback reverse proxy. Untrusted forwarded headers are ignored.
+func TrustedClientIP(r *http.Request) string { return clientKey(r) }
 
 func sameOrigin(r *http.Request) bool {
 	scheme := requestScheme(r)
@@ -463,6 +489,9 @@ func canonicalAuthority(u *url.URL) string {
 	return net.JoinHostPort(host, port)
 }
 
+// CanonicalAuthority normalizes an HTTP(S) URL authority including default ports.
+func CanonicalAuthority(u *url.URL) string { return canonicalAuthority(u) }
+
 func requestScheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
@@ -477,6 +506,10 @@ func requestScheme(r *http.Request) string {
 	}
 	return "http"
 }
+
+// TrustedRequestScheme returns TLS state, or X-Forwarded-Proto only when the
+// loopback proxy also supplied a syntactically valid client address.
+func TrustedRequestScheme(r *http.Request) string { return requestScheme(r) }
 
 func forwardedClientIP(r *http.Request) string {
 	if !loopbackPeer(r.RemoteAddr) {

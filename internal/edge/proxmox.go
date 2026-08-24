@@ -74,9 +74,12 @@ func pveAPI(ctx context.Context, cl *http.Client, ip, path string, form url.Valu
 	if resp.StatusCode >= 400 {
 		return nil, &httpStatusError{Code: resp.StatusCode}
 	}
+	data, err := readLimitedBody(resp.Body, maxDeviceResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var v map[string]any
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&v); err != nil {
+	if err := json.Unmarshal(data, &v); err != nil {
 		return nil, &jsonSyntaxError{Err: err}
 	}
 	return v["data"], nil

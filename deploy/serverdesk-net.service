@@ -1,22 +1,45 @@
-# serverdesk-net.service
-# 출처: everrun-poller/systemd/serverdesk-net.service 에서 serverdesk-go 로 내재화
-# 용도: PLC 서브넷 보조 IP 설정 및 SNMP 트랩(162/udp -> 10162/udp) iptables NAT 리다이렉트
-
 [Unit]
-Description=serverdesk 네트워크 준비 — PLC 서브넷 보조 IP + SNMP 트랩 포트 리다이렉트
+Description=serverdesk optional auxiliary address and SNMP trap redirect
+Documentation=https://github.com/happyaspic-byte/serverdesk-go
 After=network-online.target
 Wants=network-online.target
+Before=serverdesk.service
+ConditionPathExists=/etc/serverdesk/network.env
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# 옴론 PLC(192.168.250.1) 도달용 보조 IP — replace 라 재실행에도 안전(멱등).
-ExecStart=/usr/sbin/ip addr replace 192.168.250.84/24 dev ens3f0
-# EAC 가 보내는 SNMP 트랩(privileged 162/udp)을 폴러 수신 포트 10162 로 리다이렉트.
-# -C 로 중복 검사 후 없을 때만 -A (멱등).
-ExecStart=/bin/sh -c '/usr/sbin/iptables -t nat -C PREROUTING -p udp --dport 162 -j REDIRECT --to-ports 10162 2>/dev/null || /usr/sbin/iptables -t nat -A PREROUTING -p udp --dport 162 -j REDIRECT --to-ports 10162'
-# 롤백: sudo iptables -t nat -D PREROUTING -p udp --dport 162 -j REDIRECT --to-ports 10162
-#       sudo ip addr del 192.168.250.84/24 dev ens3f0
+RuntimeDirectory=serverdesk-net
+RuntimeDirectoryMode=0700
+ExecStart=/opt/serverdesk/serverdesk-network --config /etc/serverdesk/network.env --state /run/serverdesk-net/applied.env apply
+ExecStop=/opt/serverdesk/serverdesk-network --config /run/serverdesk-net/applied.env remove
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+UMask=0077
+
+# This is the only Serverdesk component that needs a capability. The main
+# daemon has an empty capability set. Configuration and program files remain
+# read-only even while this helper updates the host network namespace.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

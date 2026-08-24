@@ -29,6 +29,14 @@ Serverdesk 웹 콘솔은 단일 관리자(`admin`) 계정 기반으로 작동하
 - **Origin / Referer 헤더 검증**: 로그인, 로그아웃 및 상태 변경(POST/PUT/DELETE) 요청에 대해 요청의 `Origin` 및 `Referer`를 정규화된 `Host`와 엄격하게 비교(`sameOrigin`, `CheckSameOrigin`)하여 CSRF 공격을 차단합니다.
   - 관련 코드: `internal/webauth/auth.go:134, 173, 421-445`, `internal/webfront/hardening.go:28-48, 59-62`
 
+### 1.5 관리자 변경 감사
+- 인증을 통과한 모든 POST/PUT/PATCH/DELETE 요청(API와 webfront mutation 모두)은 운영자(`admin`),
+  메서드, 이스케이프된 URL path, 최종 HTTP 상태, 검증된 client IP를 `audit` 컴포넌트에 기록합니다.
+- loopback reverse proxy에서 전달된 마지막 `X-Forwarded-For` 값만 client IP로 인정하며, 원격 peer의
+  forwarded header는 무시합니다. panic이 발생해도 감사 레코드에는 실패 상태가 남고 panic은 그대로 전파됩니다.
+- query와 요청 본문은 기록하지 않으므로 장비 password나 token이 감사 로그에 섞이지 않습니다.
+  - 관련 코드: `internal/webauth/audit.go`, `internal/webauth/auth.go`
+
 ---
 
 ## 2. 장비 통신 보안 (Device Communication & Infrastructure)
@@ -43,10 +51,18 @@ Serverdesk 웹 콘솔은 단일 관리자(`admin`) 계정 기반으로 작동하
 - **암호 격리**: 노드 SSH 접속 암호는 환경 변수(`SSH_PW`)와 `SSH_ASKPASS` + `setsid -w` 메커니즘을 통해 전달되며, 프로세스 커맨드라인(`argv`)이나 로그에 노출되지 않습니다.
   - 관련 코드: `internal/sshmetrics/runner.go:54-58`
 
-### 2.2 폐쇄망 장비 통신 정책 및 TLS 피닝
-- **폐쇄망 자체서명 통신**: 공인 CA 체인이 존재하지 않는 폐쇄망 장비(Proxmox, BMC Redfish 등)의 웹 API 통신은 `InsecureSkipVerify: true` 클라이언트를 제한된 패키지 내부에서만 격리하여 사용합니다.
-  - 관련 코드: `internal/edge/httpx.go:46-57`, `internal/httpapi/admin.go:658-665`
-- **신규 TLS 지문 피닝 (`tls_fingerprint`) 옵션**: 폐쇄망 자체서명 환경에서도 장비 스푸핑 및 불법 중간자 프록시를 원천 차단하기 위해, 장비의 SHA-256 인증서 지문을 설정에 명시하고 검증하는 피닝(Pinning) 옵션을 지원합니다.
+### 2.2 장비 통신 정책 및 TLS 피닝
+- **검증 우선 기본값**: 장비 HTTPS는 TLS 1.2 이상, 시스템 CA 체인 및 호스트명 검증을 기본으로 사용합니다. `tls_fingerprint`가 없는 자체서명 인증서는 허용하지 않습니다.
+- **자체서명 장비의 명시적 피닝**: Proxmox, BMC Redfish, 프린터처럼 사설 자체서명 인증서를 사용하는 장비는 `tls_fingerprint`에 SPKI SHA-256 지문을 명시합니다. 이 경우에만 CA 검증을 대체하며, 지문을 상수시간 비교해 불일치 연결을 차단합니다.
+  - 관련 코드: `internal/edge/httpx.go`, `internal/edge/worker.go`
+
+### 2.3 웹 리스너 전송 보안
+- 평문 HTTP는 루프백 바인드만 기본 허용합니다. 비루프백 주소는 직접 TLS 인증서/키가 있어야 합니다.
+  `allow_insecure_http`는 명시적 break-glass 호환 옵션이며, 비루프백 peer의 forwarded header는 계속
+  신뢰하지 않으므로 운영 보안 구성이 아닙니다.
+- 직접 TLS는 인증서와 개인키를 기동 전에 파싱합니다. 누락·불일치·손상, 유효기간 전/후 인증서,
+  Unix에서 group/other가 읽을 수 있는 개인키는 작업 스레드를 시작하기 전에 거부합니다.
+  - 관련 코드: `cmd/serverdesk/transport.go`, `cmd/serverdesk/main.go`
 
 ---
 
@@ -60,10 +76,14 @@ Serverdesk 웹 콘솔은 단일 관리자(`admin`) 계정 기반으로 작동하
   - Serverdesk 기동 시 `/proc/mounts` 및 로컬 계정 상태를 점검하여 다중 사용자 환경에서 `hidepid` 미적용 시 경고를 출력합니다(`CheckArgvExposure`).
   - 관련 코드: `internal/config/checks.go:32-58, 83-143`
 
-### 3.2 `config.local.json` 설정 파일 평문 저장
-- **한계**: 클러스터 관리 암호, 노드 SSH 암호 등이 설정 파일(`config.local.json`)에 평문으로 저장됩니다.
-  - 관련 코드: `internal/config/config.go:1-3, 52-60, 79-100`
-- **완화 대책**:
-  - 설정 파일의 파일 시스템 권한을 소유자 전용(`0600` / `chmod 600`)으로 강제 제한하도록 검사합니다(`CheckPerms`).
-  - `group` 또는 `other`에 읽기/쓰기 권한이 열려 있는 경우 기동 시 경고 로그를 출력합니다.
-  - 관련 코드: `internal/config/checks.go:13-30`
+### 3.2 장비 자격증명 저장
+- **운영 기본값**: `secret_policy=require-references`는 평문 비밀이 있는 설정의 기동을 거부합니다.
+  `secret://NAME`은 worker 구성 전에 메모리에서만 해석되며 원본 JSON과 API 백업에는 참조만 남습니다.
+- **Linux**: systemd `LoadCredential=`가 제공하는 private `CREDENTIALS_DIRECTORY`를 우선 사용합니다.
+  source credential과 config는 각각 root-only 및 `0600`으로 제한합니다.
+- **Windows**: migration은 machine-scoped DPAPI ciphertext만 기록합니다. 복사된 blob은 다른 호스트에서
+  복호화할 수 없습니다.
+- **안전한 이관**: `-migrate-secrets`는 다른 값의 기존 credential을 덮어쓰지 않고, 설정 교체 전 모든
+  credential 기록을 완료하며, 최초 평문 원본을 `.pre-secrets.bak`으로 남깁니다.
+  - 관련 코드: `internal/config/secretrefs.go`, `internal/config/secretrefs_*.go`
+  - 운영 절차: [`CREDENTIALS.md`](CREDENTIALS.md)

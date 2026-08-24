@@ -41,6 +41,14 @@ func TestRedactSecrets(t *testing.T) {
 	}
 }
 
+func TestSecretPolicyIsNotRedacted(t *testing.T) {
+	doc := map[string]any{"secret_policy": config.SecretPolicyRequireReferences, "password": "value"}
+	redacted := redactSecrets(doc).(map[string]any)
+	if redacted["secret_policy"] != config.SecretPolicyRequireReferences || redacted["password"] != "" {
+		t.Fatalf("redaction contract = %#v", redacted)
+	}
+}
+
 func TestMergeSecrets(t *testing.T) {
 	oldCfg := map[string]any{
 		"clusters": []any{map[string]any{"key": "a", "admin_password": "realpw"}},
@@ -164,7 +172,18 @@ func backupTestSrv(t *testing.T, cfgJSON string) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.local.json")
-	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+	var fixtureDoc map[string]any
+	if err := json.Unmarshal([]byte(cfgJSON), &fixtureDoc); err != nil {
+		t.Fatalf("invalid fixture config: %v", err)
+	}
+	if _, exists := fixtureDoc["secret_policy"]; !exists {
+		fixtureDoc["secret_policy"] = config.SecretPolicyAllowPlaintext
+	}
+	fixtureJSON, err := json.Marshal(fixtureDoc)
+	if err != nil {
+		t.Fatalf("marshal fixture config: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, fixtureJSON, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stateDir := filepath.Join(dir, "state")

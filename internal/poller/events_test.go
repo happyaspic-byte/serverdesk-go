@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -134,6 +135,98 @@ func TestEventLogBoundsEscapedJSONLine(t *testing.T) {
 	desc := log.List(1)[0].(map[string]any)["desc"].(string)
 	if len(desc) >= len(input) || log.Status()["healthy"] != true {
 		t.Fatalf("control-heavy event was not bounded: desc=%d status=%#v", len(desc), log.Status())
+	}
+}
+
+func TestEventWatcherRecordsStateAlertAndInventoryTransitions(t *testing.T) {
+	log := NewEventLog(filepath.Join(t.TempDir(), "watcher-events.jsonl"), 50)
+	cache := NewFleetCache()
+	devices := []map[string]any{
+		{
+			"id": "edge-1", "host": "edge-1.local", "status": "op",
+			"meta": map[string]any{"label": "Edge One", "alerts": []any{}},
+		},
+	}
+	w := NewEventWatcher(log, cache, nil,
+		func() []map[string]any { return devices },
+		func(key string) string { return "display-" + key })
+
+	// The first sample establishes a baseline and must not emit boot-time noise.
+	w.round()
+	if got := log.Len(); got != 0 {
+		t.Fatalf("baseline emitted %d events: %#v", got, log.List(50))
+	}
+	// Skip the intentional boot grace so subsequent rounds exercise real diffs.
+	w.t0 = time.Now().Add(-time.Duration(bootGrace+1) * time.Second)
+
+	devices = []map[string]any{
+		{
+			"id": "edge-1", "host": "edge-1.local", "status": "down",
+			"meta": map[string]any{
+				"label": "Edge One",
+				"alerts": []any{
+					map[string]any{"name": "FAN_FAIL", "desc": "", "sev": "critical"},
+					// DEVICE_STATE is represented by the dedicated state event, not duplicated.
+					map[string]any{"name": "DEVICE_STATE", "desc": "duplicate", "sev": "critical"},
+				},
+			},
+		},
+		{
+			"id": "edge-2", "host": "edge-2.local", "status": "op",
+			"meta": map[string]any{"label": "Edge Two", "alerts": []any{}},
+		},
+	}
+	w.round()
+
+	devices = []map[string]any{
+		{
+			"id": "edge-1", "host": "edge-1.local", "status": "deg",
+			"meta": map[string]any{
+				"label": "Edge One",
+				"alerts": []any{
+					// Unknown severities are deliberately normalized to warning.
+					map[string]any{"name": "HOT", "desc": "temperature", "severity": "unexpected"},
+				},
+			},
+		},
+	}
+	w.round()
+
+	events := log.List(50)
+	if len(events) != 7 {
+		t.Fatalf("transition events = %d, want 7: %#v", len(events), events)
+	}
+	seen := map[string]bool{}
+	for _, raw := range events {
+		ev := raw.(map[string]any)
+		key := eventString(ev, "kind") + "|" + eventString(ev, "host") + "|" +
+			eventString(ev, "sev") + "|" + eventString(ev, "desc")
+		seen[key] = true
+		if strings.Contains(eventString(ev, "desc"), "duplicate") {
+			t.Fatalf("DEVICE_STATE alert was duplicated: %#v", ev)
+		}
+	}
+	for _, want := range []string{
+		"state|edge-1.local|critical|상태 가동 → 오프라인",
+		"alert|edge-1.local|critical|FAN_FAIL",
+		"new|edge-2.local|info|장비 등록됨",
+		"state|edge-1.local|warning|상태 오프라인 → 저하",
+		"alert|edge-1.local|warning|temperature",
+		"clear|edge-1.local|info|해제: FAN_FAIL",
+		"gone|edge-2.local|info|장비 제거됨",
+	} {
+		if !seen[want] {
+			t.Errorf("missing event %q; got %#v", want, events)
+		}
+	}
+
+	if got := stateLabel("vendor-state"); got != "vendor-state" {
+		t.Fatalf("unknown state label = %q", got)
+	}
+	left := map[[3]string]bool{{"z", "", "warning"}: true, {"a", "", "critical"}: true}
+	diff := sortedAlertDiff(left, map[[3]string]bool{{"z", "", "warning"}: true})
+	if len(diff) != 1 || diff[0][0] != "a" {
+		t.Fatalf("sorted alert difference = %#v", diff)
 	}
 }
 

@@ -10,12 +10,12 @@ import {
 import { COLOR } from '../../util/fmt.js';
 import {
   clamp, cmpKo, langOf, makeL, SEV_RANK, STALE_ALERT_DAYS,
-  sevInfo, histOf, _meta, _arr, _num, DASH, _strHash, _resolve,
+  sevInfo, histOf, _sparkHist, _meta, _arr, _num, DASH, _strHash, _resolve,
 } from './base.js';
 import {
   statusTone, statusLabel, statusAnim, pctTone, pctToneAlloc,
-  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, fmtAvailN,
-  fmtDowntimeYr, fmtUptimeD,
+  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint, fmtAvailN,
+  fmtDowntimeYr, fmtUptimeD, deviceCode,
 } from './format.js';
 import {
   tsNorm, tsKey, agoSec, agoText, shortTime,
@@ -25,7 +25,11 @@ import { sortRows } from './node.js';
 import {
   alertAckKey, autoAckDue, toCsv, activeMaint,
   escalDue, expiredMaint, collectAlerts, collectTraps, alertMsgKo,
+  ACK_TIME_MISSING, TEST_FIXTURE_RE,
 } from './alert.js';
+import {
+  buildClusterRows, buildCapacityModel, buildTree, buildSearchList,
+} from './cluster.js';
 
 /* ===========================================================================
  * 7. buildModel
@@ -746,7 +750,7 @@ export function buildModel(a, b) {
     .filter((s) => _meta(s).error || tierErrOf(s).length > 0)
     .map((s) => _meta(s).label || s.host);
   const maintCnt = SERVERS.reduce((n, s) => n + _arr(_meta(s).nodes)
-    .filter((x) => _nodeMaint(x)).length, 0);
+    .filter((x) => nodeMaint(x)).length, 0);
   const lastPoll = Number(S.lastPoll) || 0;
   const pollAgoSec = lastPoll ? Math.max(0, Math.floor((Date.now() - lastPoll) / 1000)) : null;
   // 데이터의 '진짜' 나이 = 클라이언트가 받은 지 경과 + 폴러가 실장비에서 읽은 뒤 경과.
@@ -880,4 +884,3 @@ export function buildModel(a, b) {
   _memoResult = out;
   return out;
 }
-

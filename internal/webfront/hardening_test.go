@@ -77,6 +77,31 @@ func TestCheckSameOrigin(t *testing.T) {
 			t.Errorf("%s: CheckSameOrigin = %v, want %v", c.name, got, c.want)
 		}
 	}
+
+	httpsReq := httptest.NewRequest("PUT", "https://noc.local/ack", nil)
+	httpsReq.Host = "noc.local"
+	httpsReq.Header.Set("Origin", "http://noc.local")
+	if CheckSameOrigin(httpsReq) {
+		t.Fatal("HTTPS request accepted an HTTP origin with the same authority")
+	}
+	httpsReq.Header.Set("Origin", "https://noc.local:443")
+	if !CheckSameOrigin(httpsReq) {
+		t.Fatal("HTTPS request rejected the canonical default port")
+	}
+
+	proxyReq := httptest.NewRequest("PUT", "http://noc.local/ack", nil)
+	proxyReq.Host = "noc.local"
+	proxyReq.RemoteAddr = "127.0.0.1:4321"
+	proxyReq.Header.Set("X-Forwarded-For", "203.0.113.10")
+	proxyReq.Header.Set("X-Forwarded-Proto", "https")
+	proxyReq.Header.Set("Origin", "https://noc.local")
+	if !CheckSameOrigin(proxyReq) {
+		t.Fatal("validated loopback proxy scheme was not honored")
+	}
+	proxyReq.Header.Del("X-Forwarded-For")
+	if CheckSameOrigin(proxyReq) {
+		t.Fatal("proxy scheme was trusted without a validated client address")
+	}
 }
 
 func TestApplyHardening(t *testing.T) {

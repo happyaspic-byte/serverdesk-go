@@ -80,6 +80,11 @@ func (s *Store) rmw(mutate func(doc map[string]json.RawMessage) error) error {
 	if err := mutate(doc); err != nil {
 		return err
 	}
+	// require-references 배포에서는 UI/API가 받은 평문 자격증명을 credential
+	// provider에 먼저 저장하고 JSON에는 secret:// 참조만 남긴다.
+	if err := protectRequiredRawDocument(doc); err != nil {
+		return fmt.Errorf("config 저장 실패(자격증명 보호): %w", err)
+	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false) // 한글 등 비ASCII 보존 — Python 의 ensure_ascii=False 에 해당

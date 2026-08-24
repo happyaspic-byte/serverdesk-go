@@ -254,15 +254,29 @@ func (s *Server) readJSONBody(w http.ResponseWriter, r *http.Request) (map[strin
 // ServeHTTP 는 /api 라우팅이다. 패닉은 500 으로 변환한다(Python do_GET 의
 // 맨 바깥 except 와 같은 격리).
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimRight(r.URL.Path, "/")
+	if path == "" {
+		path = "/"
+	}
 	defer func() {
 		if rec := recover(); rec != nil {
 			logf("error", "http", fmt.Sprintf("HTTP 핸들러 예외: %v\n%s", rec, debug.Stack()))
 			s.send(w, r, 500, map[string]any{"error": "internal"})
 		}
 	}()
-	path := strings.TrimRight(r.URL.Path, "/")
-	if path == "" {
-		path = "/"
+	// 액션 endpoint 는 현재 mutation 구현이 없지만 라우트 계약 자체는 명시한다.
+	// POST 는 쓰기 가드를 거친 구조화된 501, 그 외 메서드는 일반 404 대신 405다.
+	if clusterID, ok := clusterActionTarget(path); ok {
+		if r.Method == http.MethodPost {
+			if s.writeGate(w, r) {
+				s.clusterActionUnsupported(w, r, clusterID)
+			}
+			return
+		}
+		if r.Method != http.MethodOptions {
+			s.clusterActionMethodNotAllowed(w, r)
+			return
+		}
 	}
 
 	switch r.Method {
@@ -304,6 +318,7 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 		}
 		if path == "/api/devices" || fmtQ == "devices" || fmtQ == "device" || fmtQ == "serverdesk" {
 			out := deviceview.BuildDevices(fleet, s.DisplayCfg(), s.refreshSec())
+			out["capabilities"] = s.capabilities()
 			// 실 엣지 디바이스 — FT 클러스터 바로 뒤에 append.
 			devices := []map[string]any{}
 			for _, dv := range listAny(out["devices"]) {
@@ -363,6 +378,8 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 		s.handleConfigExport(w, r)
 	case "/api/admin/health":
 		s.send(w, r, 200, s.health(fleet, ts))
+	case "/api/capabilities":
+		s.send(w, r, 200, map[string]any{"capabilities": s.capabilities()})
 	case "/api/availability.csv":
 		s.handleAvailabilityCSV(w, r)
 	case "/api/health":
@@ -374,7 +391,9 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 			"service": "everrun-poller", "version": poller.Version,
 			"endpoints": []string{"/api/fleet", "/api/devices",
 				"/api/fleet?format=devices", "/api/topology",
-				"/api/topology?model=full", "/api/health", "/api/admin/health"}})
+				"/api/topology?model=full", "/api/health", "/api/admin/health",
+				"/api/capabilities"},
+			"capabilities": s.capabilities()})
 	default:
 		s.send(w, r, 404, map[string]any{"error": "not found", "path": path})
 	}

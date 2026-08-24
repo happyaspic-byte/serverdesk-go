@@ -215,6 +215,40 @@ func TestNotesShape(t *testing.T) {
 	}
 }
 
+func TestUIStateExportImportContract(t *testing.T) {
+	s := newTestServer(t, Options{StateDir: t.TempDir()})
+	input := map[string]any{
+		"ack":   map[string]any{"a": "2026-08-24T00:00:00Z"},
+		"maint": map[string]any{"m": map[string]any{"until": "2026-08-25T00:00:00Z"}},
+		"notes": map[string]any{"n": map[string]any{"text": "handoff"}},
+		"escal": map[string]any{"e": "2026-08-24T00:00:00Z"},
+		"extra": map[string]any{"ignored": true},
+	}
+	if err := s.ImportUIState(input); err != nil {
+		t.Fatalf("ImportUIState: %v", err)
+	}
+	exported := s.ExportUIState()
+	if len(exported) != 4 {
+		t.Fatalf("export keys=%v", exported)
+	}
+	for _, key := range []string{"ack", "maint", "notes", "escal"} {
+		got, ok := exported[key].(map[string]any)
+		if !ok || len(got) != 1 {
+			t.Fatalf("export[%s]=%#v", key, exported[key])
+		}
+	}
+	if _, ok := exported["extra"]; ok {
+		t.Fatal("unknown import key leaked into export")
+	}
+	if err := s.ImportUIState(map[string]any{"ack": "not-an-object"}); err == nil ||
+		!strings.Contains(err.Error(), "ui.ack") {
+		t.Fatalf("invalid import error=%v", err)
+	}
+	if err := s.ImportUIState(map[string]any{"unknown": "ignored"}); err != nil {
+		t.Fatalf("unknown key should be ignored: %v", err)
+	}
+}
+
 func TestEscalClaimLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	s := newTestServer(t, Options{StateDir: dir})

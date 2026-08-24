@@ -1,21 +1,47 @@
 [Unit]
-Description=serverdesk-go — FT 인프라 모니터링 콘솔 (Go 단일 바이너리)
-# serverdesk-net(보조 IP + 트랩 162→10162 리다이렉트) 이후에 뜬다 — 트랩 경로 선행 확보.
+Description=serverdesk-go — FT infrastructure monitoring console
+Documentation=https://github.com/happyaspic-byte/serverdesk-go
 After=network-online.target serverdesk-net.service
-Wants=network-online.target
+Wants=network-online.target serverdesk-net.service
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/projects/serverdesk-go
-# Go 런타임 메모리 상한 설정 (OOM 방지 및 GC 목표 힙 제한)
+User=serverdesk
+Group=serverdesk
+WorkingDirectory=/var/lib/serverdesk
 Environment=GOMEMLIMIT=400MiB
-# gitignore 된 로컬 env 파일은 PATH 등 호스트별 실행 환경에만 사용한다.
-# 웹 인증은 로컬 auth.json의 관리자 비밀번호와 서버 세션이 담당한다.
-EnvironmentFile=-/home/ubuntu/projects/serverdesk-go/serverdesk.local.env
-ExecStart=/home/ubuntu/projects/serverdesk-go/serverdesk -c config.local.json -auth auth.json
+# This file is for non-secret runtime settings only. Device secrets belong in
+# systemd credentials and are referenced as secret://NAME from config.local.json.
+EnvironmentFile=-/etc/serverdesk/serverdesk.env
+ExecStart=/opt/serverdesk/serverdesk -c /var/lib/serverdesk/config.local.json -auth /var/lib/serverdesk/auth.json
 Restart=on-failure
-RestartSec=5
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+# The daemon and all collectors run unprivileged. Only the state directory is
+# writable; program files, home directories, kernel state, and devices are not.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/serverdesk
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

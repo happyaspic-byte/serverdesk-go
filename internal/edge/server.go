@@ -65,8 +65,12 @@ func redfishGet(ctx context.Context, cl *http.Client, host, user, pw, path strin
 	if resp.StatusCode >= 400 {
 		return nil, &httpStatusError{Code: resp.StatusCode}
 	}
+	data, err := readLimitedBody(resp.Body, maxDeviceResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var v any
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+	if err := json.Unmarshal(data, &v); err != nil {
 		return nil, &jsonSyntaxError{Err: err}
 	}
 	return jm(v), nil

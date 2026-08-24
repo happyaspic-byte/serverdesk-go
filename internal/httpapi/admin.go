@@ -9,7 +9,6 @@ package httpapi
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -454,19 +453,30 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 		}
 	}
 
+	// Resolve references before persistence so a missing runtime credential cannot
+	// leave a half-added device in the file. Plaintext is retained in this copy;
+	// Store.AddEntry converts it to secret:// before it reaches disk.
+	var devCfg config.EdgeDevice
+	if b, err := json.Marshal(entry); err == nil {
+		_ = json.Unmarshal(b, &devCfg)
+	}
+	if err := config.ResolveEdgeDeviceSecretReferences(&devCfg); err != nil {
+		logf("error", "manage", fmt.Sprintf("엣지 자격증명 해석 실패(%s): %v", key, err))
+		s.send(w, r, 400, map[string]any{"error": "자격증명 참조를 읽을 수 없습니다"})
+		return
+	}
+	for _, secret := range []string{devCfg.Community, devCfg.WebPassword, devCfg.Password, devCfg.BmcPassword} {
+		config.RegisterSecret(secret)
+	}
 	if err := s.Store.AddEntry(config.SectionEdgeDevices, entry); err != nil {
 		logf("error", "manage", fmt.Sprintf("config 추가 저장 실패(%s): %v", key, err))
 		s.send(w, r, 500, map[string]any{"error": "config 저장 실패 — 폴러 로그를 확인하세요"})
 		return
 	}
 	// 핫애드 — 설정·워커 동시 반영(다음 라운드부터 실폴러, 수 초 내 첫 라운드).
-	var devCfg config.EdgeDevice
-	if b, err := json.Marshal(entry); err == nil {
-		_ = json.Unmarshal(b, &devCfg)
-	}
 	s.Cfg.EdgeDevices = append(s.Cfg.EdgeDevices, devCfg)
 	if s.Edge != nil {
-		if b, err := json.Marshal(entry); err == nil {
+		if b, err := json.Marshal(devCfg); err == nil {
 			var dc edge.DeviceConfig
 			if json.Unmarshal(b, &dc) == nil {
 				s.Edge.Add(dc)
@@ -659,15 +669,6 @@ func finsProbe(ctx context.Context, ip string, port int, cmd []byte, sa1 byte) (
 	return len(resp) >= 14 && resp[12] == 0 && resp[13] == 0, rtt
 }
 
-// insecureHTTP 는 자체서명 인증서의 장비 웹 API(PVE/Redfish)용 클라이언트다.
-// 폐쇄망 장비는 CA 체인이 없어 검증을 끈다(Python ssl._create_unverified_context).
-var insecureHTTP = &http.Client{
-	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec — 폐쇄망 장비 계약
-	},
-}
-
 // pveTicket 은 Proxmox 티켓 발급 POST 다(읽기 목적의 인증 프로브).
 // 반환: (HTTP 상태코드, 오류). 상태코드가 0 이면 전송 자체 실패다.
 func pveTicket(ctx context.Context, ip, user, pw, fp string) (int, error) {
@@ -678,10 +679,7 @@ func pveTicket(ctx context.Context, ip, user, pw, fp string) (int, error) {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	cl := insecureHTTP
-	if fp != "" {
-		cl = edge.DeviceHTTPClient(5*time.Second, fp)
-	}
+	cl := edge.DeviceHTTPClient(5*time.Second, fp)
 	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, err
@@ -701,10 +699,7 @@ func redfishGet(ctx context.Context, host, user, pw, path, fp string) (int, erro
 		return 0, err
 	}
 	req.SetBasicAuth(user, pw)
-	cl := insecureHTTP
-	if fp != "" {
-		cl = edge.DeviceHTTPClient(5*time.Second, fp)
-	}
+	cl := edge.DeviceHTTPClient(5*time.Second, fp)
 	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, err

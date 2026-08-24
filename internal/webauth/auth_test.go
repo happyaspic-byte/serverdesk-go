@@ -1,13 +1,16 @@
 package webauth
 
 import (
+	"bytes"
 	"crypto/pbkdf2"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -46,8 +49,166 @@ func TestCredentials(t *testing.T) {
 	}
 }
 
+func TestDetectLoginLang(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+		nilReq bool
+	}{
+		{name: "nil request", want: "ko", nilReq: true},
+		{name: "empty defaults Korean", want: "ko"},
+		{name: "English", header: "en-US,en;q=0.8", want: "en"},
+		{name: "weighted English", header: "ko;q=0.2,en;q=0.9", want: "en"},
+		{name: "equal weights prefer Korean", header: "en;q=0.9,ko;q=0.9", want: "ko"},
+		{name: "disabled languages default Korean", header: "en;q=0,ko;q=0", want: "ko"},
+		{name: "case insensitive", header: "EN-gb", want: "en"},
+		{name: "unknown then malformed English weight", header: "fr, ,en;q=invalid", want: "en"},
+		{name: "highest duplicate wins", header: "en;q=0.1,ko;q=0.4,en;q=0.8", want: "en"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req *http.Request
+			if !tt.nilReq {
+				req = httptest.NewRequest(http.MethodGet, "/login", nil)
+				req.Header.Set("Accept-Language", tt.header)
+			}
+			if got := detectLoginLang(req); got != tt.want {
+				t.Fatalf("detectLoginLang(%q)=%q, want %q", tt.header, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteLoginPageLanguageHeadersAndHead(t *testing.T) {
+	manager := New(testCredentials)
+	next := `/devices?next="><script>alert(1)</script>`
+
+	getReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	getReq.Header.Set("Accept-Language", "en")
+	getRec := httptest.NewRecorder()
+	manager.writeLoginPage(getRec, getReq, http.StatusUnauthorized,
+		"아이디 또는 비밀번호가 올바르지 않습니다.", next)
+	if getRec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET status=%d", getRec.Code)
+	}
+	body := getRec.Body.String()
+	for _, want := range []string{"Administrator Login", "Invalid username or password.", "&lt;script&gt;"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("GET body missing %q", want)
+		}
+	}
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatal("next value was not HTML-escaped")
+	}
+	if got := getRec.Header().Get("Content-Length"); got != fmt.Sprint(getRec.Body.Len()) {
+		t.Fatalf("Content-Length=%q body=%d", got, getRec.Body.Len())
+	}
+	if got := getRec.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("Content-Type=%q", got)
+	}
+	if getRec.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(getRec.Header().Get("Content-Security-Policy"), "form-action 'self'") {
+		t.Fatalf("login hardening headers=%v", getRec.Header())
+	}
+
+	headReq := httptest.NewRequest(http.MethodHead, "/login", nil)
+	headReq.Header.Set("Accept-Language", "ko")
+	headRec := httptest.NewRecorder()
+	manager.writeLoginPage(headRec, headReq, http.StatusOK,
+		"로그인 요청을 읽을 수 없습니다.", "/")
+	if headRec.Code != http.StatusOK || headRec.Body.Len() != 0 {
+		t.Fatalf("HEAD status/body=%d/%q", headRec.Code, headRec.Body.String())
+	}
+	if n, err := strconv.Atoi(headRec.Header().Get("Content-Length")); err != nil || n <= 0 {
+		t.Fatalf("HEAD Content-Length=%q err=%v", headRec.Header().Get("Content-Length"), err)
+	}
+
+	for input, translated := range map[string]string{
+		"로그인 요청을 읽을 수 없습니다.":              "Unable to read login request.",
+		"로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.": "Too many login attempts. Please try again later.",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/login", nil)
+		req.Header.Set("Accept-Language", "en")
+		rec := httptest.NewRecorder()
+		manager.writeLoginPage(rec, req, http.StatusBadRequest, input, "/")
+		if !strings.Contains(rec.Body.String(), translated) {
+			t.Fatalf("translation %q missing from body", translated)
+		}
+	}
+}
+
+func TestSessionCapacityEvictsOldest(t *testing.T) {
+	manager := New(testCredentials)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+
+	var oldest [sha256.Size]byte
+	for i := 0; i < maxSessions; i++ {
+		token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{byte(i)}, 32))
+		key := sha256.Sum256([]byte(token))
+		if i == 0 {
+			oldest = key
+		}
+		manager.sessions[key] = now.Add(time.Duration(i+1) * time.Minute)
+	}
+	manager.random = bytes.NewReader(bytes.Repeat([]byte{0xfe}, 32))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "https://serverdesk.local/login", nil)
+	if err := manager.startSession(rec, req); err != nil {
+		t.Fatalf("startSession: %v", err)
+	}
+	if len(manager.sessions) != maxSessions {
+		t.Fatalf("sessions=%d, want %d", len(manager.sessions), maxSessions)
+	}
+	if _, ok := manager.sessions[oldest]; ok {
+		t.Fatal("oldest session was not evicted")
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].Secure {
+		t.Fatalf("new secure cookie=%#v", cookies)
+	}
+
+	manager.sessions[[sha256.Size]byte{0xff}] = now
+	manager.mu.Lock()
+	manager.purgeSessionsLocked(now)
+	manager.mu.Unlock()
+	if _, ok := manager.sessions[[sha256.Size]byte{0xff}]; ok {
+		t.Fatal("expired session was not purged")
+	}
+}
+
+func TestAuditMutationsUsesTrustedIdentityAndLogsPanic(t *testing.T) {
+	var messages []string
+	handler := AuditMutations(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("handler failure")
+	}), func(message string) { messages = append(messages, message) })
+	req := httptest.NewRequest(http.MethodPut, "/ack?token=must-not-be-logged",
+		strings.NewReader(`{"password":"must-not-be-logged"}`))
+	req.RemoteAddr = "127.0.0.1:4321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.44")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("handler panic was swallowed")
+			}
+		}()
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	if len(messages) != 1 || !strings.Contains(messages[0], `path="/ack"`) ||
+		!strings.Contains(messages[0], "status=500") || !strings.Contains(messages[0], "remote=203.0.113.44") {
+		t.Fatalf("panic audit=%v", messages)
+	}
+	if strings.Contains(messages[0], "token") || strings.Contains(messages[0], "must-not-be-logged") {
+		t.Fatalf("audit included query/body: %q", messages[0])
+	}
+}
+
 func TestLoginSessionAndLogout(t *testing.T) {
 	manager := New(testCredentials)
+	var auditEvents []string
+	manager.SetAuditLogger(func(message string) { auditEvents = append(auditEvents, message) })
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
@@ -161,6 +322,15 @@ func TestLoginSessionAndLogout(t *testing.T) {
 	handler.ServeHTTP(reused, reusedReq)
 	if reused.Code != http.StatusUnauthorized {
 		t.Fatalf("logged-out session reuse = %d, want 401", reused.Code)
+	}
+	joinedAudit := strings.Join(auditEvents, "\n")
+	for _, event := range []string{"event=login_failed", "event=login_success", "event=logout"} {
+		if !strings.Contains(joinedAudit, event) {
+			t.Fatalf("audit events missing %q: %s", event, joinedAudit)
+		}
+	}
+	if strings.Contains(joinedAudit, fixedTestPassword) || strings.Contains(joinedAudit, "wrong") {
+		t.Fatalf("audit events contain credential material: %s", joinedAudit)
 	}
 }
 

@@ -10,10 +10,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	maxDeviceResponseBytes           = 8 << 20
+	maxCompressedDeviceResponseBytes = 2 << 20
 )
 
 // httpStatusError — HTTP 4xx/5xx 응답. Python urllib.error.HTTPError 에 해당.
@@ -92,13 +99,12 @@ func ParseFingerprint(fp string) ([]byte, error) {
 	return nil, fmt.Errorf("tls: 유효하지 않은 핑거프린트 형식입니다: %q", fp)
 }
 
-// NewTLSConfig 는 핑거프린트 피닝을 지원하는 tls.Config 를 반환한다.
-// 핑거프린트가 지정되면 InsecureSkipVerify=true 를 유지하되 VerifyPeerCertificate 콜백에서
-// 피어 인증서의 SPKI SHA-256 지문을 상수시간 비교(subtle.ConstantTimeCompare)하여 불일치 시 연결을 차단한다.
-// 핑거프린트가 미지정이면 기존 동작(폐쇄망 자체서명 인증서 스킵)을 유지한다.
+// NewTLSConfig 는 시스템 CA 검증(기본) 또는 명시적 SPKI SHA-256 피닝을 사용하는
+// tls.Config 를 반환한다. 핑거프린트가 지정된 경우에만 자체서명 장비를 허용하며,
+// VerifyPeerCertificate 에서 공개키 지문을 상수시간 비교해 불일치 연결을 차단한다.
 func NewTLSConfig(fingerprint string) (*tls.Config, error) {
 	if strings.TrimSpace(fingerprint) == "" {
-		return &tls.Config{InsecureSkipVerify: true}, nil //nolint:gosec — 폐쇄망 자체서명 전용 기본 동작
+		return &tls.Config{MinVersion: tls.VersionTLS12}, nil
 	}
 	expectedFP, err := ParseFingerprint(fingerprint)
 	if err != nil {
@@ -106,6 +112,7 @@ func NewTLSConfig(fingerprint string) (*tls.Config, error) {
 	}
 
 	return &tls.Config{
+		MinVersion:         tls.VersionTLS12,
 		InsecureSkipVerify: true, //nolint:gosec — CA 체인 없는 자체서명 허용 후 아래 콜백에서 SPKI 지문 검증
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
@@ -114,6 +121,11 @@ func NewTLSConfig(fingerprint string) (*tls.Config, error) {
 			cert, err := x509.ParseCertificate(rawCerts[0])
 			if err != nil {
 				return fmt.Errorf("tls: 피어 인증서 파싱 실패: %w", err)
+			}
+			now := time.Now()
+			if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+				return fmt.Errorf("tls: 피어 인증서 유효기간을 벗어났습니다 (not_before=%s, not_after=%s)",
+					cert.NotBefore.UTC().Format(time.RFC3339), cert.NotAfter.UTC().Format(time.RFC3339))
 			}
 			spkiHash := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
 			if subtle.ConstantTimeCompare(spkiHash[:], expectedFP) != 1 {
@@ -130,6 +142,7 @@ func DeviceHTTPClient(timeout time.Duration, fingerprint string) *http.Client {
 	tlsCfg, err := NewTLSConfig(fingerprint)
 	if err != nil {
 		tlsCfg = &tls.Config{
+			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: true, //nolint:gosec
 			VerifyPeerCertificate: func([][]byte, [][]*x509.Certificate) error {
 				return fmt.Errorf("유효하지 않은 tls_fingerprint 설정: %w", err)
@@ -138,6 +151,15 @@ func DeviceHTTPClient(timeout time.Duration, fingerprint string) *http.Client {
 	}
 	return &http.Client{
 		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) == 0 || !sameHTTPSOrigin(req.URL, via[0].URL) {
+				return errors.New("edge: cross-origin or non-HTTPS redirect refused")
+			}
+			if len(via) >= 5 {
+				return errors.New("edge: too many redirects")
+			}
+			return nil
+		},
 		Transport: &http.Transport{
 			TLSClientConfig:     tlsCfg,
 			MaxIdleConnsPerHost: 2,
@@ -145,10 +167,34 @@ func DeviceHTTPClient(timeout time.Duration, fingerprint string) *http.Client {
 	}
 }
 
-// insecureClient — 자가서명 장비 전용 HTTPS 클라이언트.
-// 폐쇄망 내부 장비(프린터·PVE·BMC)는 전부 자체서명이라 검증을 생략한다.
-// 대신 용도를 이 파일로 한정해 외부망 호출에 재사용되지 않게 한다.
-func insecureClient(timeout time.Duration) *http.Client {
+func sameHTTPSOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || !strings.EqualFold(a.Scheme, "https") || !strings.EqualFold(b.Scheme, "https") ||
+		!strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	port := func(u *url.URL) string {
+		if value := u.Port(); value != "" {
+			return value
+		}
+		return "443"
+	}
+	return port(a) == port(b)
+}
+
+func readLimitedBody(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("edge: device response exceeds %d bytes", limit)
+	}
+	return data, nil
+}
+
+// verifiedClient — 시스템 신뢰 저장소와 호스트명 검증을 사용하는 기본 HTTPS 클라이언트.
+// 자체서명 장비는 장비별 tls_fingerprint 를 명시해야 한다.
+func verifiedClient(timeout time.Duration) *http.Client {
 	return DeviceHTTPClient(timeout, "")
 }
 

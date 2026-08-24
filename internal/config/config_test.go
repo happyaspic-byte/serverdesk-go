@@ -94,6 +94,7 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestNestedTrapOverlay(t *testing.T) {
 	data := []byte(`{
+		"secret_policy": "allow-plaintext",
 		"clusters": [{"key": "a", "mgmt_ip": "10.0.0.1"}],
 		"trap": {"enabled": false, "port": 1162, "community": "fake-nested-community"}
 	}`)
@@ -109,6 +110,24 @@ func TestNestedTrapOverlay(t *testing.T) {
 	}
 	if c.Trap.Ring != 500 {
 		t.Errorf("trap.ring = %d, want default 500", c.Trap.Ring)
+	}
+}
+
+func TestTransportDefaultsAndTLSKeyPairValidation(t *testing.T) {
+	c, err := Parse([]byte(`{"clusters":[]}`))
+	if err != nil {
+		t.Fatalf("Parse defaults: %v", err)
+	}
+	if c.Listen != "127.0.0.1:9891" {
+		t.Fatalf("default listen = %q, want loopback", c.Listen)
+	}
+	for _, raw := range []string{
+		`{"clusters":[],"tls_cert_file":"server.crt"}`,
+		`{"clusters":[],"tls_key_file":"server.key"}`,
+	} {
+		if _, err := Parse([]byte(raw)); err == nil {
+			t.Fatalf("accepted incomplete TLS key pair: %s", raw)
+		}
 	}
 }
 

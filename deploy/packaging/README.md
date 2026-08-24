@@ -1,6 +1,23 @@
 # 배포 스크립트 정본 — dist/serverdesk-pkg/ 조립 시 여기서 복사한다.
 # 수정은 이 디렉터리에서 하고, dist 는 결과물(gitignore)이다.
 
+## Linux package
+
+Linux payload에는 `serverdesk-linux-amd64`, `config.example.json`, `deploy/serverdesk.service`,
+`deploy/serverdesk-net.service`와 이 디렉터리의 `serverdesk-network.sh` /
+`serverdesk-network.env.example`이 모두 포함되어야 한다. 설치·업데이트는 같은 transactional
+installer를 사용한다.
+
+```bash
+sh deploy/packaging/validate-deployment.sh
+sudo sh deploy/packaging/install-linux.sh
+sudo sh deploy/packaging/update-linux.sh
+```
+
+rootless validation은 특정 고객 IP/NIC의 재유입, unit sandbox/capability 회귀, network config
+injection과 systemd unit 문법을 검사한다. 자세한 production 절차는
+[`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md)를 참고한다.
+
 ## Windows 7z SFX
 
 Use the full installer module `7zSD.sfx`. Do not use `7zS2.sfx` or

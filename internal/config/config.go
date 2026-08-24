@@ -199,7 +199,11 @@ type Thresholds struct {
 }
 
 type Config struct {
+	SecretPolicy       string          `json:"secret_policy"` // require-references | allow-plaintext (마이그레이션 전용)
 	Listen             string          `json:"listen"`
+	TLSCertFile        string          `json:"tls_cert_file,omitempty"`       // 직접 HTTPS 리스너 인증서(PEM)
+	TLSKeyFile         string          `json:"tls_key_file,omitempty"`        // 직접 HTTPS 리스너 개인키(PEM)
+	AllowInsecureHTTP  bool            `json:"allow_insecure_http,omitempty"` // 비루프백 평문 호환 모드(break-glass, 운영 비권장)
 	LogLevel           string          `json:"log_level"`
 	AvcliBin           string          `json:"avcli_bin"`
 	AvcliArgs          []string        `json:"avcli_args"`
@@ -297,7 +301,13 @@ func Parse(data []byte) (*Config, error) {
 
 	// --- 최상위 기본값 ---
 	if _, ok := top["listen"]; !ok {
-		c.Listen = "0.0.0.0:9891"
+		c.Listen = "127.0.0.1:9891"
+	}
+	if _, ok := top["secret_policy"]; !ok {
+		c.SecretPolicy = SecretPolicyRequireReferences
+	}
+	if err := validateSecretPolicy(c.SecretPolicy); err != nil {
+		return nil, err
 	}
 	if _, ok := top["log_level"]; !ok {
 		c.LogLevel = "info"
@@ -333,6 +343,9 @@ func Parse(data []byte) (*Config, error) {
 	}
 	if _, ok := top["cors_allowed_origins"]; !ok {
 		c.CORSAllowedOrigins = []string{}
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return nil, errors.New("tls_cert_file 과 tls_key_file 은 함께 설정해야 합니다")
 	}
 
 	// --- intervals: 기본값 위에 파일에 명시된 키만 병합 ---
@@ -404,6 +417,12 @@ func Parse(data []byte) (*Config, error) {
 		}
 	}
 	if err := validateAvcliExecutable(runtime.GOOS, c.AvcliBin); err != nil {
+		return nil, err
+	}
+
+	// secret:// 참조는 검증과 worker 구성 전에 메모리에서만 실제 값으로 푼다.
+	// 원본 JSON과 Store RMW 문서에는 참조만 남으므로 API export/백업에도 평문이 없다.
+	if err := resolveConfigSecrets(&c); err != nil {
 		return nil, err
 	}
 

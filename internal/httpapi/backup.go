@@ -38,6 +38,10 @@ const backupSchema = "serverdesk-config/1"
 // secretKeyRe 는 마스킹 대상 필드명 패턴이다(대소문자 무시, 부분문자열).
 var secretKeyRe = regexp.MustCompile(`(?i)password|passwd|secret|token|community|api_key|private_key`)
 
+func isSecretKey(key string) bool {
+	return !strings.EqualFold(key, "secret_policy") && secretKeyRe.MatchString(key)
+}
+
 // liveOKSections 은 import 시 라이브 반영되는(재시작 불필요) 최상위 섹션이다.
 var liveOKSections = map[string]bool{"thresholds": true}
 
@@ -47,7 +51,7 @@ func redactSecrets(v any) any {
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			if secretKeyRe.MatchString(k) {
+			if isSecretKey(k) {
 				if _, isStr := val.(string); isStr {
 					out[k] = ""
 					continue
@@ -74,7 +78,7 @@ func mergeSecrets(newV, oldV any) {
 	case map[string]any:
 		ot, _ := oldV.(map[string]any)
 		for k, val := range nt {
-			if secretKeyRe.MatchString(k) {
+			if isSecretKey(k) {
 				if sv, isStr := val.(string); isStr && sv == "" && ot != nil {
 					if ov, ok := ot[k].(string); ok && ov != "" {
 						nt[k] = ov

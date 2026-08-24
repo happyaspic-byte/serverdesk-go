@@ -278,6 +278,52 @@ function normalizeTrap(t) {
  */
 export const API_URL = '/api/devices';
 
+const CLUSTER_ACTIONS_DEFAULT_REASON = 'Server did not advertise cluster action support.';
+const CLUSTER_ACTIONS_DEFAULT_REASON_KO = '서버가 클러스터 제어 지원을 알리지 않았습니다.';
+
+/**
+ * 서버 capability 응답을 fail-closed 형태로 정규화한다.
+ * supported=true 뿐 아니라 개별 action allowlist에도 있어야 실행 가능하다.
+ */
+export function normalizeCapabilities(raw) {
+  const root = raw && typeof raw === 'object' ? raw : {};
+  const src = root.cluster_actions && typeof root.cluster_actions === 'object'
+    ? root.cluster_actions : {};
+  const actions = Array.isArray(src.actions)
+    ? Array.from(new Set(src.actions.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim())))
+    : [];
+  const supported = src.supported === true;
+  return {
+    cluster_actions: {
+      supported,
+      // 빈 allowlist를 "모두 허용"으로 해석하지 않는다. 광고되지 않은 action은 항상 차단한다.
+      actions: supported ? actions : [],
+      endpoint: typeof src.endpoint === 'string' ? src.endpoint : '/api/clusters/{id}/action',
+      reason: typeof src.reason === 'string' && src.reason.trim()
+        ? src.reason.trim() : CLUSTER_ACTIONS_DEFAULT_REASON,
+      reason_ko: typeof src.reason_ko === 'string' && src.reason_ko.trim()
+        ? src.reason_ko.trim() : CLUSTER_ACTIONS_DEFAULT_REASON_KO,
+    },
+  };
+}
+
+/** 특정 cluster action의 실행 가능 여부. 누락·오염·부분 광고 모두 기본 거절한다. */
+export function clusterActionAvailability(capabilities, action) {
+  const cap = normalizeCapabilities(capabilities).cluster_actions;
+  const key = String(action || '');
+  if (!cap.supported) {
+    return { supported: false, reason: cap.reason, reason_ko: cap.reason_ko };
+  }
+  if (!cap.actions.includes(key)) {
+    return {
+      supported: false,
+      reason: 'Server did not advertise support for action: ' + key,
+      reason_ko: '서버가 이 제어 작업의 지원을 알리지 않았습니다: ' + key,
+    };
+  }
+  return { supported: true, reason: '', reason_ko: '' };
+}
+
 function redirectToLogin() {
   if (typeof window === 'undefined' || !window.location) return;
   const next = window.location.pathname + window.location.search + window.location.hash;
@@ -334,6 +380,8 @@ export async function pull(url, timeoutMs) {
       // 사용률 임계값 — 서버(config.thresholds) 정본. pullPatch 가 라이브 반영한다.
       thresholds: (j && j.thresholds && typeof j.thresholds.warn === 'number' && typeof j.thresholds.crit === 'number')
         ? { warn: j.thresholds.warn, crit: j.thresholds.crit } : null,
+      // 변경 기능은 서버 광고만 신뢰한다. 필드가 없는 구버전 서버는 안전하게 미지원 처리.
+      capabilities: normalizeCapabilities(j && j.capabilities),
       // 폴러가 실장비에서 읽은 뒤 흐른 시간. 클라이언트 수신 시각(lastPoll)과 다르다 —
       // 수집이 밀리면 '방금 받았지만 값은 몇 분 낡은' 상태가 되고, lastPoll 만 보면 그걸 못 본다.
       cacheAgeSec: (j && typeof j.cache_age_secs === 'number' && j.cache_age_secs >= 0)
@@ -404,6 +452,7 @@ export async function pullPatch(state, url, timeoutMs) {
       // 백엔드 총평 — compute 가 자체 재도출값과 대조해 더 나쁜 쪽을 택한다.
       pollerOverall: r.overall || null,
       thresholds: r.thresholds || null,
+      capabilities: r.capabilities,
       cacheAgeSec: r.cacheAgeSec,
     };
   }
