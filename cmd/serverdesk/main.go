@@ -26,6 +26,7 @@ import (
 	"serverdesk/internal/alerting"
 	"serverdesk/internal/avcli"
 	"serverdesk/internal/config"
+	demodata "serverdesk/internal/demo"
 	"serverdesk/internal/deviceview"
 	"serverdesk/internal/edge"
 	"serverdesk/internal/httpapi"
@@ -90,6 +91,7 @@ func main() {
 		credentialsDir  string
 		logLevelFlag    string
 		once            bool
+		demoMode        bool
 		allowArgv       bool
 		showVersion     bool
 	)
@@ -111,6 +113,7 @@ func main() {
 	flag.StringVar(&credentialsDir, "credentials-dir", "", "-set-device-secret 대상 디렉터리")
 	flag.StringVar(&logLevelFlag, "log-level", "", "로그 레벨(debug/info/warn/error)")
 	flag.BoolVar(&once, "once", false, "1회 수집 후 fleet JSON 을 stdout 에 출력하고 종료(진단용)")
+	flag.BoolVar(&demoMode, "demo", false, "루프백 전용 읽기 전용 샘플 장비 3대 표시(실장비 수집 없음)")
 	flag.BoolVar(&allowArgv, "allow-argv-exposure", false,
 		"avcli 암호가 ps 에 노출되는 환경(/proc hidepid 미적용 + 다른 로그인 계정 존재)에서도 강제로 기동한다")
 	flag.BoolVar(&showVersion, "version", false, "버전 출력 후 종료")
@@ -240,7 +243,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if needsArgvExposureCheck(cfg) {
+	if !demoMode && needsArgvExposureCheck(cfg) {
 		warn, err := config.CheckArgvExposure(allowArgv)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, config.Mask(err.Error()))
@@ -264,6 +267,10 @@ func main() {
 		addr: listen, certFile: tlsCert, keyFile: tlsKey,
 		allowInsecureHTTP: allowHTTP || cfg.AllowInsecureHTTP,
 	}
+	if err := validateDemoMode(demoMode, once, cfg, transport); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if !once {
 		if err := transport.validate(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -274,6 +281,10 @@ func main() {
 		logMsg("warn", "-", "비루프백 평문 HTTP break-glass 모드입니다; forwarded header를 신뢰하지 않으므로 운영에서는 직접 TLS 또는 루프백 프록시를 사용하십시오")
 	}
 	runtimeDir := poller.ExpandUser(cfg.RuntimeDir)
+	if demoMode {
+		runtimeDir = demoRuntimeDir(runtimeDir)
+		logMsg("info", "demo", "읽기 전용 샘플 모드 활성화 — 실장비 수집과 외부 알림이 비활성화됩니다")
+	}
 
 	sshRunner, err := sshmetrics.NewRunner(runtimeDir, time.Duration(cfg.SSHTimeout)*time.Second)
 	if err != nil {
@@ -394,7 +405,7 @@ func main() {
 	// 배포 전에 ack-state.json 을 여기로 이관한다.
 	webSrv := webfront.New(web.FS, webfront.Options{
 		StateDir:    runtimeDir,
-		AllowWrites: true,
+		AllowWrites: !demoMode,
 		NotifyHosts: nil,
 	})
 
@@ -405,6 +416,10 @@ func main() {
 	overlay := httpapi.NewDisplayOverlay(cfg)
 	apiSrv := httpapi.New(cache, states, cfg, store, eventLog, avail, edgeMgr, webSrv,
 		cfg.CORSAllowedOrigins, overlay)
+	if demoMode {
+		apiSrv.DemoMode = true
+		apiSrv.SampleDevices = demodata.Devices
+	}
 
 	// Server-resident critical delivery. The source is the same fleet+edge
 	// snapshot consumed by the UI, but the engine has its own persisted queue and

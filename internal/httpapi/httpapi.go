@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"serverdesk/internal/config"
+	demodata "serverdesk/internal/demo"
 	"serverdesk/internal/deviceview"
 	"serverdesk/internal/poller"
 	"serverdesk/internal/webfront"
@@ -50,6 +51,11 @@ type Server struct {
 	Gate *webfront.Server
 	// Notifier is the optional server-resident critical webhook controller.
 	Notifier NotificationController
+	// DemoMode replaces the live /api/devices view with a read-only sample
+	// inventory. SampleDevices is injected by main so tests can prove that no
+	// live cache or edge record is mixed into the response.
+	DemoMode      bool
+	SampleDevices func() []map[string]any
 
 	StartedAt time.Time
 	CORS      []string
@@ -186,6 +192,31 @@ func (s *Server) refreshSec() int {
 	return best
 }
 
+func (s *Server) sampleDeviceResponse() (map[string]any, bool) {
+	if !s.DemoMode || s.SampleDevices == nil {
+		return nil, false
+	}
+	devices := s.SampleDevices()
+	warnT, critT := poller.UsageThresholds()
+	return map[string]any{
+		"schema":         "serverdesk/device@1",
+		"generated_at":   time.Now().Unix(),
+		"poller_version": poller.Version,
+		"overall":        "warning",
+		"stale":          false,
+		"refreshSec":     int64(30),
+		"count":          len(devices),
+		"devices":        devices,
+		"events":         []any{},
+		"thresholds":     map[string]any{"warn": warnT, "crit": critT},
+		"capabilities":   s.capabilities(),
+		"cache_age_secs": float64(0),
+		"source":         demodata.Source,
+		"demo":           true,
+		"sample":         true,
+	}, true
+}
+
 // --- 응답 공통 ---------------------------------------------------------------
 
 // corsHeaders 는 요청 Origin 이 allowlist 에 있을 때만 그 출처를 반향한다.
@@ -292,6 +323,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.send(w, r, 500, map[string]any{"error": "internal"})
 		}
 	}()
+	if s.DemoMode && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete) {
+		s.send(w, r, http.StatusForbidden, map[string]any{
+			"error":  "sample mode is read-only",
+			"code":   "demo_mode_read_only",
+			"source": demodata.Source,
+		})
+		return
+	}
 	// 액션 endpoint 는 현재 mutation 구현이 없지만 라우트 계약 자체는 명시한다.
 	// POST 는 쓰기 가드를 거친 구조화된 501, 그 외 메서드는 일반 404 대신 405다.
 	if clusterID, ok := clusterActionTarget(path); ok {
@@ -330,9 +369,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // doGet 은 읽기 라우팅이다.
 func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs map[string][]string) {
-	fleet, topo, ts := s.Cache.Snapshot()
+	var fleet, topo map[string]any
+	var ts float64
+	if s.Cache != nil {
+		fleet, topo, ts = s.Cache.Snapshot()
+	}
 	switch path {
 	case "/api/fleet", "/api/fleet.json", "/api/devices":
+		fmtQ := ""
+		if v := qs["format"]; len(v) > 0 {
+			fmtQ = lowerASCII(v[0])
+		}
+		wantDevices := path == "/api/devices" || fmtQ == "devices" || fmtQ == "device" || fmtQ == "serverdesk"
+		if wantDevices && s.DemoMode {
+			if out, ok := s.sampleDeviceResponse(); ok {
+				s.send(w, r, 200, out)
+			} else {
+				s.send(w, r, 503, map[string]any{
+					"error": "sample data unavailable", "code": "sample_data_unavailable",
+					"source": demodata.Source, "stale": true, "devices": []any{},
+				})
+			}
+			return
+		}
 		if fleet == nil {
 			s.send(w, r, 503, map[string]any{
 				"error": "no data yet", "stale": true,
@@ -340,11 +399,7 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 				"generated_at": time.Now().Unix()})
 			return
 		}
-		fmtQ := ""
-		if v := qs["format"]; len(v) > 0 {
-			fmtQ = lowerASCII(v[0])
-		}
-		if path == "/api/devices" || fmtQ == "devices" || fmtQ == "device" || fmtQ == "serverdesk" {
+		if wantDevices {
 			out := deviceview.BuildDevices(fleet, s.DisplayCfg(), s.refreshSec())
 			out["capabilities"] = s.capabilities()
 			// 실 엣지 디바이스 — FT 클러스터 바로 뒤에 append.
@@ -375,6 +430,11 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 		// 캐시가 오래됐어도 stale 플래그만 덧붙여 그대로 제공(빈 응답 금지).
 		out := shallowCopy(fleet)
 		out["cache_age_secs"] = round1(nowFloat() - ts)
+		if s.DemoMode {
+			out["source"] = demodata.Source
+			out["demo"] = true
+			out["sample"] = true
+		}
 		s.send(w, r, 200, out)
 	case "/api/topology", "/api/topology/full":
 		wantFull := strings.HasSuffix(path, "/full")

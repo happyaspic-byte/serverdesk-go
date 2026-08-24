@@ -13,6 +13,12 @@ import { TYPE_KEYS } from '../model/data.js';
 
 const DASH = '—';
 
+function isSampleState(state) {
+  const st = state || {};
+  return st.sampleMode === true || st.demoMode === true
+    || st.source === 'sample' || st.source === 'demo';
+}
+
 /* ── 타입 카드(위저드 ①) 정의 — Vigil ManageScreen TYPES 이식 ────────────── */
 function typeDefs(L) {
   return [
@@ -319,10 +325,15 @@ const screen = {
 
     this.elTitle.textContent = L('Devices', '장비');
     this.elAdd.lastChild.textContent = L('Add device', '장비 추가');
-    this.elSub.textContent = L(
-      'Company ▸ factory ▸ device — name · IP · status, add / edit / remove',
-      '회사 ▸ 공장 ▸ 장비 — 이름·IP·상태, 추가/수정/제거'
-    );
+    const sampleMode = isSampleState(state);
+    this.elAdd.disabled = sampleMode;
+    this.elAdd.title = sampleMode ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다') : '';
+    this.elSub.textContent = sampleMode
+      ? L('Read-only sample devices — configuration changes are disabled', '읽기 전용 샘플 장비 — 설정 변경이 비활성화됩니다')
+      : L(
+        'Company ▸ factory ▸ device — name · IP · status, add / edit / remove',
+        '회사 ▸ 공장 ▸ 장비 — 이름·IP·상태, 추가/수정/제거'
+      );
 
     // 폴러 연결 배너
     const liveErr = state.liveError || state.stale;
@@ -370,7 +381,7 @@ const screen = {
     // 직후 포커스를 잃어 연속 Enter/Space 조작이 깨진다(P7 회귀). 재생성 비용도 낭비.
     const sig = (state.lang || 'ko') + '|' + mode.kind + '|' + tree.map((c) => c.key + '+' + c.count
       + ':' + c.factories.map((f) => f.key
-        + ':' + f.devices.map((d) => d.id).join(',')).join(';')).join('|');
+        + ':' + f.devices.map((d) => d.id + (d.sample ? ':sample' : '')).join(',')).join(';')).join('|');
 
     if (sig !== this.treeSig) {
       this.treeSig = sig;
@@ -484,30 +495,35 @@ const screen = {
     mark.appendChild(dot);
 
     const name = el('span', { class: 'sc-mng-name u-mono' });
+    const sampleBadge = el('span', { class: 'u-badge is-warn sc-mng-sample', text: 'SAMPLE', hidden: !d.sample });
     const meta = el('span', { class: 'sc-mng-meta u-mono' });
     // 상태 뱃지는 전 화면 공통 매핑(저하=앰버 is-warn)으로 통일한다(렌즈3 상태색 일관).
     const stat = el('span', { class: 'u-badge sc-mng-stat' });
 
     const btnEdit = el('button', {
       class: 'sc-mng-act', type: 'button', 'data-mng-edit': d.id,
-      title: d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정'),
-      'aria-label': d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정'),
-      disabled: d.type === 'END',
+      title: d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다')
+        : (d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정')),
+      'aria-label': d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다')
+        : (d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정')),
+      disabled: d.type === 'END' || d.sample,
     }, [ctx.util.icon('pencil', { size: 14 })]);
     const btnDel = el('button', {
       class: 'sc-mng-act sc-mng-act--del', type: 'button', 'data-mng-del': d.id,
-      title: d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거'),
-      'aria-label': d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거'),
-      disabled: d.type === 'END',
+      title: d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다')
+        : (d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거')),
+      'aria-label': d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다')
+        : (d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거')),
+      disabled: d.type === 'END' || d.sample,
     }, [ctx.util.icon('close', { size: 14 })]);
 
     const row = el('div', { class: 'sc-mng-row', 'data-mng-row': d.id, role: 'button', tabindex: '0' }, [
       mark,
-      el('div', { class: 'sc-mng-idb' }, [name, meta]),
+      el('div', { class: 'sc-mng-idb' }, [name, sampleBadge, meta]),
       stat,
       el('div', { class: 'sc-mng-acts' }, [btnEdit, btnDel]),
     ]);
-    this.rowRefs.set(d.id, { row, dot, name, meta, stat });
+    this.rowRefs.set(d.id, { row, dot, name, sampleBadge, meta, stat });
     return row;
   },
 
@@ -522,11 +538,12 @@ const screen = {
     const dot = el('span', { class: 'sc-mng-mark-dot' });
     mark.appendChild(dot);
     const name = el('span', { class: 'sc-mng-name u-mono' });
+    const sampleBadge = el('span', { class: 'u-badge is-warn sc-mng-sample', text: 'SAMPLE', hidden: !d.sample });
     const meta = el('span', { class: 'sc-mng-meta u-mono' });
     const stat = el('span', { class: 'u-badge sc-mng-stat' });
     const top = el('div', { class: 'sc-mng-card-top' }, [
       mark,
-      el('div', { class: 'sc-mng-idb' }, [name, meta]),
+      el('div', { class: 'sc-mng-idb' }, [name, sampleBadge, meta]),
       stat,
     ]);
 
@@ -545,15 +562,19 @@ const screen = {
     const ver = el('span', { class: 'sc-mng-chip u-mono' });
     const btnEdit = el('button', {
       class: 'sc-mng-act', type: 'button', 'data-mng-edit': d.id,
-      title: d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정'),
-      'aria-label': d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정'),
-      disabled: d.type === 'END',
+      title: d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다')
+        : (d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정')),
+      'aria-label': d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다')
+        : (d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정')),
+      disabled: d.type === 'END' || d.sample,
     }, [ctx.util.icon('pencil', { size: 14 })]);
     const btnDel = el('button', {
       class: 'sc-mng-act sc-mng-act--del', type: 'button', 'data-mng-del': d.id,
-      title: d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거'),
-      'aria-label': d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거'),
-      disabled: d.type === 'END',
+      title: d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다')
+        : (d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거')),
+      'aria-label': d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다')
+        : (d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거')),
+      disabled: d.type === 'END' || d.sample,
     }, [ctx.util.icon('close', { size: 14 })]);
     const foot = el('div', { class: 'sc-mng-card-foot' }, [
       ver,
@@ -562,7 +583,7 @@ const screen = {
 
     const card = el('div', { class: 'sc-mng-card', 'data-mng-row': d.id, role: 'button', tabindex: '0' }, [top, metrics, foot]);
     this.rowRefs.set(d.id, {
-      row: card, dot, name, meta, stat,
+      row: card, dot, name, sampleBadge, meta, stat,
       mUp: mUp.val, mVm: mVm.val, mAvail: mAvail.val, mSync: mSync.val, ver,
     });
     return card;
@@ -587,6 +608,7 @@ const screen = {
     const nmFull = d.label || d.host || DASH;
     r.name.textContent = (d.company && nmFull.indexOf(d.company) === 0)
       ? (nmFull.slice(d.company.length).trim() || nmFull) : nmFull;
+    if (r.sampleBadge) r.sampleBadge.hidden = !d.sample;
     r.meta.textContent = [d.typeLabel, d.mgmt || d.site].filter(Boolean).join(' · ');
 
     const tone = d.statusTone === 'neg' ? 'is-neg' : (d.statusTone === 'warn' ? 'is-warn' : 'is-pos');
@@ -1344,6 +1366,10 @@ const screen = {
 
   /* ── 모달 열기/닫기 ───────────────────────────────────────────────────── */
   openAdd() {
+    if (isSampleState(this.ctx && this.ctx.store.getState())) {
+      this.ctx.showToast(this.ctx.L('Sample data is read-only.', '샘플 데이터는 조회만 가능합니다.'));
+      return;
+    }
     const f = emptyForm();
     this.modalSig = '';
     this.ctx.store.setState({ form: f, wizardStep: 0, editKey: null });
@@ -1351,6 +1377,11 @@ const screen = {
 
   openEdit(id) {
     const ctx = this.ctx;
+    if (isSampleState(ctx && ctx.store.getState())) {
+      ctx.store.setState({ editKey: null });
+      ctx.showToast(ctx.L('Sample data is read-only.', '샘플 데이터는 조회만 가능합니다.'));
+      return;
+    }
     const dev = (ctx.store.getState().fleet || []).find((d) => d.id === id);
     // 못 찾으면 editKey를 지워야 한다 — 그대로 두면 render()의 editKey 핸드오프가 매 렌더마다
     // openEdit을 다시 호출해 토스트가 무한 반복된다.
@@ -1400,6 +1431,10 @@ const screen = {
 
   openDelete(id) {
     const ctx = this.ctx;
+    if (isSampleState(ctx && ctx.store.getState())) {
+      ctx.showToast(ctx.L('Sample data is read-only.', '샘플 데이터는 조회만 가능합니다.'));
+      return;
+    }
     const dev = (ctx.store.getState().fleet || []).find((d) => d.id === id);
     if (!dev) return;
     if (dev.type === 'END') {
@@ -1503,6 +1538,10 @@ const screen = {
   },
 
   async api(method, url, body) {
+    if (String(method || 'GET').toUpperCase() !== 'GET'
+      && isSampleState(this.ctx && this.ctx.store.getState())) {
+      return { ok: false, error: this.ctx.L('Sample data is read-only.', '샘플 데이터는 조회만 가능합니다.') };
+    }
     try {
       const headers = {};
       if (body) headers['Content-Type'] = 'application/json';

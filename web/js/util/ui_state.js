@@ -3,6 +3,13 @@
 
 export const CONSOLE_TIME_ZONE = 'Asia/Seoul';
 
+/** 서버가 명시적으로 광고한 샘플/데모 데이터인지 판별한다. */
+export function isSampleMode(state) {
+  const st = state || {};
+  return st.sampleMode === true || st.demoMode === true
+    || st.source === 'sample' || st.source === 'demo';
+}
+
 /**
  * Return the one collection state the shell is allowed to advertise.
  * lastPoll is the last *successful* response; lastAttempt may include failures.
@@ -19,6 +26,9 @@ export function collectionState(state, now = Date.now()) {
   }
   if (st.liveError || st.stale || (lastSuccess && now - lastSuccess > refreshMs)) {
     return { key: 'stale', label: 'STALE', tone: 'warn', lastSuccess };
+  }
+  if (isSampleMode(st) && lastSuccess) {
+    return { key: 'sample', label: 'SAMPLE', tone: 'warn', lastSuccess };
   }
   return { key: 'live', label: 'LIVE', tone: 'pos', lastSuccess };
 }

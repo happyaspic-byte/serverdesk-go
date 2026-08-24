@@ -13,6 +13,7 @@ import {
   confirmationIssues,
   currentOperator,
   formatConsoleTime,
+  isSampleMode,
 } from './util/ui_state.js';
 import { createDurableSharedOutbox, createSharedSyncCoordinator } from './util/shared_sync.js';
 
@@ -805,6 +806,7 @@ function renderShell(st) {
     shell.sourceBadge.classList.toggle('is-live', status.key === 'live');
     shell.sourceBadge.classList.toggle('is-stale', status.key === 'stale' || status.key === 'connecting');
     shell.sourceBadge.classList.toggle('is-offline', status.key === 'offline');
+    shell.sourceBadge.classList.toggle('is-sample', status.key === 'sample');
     const dot = shell.sourceBadge.querySelector('.u-dot');
     if (dot) {
       dot.classList.remove('is-pos', 'is-warn', 'is-neg', 'pulse');
@@ -932,6 +934,34 @@ function renderBanner(st) {
   // 닫기(×) 아이콘 전용 버튼의 접근 이름 — 언어 전환 추적은 renderShell 의 searchInput 과 같은
   // 패턴으로, 배너 표시 여부와 무관하게 매 렌더 갱신한다(#552, 모달 닫기의 L('Close','닫기') 관례).
   if (shell.bannerX) shell.bannerX.setAttribute('aria-label', L('Close', '닫기'));
+  const sample = isSampleMode(st);
+  shell.banner.classList.toggle('is-sample', sample);
+  const bannerDot = shell.banner.querySelector('.u-dot');
+  if (sample) {
+    const text = 'SAMPLE DATA · 실제 장비/경보/라이선스가 아닙니다';
+    const sampleFailure = st.uiError || st.syncError || st.liveError || st.stale;
+    // 샘플임을 숨길 수 없도록 닫기는 제거한다. 연결 오류 때는 재시도를 유지한다.
+    if (shell.bannerRetry) shell.bannerRetry.hidden = !sampleFailure;
+    if (shell.bannerX) shell.bannerX.hidden = true;
+    if (bannerDot) bannerDot.className = 'u-dot is-warn';
+    if (!bannerWasOn) lastAnnounce = '';
+    if (!bannerWasOn) announce(text);
+    bannerWasOn = true;
+    setField('bannerText', text);
+    if (shell.bannerMeta) {
+      shell.bannerMeta.textContent = sampleFailure
+        ? L('Sample connection issue: ', '샘플 연결 이상: ') + String(st.uiError || st.syncError || st.liveError || 'stale')
+        : L(
+          'Read-only sample mode — changes and device controls are disabled',
+          '읽기 전용 샘플 모드 — 설정 변경과 장비 제어가 비활성화됩니다'
+        );
+    }
+    shell.banner.hidden = false;
+    return;
+  }
+  if (shell.bannerRetry) shell.bannerRetry.hidden = false;
+  if (shell.bannerX) shell.bannerX.hidden = false;
+  if (bannerDot) bannerDot.className = 'u-dot is-neg';
   const failureMark = Math.max(Number(st.lastAttempt) || 0, Number(st.lastPoll) || 0);
   const on = !!st.uiError || !!st.syncError || (st.source === 'live' && (st.liveError || st.stale) && failureMark > bannerDismissedAt);
   if (!on) { shell.banner.hidden = true; bannerWasOn = false; return; }
@@ -1213,6 +1243,12 @@ function executeSearchItem(target) {
 }
 
 async function handleAction(action, el) {
+  // 샘플 경보/장비에 확인·점검 상태를 기록하지 않는다. 서버도 거절하지만, 브라우저에서
+  // 확인 모달이나 낙관적 상태 변경 자체가 시작되지 않도록 한 번 더 차단한다.
+  if (isSampleMode(getState()) && ['maintSet', 'ackAlert', 'ackAllVisible', 'ackClearAll'].includes(action)) {
+    showToast(L('Sample data is read-only.', '샘플 데이터는 조회만 가능합니다.'));
+    return;
+  }
   switch (action) {
     case 'toggleLang':
       setState(s => ({ lang: s.lang === 'ko' ? 'en' : 'ko' }));
@@ -1227,6 +1263,7 @@ async function handleAction(action, el) {
     case 'goto': goView(el && (el.dataset.view || el.dataset.goto)); break;
     case 'goDetail': goDetail(el && (el.dataset.id || el.dataset.detailId)); break;
     case 'dismissBanner':
+      if (isSampleMode(getState())) break;
       bannerDismissedAt = Date.now();
       if (getState().uiError || getState().syncError) setState({ uiError: null, syncError: null });
       else renderBanner(getState());

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  collectionState, isInitialLoading, formatConsoleTime, timestampKey, restoreImpact,
+  collectionState, isInitialLoading, formatConsoleTime, timestampKey, restoreImpact, isSampleMode,
 } from '../js/util/ui_state.js';
 
 test('collection status never advertises LIVE before a successful poll', () => {
@@ -11,6 +11,12 @@ test('collection status never advertises LIVE before a successful poll', () => {
   assert.equal(collectionState({ pollPending: false, lastPoll: 1000, liveError: 'timeout' }).key, 'stale');
   assert.equal(collectionState({ pollPending: false, lastPoll: 1000, stale: true }).key, 'stale');
   assert.equal(collectionState({ pollPending: false, lastPoll: 9_000, refreshSec: 30 }, 10_000).key, 'live');
+});
+
+test('sample aliases never advertise LIVE after a successful response', () => {
+  assert.equal(isSampleMode({ source: 'sample' }), true);
+  assert.equal(isSampleMode({ demoMode: true }), true);
+  assert.equal(collectionState({ source: 'sample', lastPoll: 9_000, pollPending: false }, 10_000).label, 'SAMPLE');
 });
 
 test('one failed refresh becomes STALE and a later success recovers to LIVE', () => {

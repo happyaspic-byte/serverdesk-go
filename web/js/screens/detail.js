@@ -293,6 +293,7 @@ function buildHeader() {
   const typeIcoBox = E('div', { class: 'sc-dtl-avatar' });
   // 앱 전역 H1은 Pretendard sans(다른 9개 화면과 통일). 제품명+버전 문자열도 sans로 렌더한다.
   const host = E('h1', { class: 'sc-dtl-host' });
+  const sampleBadge = E('span', { class: 'u-badge is-warn sc-dtl-sample u-hide', text: 'SAMPLE' });
   const stBadge = E('span', { class: 'u-badge' });
   const stDot = E('span', { class: 'u-dot' });
   const stTxt = E('span', {});
@@ -334,7 +335,7 @@ function buildHeader() {
     E('div', { class: 'sc-dtl-headmain' }, [
       typeIcoBox,
       E('div', { class: 'sc-dtl-headtxt' }, [
-        E('div', { class: 'sc-dtl-titlerow' }, [host, stBadge, stReason]),
+        E('div', { class: 'sc-dtl-titlerow' }, [host, sampleBadge, stBadge, stReason]),
         metaLine,
       ]),
     ]),
@@ -346,6 +347,12 @@ function buildHeader() {
   PF((d) => {
     setText(back.querySelector('[data-f="backLabel"]'), L('Back to fleet', '목록으로'));
     setText(edit.querySelector('[data-f="editLabel"]'), L('Edit config', '설정 수정'));
+    show(sampleBadge, !!d.sample);
+    edit.disabled = !!d.sample;
+    edit.title = d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다') : '';
+    maintBtn.disabled = !!d.sample;
+    maintBtn.title = d.sample ? L('Sample data is read-only', '샘플 데이터는 조회만 가능합니다') : '';
+    if (d.sample) maintMenu.hidden = true;
     iconInto(typeIcoBox, d.typeIcon || 'box', 26);
     setText(host, d.host || DASH);
     setText(stTxt, d.statusLabel || DASH);
@@ -969,6 +976,13 @@ function trapsCard(d) {
  */
 export function controlActionGate(control, action) {
   const c = control && typeof control === 'object' ? control : {};
+  if (c.sample === true) {
+    return {
+      supported: false,
+      reason: 'Sample data is read-only.',
+      reason_ko: '샘플 데이터는 조회만 가능합니다.',
+    };
+  }
   const listed = c.availability && c.availability[action];
   if (listed && listed.supported === true) return { supported: true, reason: '', reason_ko: '' };
   if (listed) {

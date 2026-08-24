@@ -50,6 +50,24 @@ cp config.example.json config.local.json   # secret:// 참조만 입력, chmod 6
   기존 `0.0.0.0` 평문 설정은 break-glass 승인이나 TLS 키 쌍 없이는 보안 오류로 기동을 거부한다.
 - 장비 HTTPS는 시스템 CA와 호스트명을 기본 검증한다. 자체서명 Proxmox/Redfish/프린터는 장비별
   `tls_fingerprint`에 SPKI SHA-256 지문을 설정해야 하며, 불일치하면 TLS 핸드셰이크를 차단한다.
+
+### 샘플 데이터로 화면 확인
+
+실제 Stratus/엣지 장비 자격증명 없이 화면을 확인할 때만 명시적 샘플 모드를 사용한다.
+`config.local.json`의 `clusters`와 `edge_devices`는 빈 배열이어야 하며, 알림과 SNMP 트랩도
+비활성 상태여야 한다.
+
+```bash
+cp config.example.json config.local.json
+chmod 600 config.local.json                    # Linux/macOS
+./serverdesk -auth auth.json -init-auth       # 최초 1회
+./serverdesk -c config.local.json -auth auth.json -demo
+```
+
+브라우저에서 `http://127.0.0.1:6005`에 접속하면 `[샘플]`로 표시된 everRun, ztC Edge, NAS
+3대를 볼 수 있다. 샘플 모드는 루프백 리스너에서만 기동하고 실제 장비 폴링·웹훅·트랩·장비
+설정 변경을 차단한다. 화면의 `SAMPLE DATA` 배너가 보이지 않으면 샘플 모드로 간주하지 않는다.
+
 ## Linux 고객 설치
 
 배포 패키지 디렉터리(`deploy/packaging/`)에서 다음을 실행하거나 프로젝트 루트에서 경로를 지정해 실행한다. 최초 설치는 비대화식으로 고유한 관리자 자격증명을
