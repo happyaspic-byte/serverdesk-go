@@ -1,7 +1,8 @@
 # Production readiness
 
-평가일: 2026-08-24  
-대상: production-hardening 변경이 적용된 `serverdesk-go`  
+평가일: 2026-08-24
+
+대상: production-hardening 변경이 적용된 `serverdesk-go`
 판정: **코드 준비도 96/100 — 목표(95점 초과) 달성**
 
 이 점수는 저장소 안에서 재현 가능한 코드·테스트·배포 자산의 준비도다. 실제 고객 환경의 운영 배포
