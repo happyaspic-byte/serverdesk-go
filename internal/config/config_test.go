@@ -84,7 +84,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("trap.community = %v", c.Trap.Community)
 	}
 	if c.Trap.Bind != "0.0.0.0" || c.Trap.Persist != "traps.jsonl" ||
-		c.Trap.Ring != 500 || c.Trap.ViewMax != 50 || c.Trap.MibDir != "docs/mibs" {
+		c.Trap.Ring != 500 || c.Trap.ViewMax != 50 || c.Trap.MibDir != "mibs" {
 		t.Errorf("trap defaults wrong: %+v", c.Trap)
 	}
 	if c.Path != "testdata/config.json" {
@@ -94,6 +94,7 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestNestedTrapOverlay(t *testing.T) {
 	data := []byte(`{
+		"secret_policy": "allow-plaintext",
 		"clusters": [{"key": "a", "mgmt_ip": "10.0.0.1"}],
 		"trap": {"enabled": false, "port": 1162, "community": "fake-nested-community"}
 	}`)
@@ -109,6 +110,24 @@ func TestNestedTrapOverlay(t *testing.T) {
 	}
 	if c.Trap.Ring != 500 {
 		t.Errorf("trap.ring = %d, want default 500", c.Trap.Ring)
+	}
+}
+
+func TestTransportDefaultsAndTLSKeyPairValidation(t *testing.T) {
+	c, err := Parse([]byte(`{"clusters":[]}`))
+	if err != nil {
+		t.Fatalf("Parse defaults: %v", err)
+	}
+	if c.Listen != "127.0.0.1:9891" {
+		t.Fatalf("default listen = %q, want loopback", c.Listen)
+	}
+	for _, raw := range []string{
+		`{"clusters":[],"tls_cert_file":"server.crt"}`,
+		`{"clusters":[],"tls_key_file":"server.key"}`,
+	} {
+		if _, err := Parse([]byte(raw)); err == nil {
+			t.Fatalf("accepted incomplete TLS key pair: %s", raw)
+		}
 	}
 }
 
@@ -275,10 +294,16 @@ func TestCheckPerms(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := CheckPerms(p); err == nil {
-		t.Error("0644 should warn")
+		t.Error("0644 should fail")
 	}
-	if err := CheckPerms(filepath.Join(dir, "missing.json")); err != nil {
-		t.Errorf("missing file: %v (poller.py 는 OSError 를 삼킨다)", err)
+	if err := os.Chmod(p, 0o620); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPerms(p); err == nil {
+		t.Error("0620 group-writable config should fail")
+	}
+	if err := CheckPerms(filepath.Join(dir, "missing.json")); err == nil {
+		t.Error("missing config should fail closed")
 	}
 }
 
@@ -293,12 +318,29 @@ proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=2 0 0
 	if got := parseProcMounts(subset); got != "subset=pid" {
 		t.Errorf("subset=pid → %q", got)
 	}
+	const subsetFirst = "proc /proc proc rw,subset=pid,nosuid,hidepid=2,nodev 0 0\n"
+	if got := parseProcMounts(subsetFirst); got != "2" {
+		t.Errorf("subset before hidepid must prefer hidepid: got %q", got)
+	}
 	const plain = "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
 	if got := parseProcMounts(plain); got != "" {
 		t.Errorf("no hidepid → %q, want empty", got)
 	}
 	if got := parseProcMounts(""); got != "" {
 		t.Errorf("empty → %q", got)
+	}
+}
+
+func TestProtectedProcModeRejectsSubsetOnly(t *testing.T) {
+	for _, mode := range []string{"1", "2", "4", "noaccess", "invisible", "ptraceable"} {
+		if !protectedProcMode(mode) {
+			t.Errorf("hidepid mode %q should protect cmdline", mode)
+		}
+	}
+	for _, mode := range []string{"", "0", "subset=pid"} {
+		if protectedProcMode(mode) {
+			t.Errorf("proc mode %q must not be treated as argv protection", mode)
+		}
 	}
 }
 

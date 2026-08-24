@@ -4,22 +4,20 @@ import (
 	"testing"
 )
 
-// 테스트 기준 MIB — serverdesk-go/docs/mibs 에 벤더된 실장비 MIB.
-// 파이썬 trap_receiver.TrapDecoder.from_dir 의 실측 결과(골든):
-//
-//	로드 2개 파일, 병합 oid_to_name 956개, 트랩 표 788개.
-const testMIBDir = "../../docs/mibs"
+// 테스트 기준 MIB는 공개 재배포가 가능한 최소 합성 fixture다. 실제 벤더 MIB는 고객이
+// 승인된 채널에서 설치하며 저장소·공개 릴리스에 포함하지 않는다.
+const testMIBDir = "testdata/mibs"
 
-func TestMIBParseRealFiles(t *testing.T) {
+func TestMIBParseSyntheticFixtures(t *testing.T) {
 	dec := NewDecoderFromDir(testMIBDir)
 	if len(dec.LoadedFiles) != 2 {
 		t.Fatalf("로드된 MIB 파일 수 = %v, want 2", dec.LoadedFiles)
 	}
-	if got := len(dec.OIDToName); got != 956 {
-		t.Errorf("len(OIDToName) = %d, want 956 (파이썬 실측 골든)", got)
+	if got := len(dec.OIDToName); got < 16 {
+		t.Errorf("len(OIDToName) = %d, want at least 16 synthetic+standard names", got)
 	}
-	if got := len(dec.Traps); got != 788 {
-		t.Errorf("len(Traps) = %d, want 788 (파이썬 실측 골든)", got)
+	if got := len(dec.Traps); got != 10 {
+		t.Errorf("len(Traps) = %d, want 10 (.N and .0.N aliases)", got)
 	}
 
 	// 스폿 체크 — 파이썬 디코더 출력과 동일해야 함
@@ -43,7 +41,7 @@ func TestMIBParseRealFiles(t *testing.T) {
 	if !ok {
 		t.Fatal("Traps 에 everRunGuestCrashedTrap (.0.2 형태) 없음")
 	}
-	if ti.Name != "everRunGuestCrashedTrap" || ti.MIB != "STRATUS-MIB" {
+	if ti.Name != "everRunGuestCrashedTrap" || ti.MIB != "TEST-STRATUS-LIKE-MIB" {
 		t.Errorf("트랩 메타 = %+v", ti)
 	}
 	if len(ti.Variables) != 1 || ti.Variables[0] != "everRunTrapDescription" {

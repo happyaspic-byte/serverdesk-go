@@ -807,7 +807,7 @@ function vmTable(d) {
           acts.textContent = '';
           const nm2 = p.name || '';
           vmActionPlan(p.running).forEach((a) => {
-            acts.appendChild(actionBtn(L(a.en, a.ko), a.act, nm2, a.destructive, a.danger));
+            acts.appendChild(actionBtn(L(a.en, a.ko), a.act, nm2, a.destructive, a.danger, d.control));
           });
         }
       }
@@ -963,7 +963,39 @@ function trapsCard(d) {
 }
 
 /* ── ControlsCard (everRun 계열만) ──────────────────────────────────── */
-function actionBtn(label, action, target, destructive, danger) {
+/**
+ * 뷰 모델의 서버 capability allowlist를 다시 확인한다. 누락된 capability는 fail-closed.
+ * export는 DOM 없이도 UI 제어 계약을 테스트할 수 있게 하기 위함이다.
+ */
+export function controlActionGate(control, action) {
+  const c = control && typeof control === 'object' ? control : {};
+  const listed = c.availability && c.availability[action];
+  if (listed && listed.supported === true) return { supported: true, reason: '', reason_ko: '' };
+  if (listed) {
+    return {
+      supported: false,
+      reason: String(listed.reason || 'Cluster action is not supported by this server.'),
+      reason_ko: String(listed.reason_ko || '이 서버는 해당 클러스터 제어를 지원하지 않습니다.'),
+    };
+  }
+  const cap = c.capability && typeof c.capability === 'object' ? c.capability : {};
+  if (cap.supported === true && Array.isArray(cap.actions) && cap.actions.includes(action)) {
+    return { supported: true, reason: '', reason_ko: '' };
+  }
+  return {
+    supported: false,
+    reason: String(cap.reason || 'Cluster action is not supported by this server.'),
+    reason_ko: String(cap.reason_ko || '이 서버는 해당 클러스터 제어를 지원하지 않습니다.'),
+  };
+}
+
+function actionGateReason(gate) {
+  return L(gate.reason || 'Cluster action is unavailable.', gate.reason_ko || '클러스터 제어를 사용할 수 없습니다.');
+}
+
+function actionBtn(label, action, target, destructive, danger, control) {
+  const gate = controlActionGate(control, action);
+  const reason = gate.supported ? '' : actionGateReason(gate);
   return E('button', {
     class: 'btn btn--sm ' + (danger ? 'btn--danger' : 'btn--outline'),
     type: 'button',
@@ -971,6 +1003,10 @@ function actionBtn(label, action, target, destructive, danger) {
     'data-dtl-target': target,
     'data-dtl-label': label,
     'data-dtl-destructive': destructive ? '1' : '',
+    disabled: gate.supported ? null : true,
+    'aria-disabled': gate.supported ? null : 'true',
+    title: reason || null,
+    'aria-label': reason ? (label + ' — ' + reason) : label,
   }, [E('span', { text: label })]);
 }
 
@@ -999,13 +1035,13 @@ function controlsCard(d) {
       btns.textContent = '';
       const nm2 = x.name || n.name || '';
       if (nextMode === 'maint') {
-        btns.appendChild(actionBtn(L('Exit maintenance', '점검 해제'), 'node-workoff', nm2, false, false));
+        btns.appendChild(actionBtn(L('Exit maintenance', '점검 해제'), 'node-workoff', nm2, false, false, c0));
       } else if (nextMode === 'down') {
-        btns.appendChild(actionBtn(L('Recover', '복구'), 'node-recover', nm2, false, false));
+        btns.appendChild(actionBtn(L('Recover', '복구'), 'node-recover', nm2, false, false, c0));
       } else {
-        btns.appendChild(actionBtn(L('Maintenance', '점검 모드'), 'node-workon', nm2, true, false));
-        btns.appendChild(actionBtn(L('Reboot', '재부팅'), 'node-reboot', nm2, true, true));
-        btns.appendChild(actionBtn(L('Shutdown', '종료'), 'node-shutdown', nm2, true, true));
+        btns.appendChild(actionBtn(L('Maintenance', '점검 모드'), 'node-workon', nm2, true, false, c0));
+        btns.appendChild(actionBtn(L('Reboot', '재부팅'), 'node-reboot', nm2, true, true, c0));
+        btns.appendChild(actionBtn(L('Shutdown', '종료'), 'node-shutdown', nm2, true, true, c0));
       }
     });
     rows.appendChild(row);
@@ -1019,10 +1055,16 @@ function controlsCard(d) {
   c.appendChild(cardHead(L('Node controls', '노드 제어'), null, 'ops'));
   c.appendChild(E('div', { class: 'card-body' }, [note, rows, res]));
   P((d) => {
+    const cap = ((d && d.control) || {}).capability || {};
+    if (cap.supported !== true) {
+      setText(note, L(cap.reason || 'Cluster actions are unavailable on this server.',
+        cap.reason_ko || '이 서버에서는 클러스터 제어를 사용할 수 없습니다.'));
+    } else {
     // Endurance 는 클러스터가 아니라 단일 섀시 안의 컴퓨트 모듈 쌍이다(용어 정정).
-    setText(note, (d && d.endurance)
-      ? L('Module actions run on the compute modules.', '모듈 액션을 컴퓨트 모듈에 실행합니다.')
-      : L('Node actions run on the cluster. Control VMs inline in the list above.', '노드 액션을 클러스터에 실행합니다. VM 제어는 위 가상 머신 목록에서 실행하세요.'));
+      setText(note, (d && d.endurance)
+        ? L('Module actions run on the compute modules.', '모듈 액션을 컴퓨트 모듈에 실행합니다.')
+        : L('Node actions run on the cluster. Control VMs inline in the list above.', '노드 액션을 클러스터에 실행합니다. VM 제어는 위 가상 머신 목록에서 실행하세요.'));
+    }
     show(res, !!resultMsg);
     if (resultMsg) {
       setText(res, (resultMsg.ok ? '✓ ' : '✕ ') + resultMsg.msg);
@@ -2009,7 +2051,9 @@ function sigOf(d, lang) {
     d.plcClock ? '1' : '0', d.plcMain ? '1' : '0',
     (d.license && d.license.has) ? '1' : '0',
     (d.resource && d.resource.has) ? '1' : '0',
-    d.control ? arr(d.control.nodes).length + '/' + arr(d.control.vms).length : '-',
+    d.control ? arr(d.control.nodes).length + '/' + arr(d.control.vms).length + '/'
+      + (((d.control.capability || {}).supported === true) ? '1' : '0') + '/'
+      + arr((d.control.capability || {}).actions).join(',') : '-',
     d.bmc ? '1' : '0', d.eac ? '1' : '0', d.endurance ? '1' : '0',
     // #396: 조걶부 행은 빌드 시 필드 존재로만 만들어진다 — sig 에 존재 비트가 없으면 세션 중
     // 폴리가 필드를 새로 보고핸도 재생성이 안 돼 행이 영구 결측된다(§4.1 지문 함정 동류).
@@ -2093,6 +2137,11 @@ export function consequenceOf(action, target, nodes) {
 
 function openConfirm(action, target, label, destructive) {
   const d = lastDetail || {};
+  const gate = controlActionGate(d.control, action);
+  if (!gate.supported) {
+    try { CTX.showToast(actionGateReason(gate)); } catch (e) { /* noop */ }
+    return;
+  }
   confirmState = {
     action, target, label, destructive,
     // 모달을 연 시점의 장비 id — 같은 detail view 안의 뒤로가기는 destroy 없이 render 만
@@ -2174,7 +2223,9 @@ function syncRunBtn() {
 
 
 /* 제어 액션 POST. 상위 서버 세션이 인증하며, fetchImpl은 테스트에서 주입할 수 있다. */
-export async function postAction(id, action, target, fetchImpl) {
+export async function postAction(id, action, target, fetchImpl, control) {
+  const gate = controlActionGate(control, action);
+  if (!gate.supported) throw new Error(gate.reason || 'cluster action not supported');
   const headers = { 'Content-Type': 'application/json' };
   const doFetch = fetchImpl || ((url, opts) => fetchTimeout(url, opts, 15000));
   return doFetch('/api/clusters/' + encodeURIComponent(id) + '/action', {
@@ -2202,7 +2253,7 @@ async function runConfirm() {
   syncRunBtn();
   let res;
   try {
-    const r = await postAction(id, action, target);
+    const r = await postAction(id, action, target, null, (lastDetail || {}).control);
     let j = {};
     try { j = await r.json(); } catch (e) { j = {}; }
     res = r.ok ? { ok: true, msg: j.output || L('started', '실행 요청됨') }
@@ -2362,6 +2413,7 @@ export default {
         return;
       }
       if ((el = t.closest('[data-dtl-act]'))) {
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') return;
         openConfirm(el.getAttribute('data-dtl-act'), el.getAttribute('data-dtl-target') || '',
           el.getAttribute('data-dtl-label') || '', el.getAttribute('data-dtl-destructive') === '1');
         return;

@@ -136,10 +136,12 @@ func SetPassword(path, password string) error {
 	if err != nil {
 		return err
 	}
+	var originalInfo os.FileInfo
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("credential path must be a regular non-symlink file")
 		}
+		originalInfo = info
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect credential file: %w", err)
 	}
@@ -159,15 +161,34 @@ func SetPassword(path, password string) error {
 		file.Close()
 		return fmt.Errorf("write credential file: %w", err)
 	}
+	if originalInfo != nil {
+		if err := applyReplacementMetadata(file, originalInfo); err != nil {
+			file.Close()
+			return fmt.Errorf("preserve credential file metadata: %w", err)
+		}
+	}
 	if err := file.Sync(); err != nil {
 		file.Close()
 		return fmt.Errorf("sync credential file: %w", err)
 	}
+	writtenInfo, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return fmt.Errorf("stat temporary credential file: %w", err)
+	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close credential file: %w", err)
 	}
+	temporaryInfo, err := os.Lstat(temporary)
+	if err != nil || !os.SameFile(writtenInfo, temporaryInfo) ||
+		!temporaryInfo.Mode().IsRegular() || temporaryInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("temporary credential file changed before replace")
+	}
 	if err := os.Rename(temporary, path); err != nil {
 		return fmt.Errorf("replace credential file: %w", err)
+	}
+	if err := syncParentDirectory(directory); err != nil {
+		return fmt.Errorf("sync credential directory: %w", err)
 	}
 	return nil
 }

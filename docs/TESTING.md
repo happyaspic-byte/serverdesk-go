@@ -11,9 +11,11 @@
 로컬 환경에서는 프로젝트 내 내장 툴체인을 우선 사용하도록 `PATH` 환경변수를 설정한다.
 
 ```bash
-cd /home/ubuntu/projects/serverdesk-go
-export PATH="$PWD/.toolchain/go/bin:$PATH"
+cd /path/to/serverdesk-go
+go version
 ```
+
+`go.mod`에 지정된 Go 버전을 사용한다. 저장소나 고객 패키지에 별도 툴체인을 번들하지 않는다.
 
 ### 1.2 Go 백엔드 테스트
 
@@ -69,30 +71,45 @@ go test -v ./web/...
 JavaScript 단위 테스트 (Node.js 내장 테스트 러너):
 
 ```bash
-node --test web/tests/
+node --test web/tests/*.test.mjs
 ```
-*(참고: 프런트엔드 테스트 스위트 확장 시 `web/tests/` 디렉터리 하위에 `*_test.js` 또는 `.test.js` 파일을 배치하여 실행)*
+*(참고: 프런트엔드 테스트는 `web/tests/*.test.mjs` 이름으로 추가해야 CI와 릴리스 게이트에 포함된다.)*
 
 ---
 
 ## 2. CI (Continuous Integration) 게이트
 
-GitHub Actions 워크플로(`.github/workflows/ci.yml`)는 `push` 및 `pull_request` 발생 시 자동으로 실행되며, 다음 3단계 검사를 모두 통과해야 한다.
+GitHub Actions 워크플로(`.github/workflows/ci.yml`)는 `push` 및 `pull_request` 발생 시 자동으로 실행되며, 다음 검사를 모두 통과해야 한다.
 
 | 단계 | 명령어 | 설명 |
 |---|---|---|
 | **1. 포맷팅 검사** | `unformatted=$(gofmt -l .) && [ -z "$unformatted" ]` | Go 코드 포맷팅 표준 준수 여부 검사 (gofmt 기준 위반 시 실패) |
 | **2. 정적 분석** | `go vet ./...` | 잠재적 버그, 잘못된 서식 문자열, 미사용 변수 등 컴파일러 레벨 정적 분석 |
-| **3. 레이스 감지 테스트** | `go test -race ./...` | 데이터 레이스 감지기를 활성화한 전체 패키지 단위/통합 테스트 통과 여부 |
+| **3. 의존성 경계** | `go list -m all` | 제품 Go 코드가 표준 라이브러리 경계를 유지하는지 검사 |
+| **4. 레이스·커버리지** | `go test -shuffle=on -race -covermode=atomic ...` | 순서 의존성·데이터 레이스를 찾고 전체 statement coverage 80% 이상 강제 |
+| **5. 프런트 테스트** | `node --test web/tests/*.test.mjs` | 모든 명시적 JavaScript 테스트 파일 실행 |
+| **6. 교차 빌드** | Linux/Windows amd64 build + Windows test compile | 두 고객 대상의 컴파일 계약 확인 |
+| **7. Windows 스크립트 파싱** | PowerShell AST parser | 모든 배포 `.ps1`의 문법 오류 검사 |
+| **8. 배포 자산** | `sh deploy/packaging/validate-deployment.sh` | 설치·업데이트·롤백·제거 및 릴리스 payload 정적 계약 검사 |
+| **9. 취약점 검사** | `govulncheck ./...` | 도달 가능한 Go 취약점 검사 |
 
 CI 게이트 로컬 사전 점검 명령:
 
 ```bash
-export PATH="$PWD/.toolchain/go/bin:$PATH"
-gofmt -l cmd/ internal/ web/
+unformatted=$(gofmt -l .); test -z "$unformatted"
 go vet ./...
-go test -race ./...
+go test -shuffle=on -race -covermode=atomic -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out | tail -1
+node --test web/tests/*.test.mjs
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/serverdesk-linux ./cmd/serverdesk
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o /tmp/serverdesk-windows.exe ./cmd/serverdesk
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -exec=/bin/true ./...
+sh deploy/packaging/validate-deployment.sh
 ```
+
+PowerShell 파서와 `govulncheck`도 로컬에 도구가 있으면 실행하며, 최종 판정은 GitHub Actions의
+동일 게이트 결과를 기준으로 한다. 정적·합성 검사는 실제 Windows/systemd/Stratus/브라우저 UAT를
+대체하지 않는다.
 
 ---
 

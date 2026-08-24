@@ -5,15 +5,16 @@
 
 import {
   TYPES, FT_TYPES, isFT, isNoTel, deriveStatus, deriveSync, availN,
+  normalizeCapabilities, clusterActionAvailability,
 } from '../data.js';
 import {
   clamp, cmpKo, langOf, makeL, SEV_RANK, STALE_ALERT_DAYS,
-  sevInfo, histOf, _meta, _arr, _num, DASH,
+  sevInfo, histOf, _sparkHist, _meta, _arr, _num, DASH,
 } from './base.js';
 import {
   statusTone, statusLabel, statusAnim, pctTone, pctToneAlloc,
-  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, fmtAvailN,
-  fmtDowntimeYr, fmtUptimeD,
+  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint, fmtAvailN,
+  fmtDowntimeYr, fmtUptimeD, subPctText,
 } from './format.js';
 import {
   tsNorm, tsKey, agoSec, agoText, shortTime,
@@ -23,6 +24,7 @@ import {
   alertAckKey, autoAckDue, toCsv, activeMaint,
   escalDue, expiredMaint, collectAlerts, collectTraps, alertMsgKo,
 } from './alert.js';
+import { tonerSummary } from './topo.js';
 
 /* ===========================================================================
  * 9. buildDetail — Vigil detail.ts 이식 (variant 8종)
@@ -75,7 +77,7 @@ export function buildDetail(a, b, c) {
     : (isServer ? 'srv' : (dev.type === 'FTS' ? 'fts' : 'ft')))));
 
   const maintNodes = _arr(m.nodes)
-    .filter((n) => _nodeMaint(n))
+    .filter((n) => nodeMaint(n))
     .map((n) => n.name || '').filter(Boolean);
   const maint = maintNodes.length > 0;
 
@@ -316,7 +318,7 @@ export function buildDetail(a, b, c) {
     const warn = !!(n && n.standing && String(n.standing).toLowerCase() !== 'normal');
     const prim = !!(n && n.primary);
     const sOnly = !!(n && n._snmpOnly);
-    const nMaint = !!(n && _nodeMaint(n));
+    const nMaint = !!(n && nodeMaint(n));
     return {
       name: (n && n.name) || (dev.host + (i === 0 ? '-A' : '-B')),
       primary: prim, maint: nMaint, maintLabel: L('Maintenance', '점검 중'),
@@ -699,11 +701,21 @@ export function buildDetail(a, b, c) {
 
   /* ---- 제어(ControlsCard) ---- */
   // 스펙 §5.4: ControlsCard 는 everRun 계열(FT)만. 그 외 타입은 null.
+  const actionCapability = normalizeCapabilities(S.capabilities).cluster_actions;
+  const clusterActionKeys = [
+    'node-workon', 'node-workoff', 'node-reboot', 'node-shutdown', 'node-recover',
+    'vm-shutdown', 'vm-poweroff', 'vm-poweron',
+  ];
+  const actionAvailability = Object.fromEntries(clusterActionKeys.map((key) => [
+    key, clusterActionAvailability(S.capabilities, key),
+  ]));
   const control = !ft ? null : {
     id: dev.id,
+    capability: actionCapability,
+    availability: actionAvailability,
     nodes: _arr(m.nodes).map((n) => ({
       name: n.name,
-      maint: _nodeMaint(n),
+      maint: nodeMaint(n),
       down: !/run/i.test(n.state || ''),
       primary: n.primary === true,
     })),
@@ -907,4 +919,3 @@ export function flowOf(o) {
   if (o.from) return o.from + ' →';
   return '';
 }
-

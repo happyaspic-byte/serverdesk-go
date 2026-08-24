@@ -8,6 +8,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -22,8 +23,10 @@ import (
 
 	"net/http"
 
+	"serverdesk/internal/alerting"
 	"serverdesk/internal/avcli"
 	"serverdesk/internal/config"
+	"serverdesk/internal/deviceview"
 	"serverdesk/internal/edge"
 	"serverdesk/internal/httpapi"
 	"serverdesk/internal/poller"
@@ -37,6 +40,9 @@ import (
 var logLevels = map[string]int{"debug": 10, "info": 20, "warn": 30, "error": 40}
 
 var logLevel = 20
+
+// version is replaced by the release workflow with -ldflags "-X main.version=...".
+var version = "dev"
 
 // logMsg 는 poller.py log() 포트다: ISO 타임스탬프 + 레벨 + 클러스터키.
 // 어떤 경로로든 비밀이 섞일 수 있는 문자열은 config.Mask 를 반드시 통과시킨다.
@@ -76,9 +82,16 @@ func main() {
 		setAuthPassword bool
 		checkAuth       bool
 		listen          string
+		tlsCert         string
+		tlsKey          string
+		allowHTTP       bool
+		migrateSecrets  string
+		setDeviceSecret string
+		credentialsDir  string
 		logLevelFlag    string
 		once            bool
 		allowArgv       bool
+		showVersion     bool
 	)
 	flag.StringVar(&cfgPath, "c", "config.json", "설정 JSON 경로")
 	flag.StringVar(&cfgPath, "config", "config.json", "설정 JSON 경로")
@@ -88,20 +101,64 @@ func main() {
 	flag.BoolVar(&setAuthPassword, "set-auth-password", false, "stdin에서 웹 관리자 암호를 설정")
 	flag.BoolVar(&checkAuth, "check-auth", false, "웹 관리자 인증 파일을 엄격히 검증")
 	flag.StringVar(&listen, "listen", "", "바인드 주소 (host:port), 설정보다 우선")
+	flag.StringVar(&tlsCert, "tls-cert", "", "직접 HTTPS 리스너 인증서 PEM 경로 (tls_cert_file보다 우선)")
+	flag.StringVar(&tlsKey, "tls-key", "", "직접 HTTPS 리스너 개인키 PEM 경로 (tls_key_file보다 우선)")
+	flag.BoolVar(&allowHTTP, "allow-insecure-http", false,
+		"비루프백 평문 HTTP 호환 모드를 명시 승인(break-glass, 운영 비권장)")
+	flag.StringVar(&migrateSecrets, "migrate-secrets", "",
+		"평문 장비 자격증명을 secret:// 참조로 바꾸고 지정 디렉터리에 안전하게 저장한 뒤 종료")
+	flag.StringVar(&setDeviceSecret, "set-device-secret", "", "stdin의 장비 credential을 지정 이름으로 생성 후 종료")
+	flag.StringVar(&credentialsDir, "credentials-dir", "", "-set-device-secret 대상 디렉터리")
 	flag.StringVar(&logLevelFlag, "log-level", "", "로그 레벨(debug/info/warn/error)")
 	flag.BoolVar(&once, "once", false, "1회 수집 후 fleet JSON 을 stdout 에 출력하고 종료(진단용)")
 	flag.BoolVar(&allowArgv, "allow-argv-exposure", false,
 		"avcli 암호가 ps 에 노출되는 환경(/proc hidepid 미적용 + 다른 로그인 계정 존재)에서도 강제로 기동한다")
+	flag.BoolVar(&showVersion, "version", false, "버전 출력 후 종료")
 	flag.Parse()
+	if showVersion {
+		fmt.Printf("serverdesk %s\n", version)
+		return
+	}
 	authOperations := 0
-	for _, enabled := range []bool{initAuth, setAuthPassword, checkAuth} {
+	for _, enabled := range []bool{initAuth, setAuthPassword, checkAuth, migrateSecrets != "", setDeviceSecret != ""} {
 		if enabled {
 			authOperations++
 		}
 	}
 	if authOperations > 1 {
-		fmt.Fprintln(os.Stderr, "-init-auth, -set-auth-password, and -check-auth are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "credential maintenance operations are mutually exclusive")
 		os.Exit(1)
+	}
+	if setDeviceSecret != "" {
+		secret, err := readPassword(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "장비 credential 입력 실패: %v\n", err)
+			os.Exit(1)
+		}
+		if err := config.StoreCredential(credentialsDir, setDeviceSecret, secret); err != nil {
+			fmt.Fprintf(os.Stderr, "장비 credential 저장 실패: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("CREDENTIAL=%s\nREFERENCE=secret://%s\n", setDeviceSecret, setDeviceSecret)
+		return
+	}
+	if migrateSecrets != "" {
+		if _, err := os.Stat(cfgPath); err != nil && cfgPath == "config.json" {
+			if _, fallbackErr := os.Stat("config.local.json"); fallbackErr == nil {
+				cfgPath = "config.local.json"
+			}
+		}
+		result, err := config.MigratePlaintextSecrets(cfgPath, migrateSecrets)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "자격증명 마이그레이션 실패: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Migrated %d credentials.\n", result.Count)
+		for _, name := range result.Names {
+			fmt.Printf("CREDENTIAL=%s\n", name)
+		}
+		fmt.Printf("Set SERVERDESK_CREDENTIALS_DIRECTORY=%s (or map these names with systemd LoadCredential).\n", migrateSecrets)
+		return
 	}
 	if initAuth {
 		password, err := webauth.InitializeCredentials(authPath)
@@ -151,6 +208,8 @@ func main() {
 	poller.Logf = func(level, cluster, msg string) { logMsg(normalizeLevel(level), cluster, msg) }
 	httpapi.Logf = func(level, cluster, msg string) { logMsg(normalizeLevel(level), cluster, msg) }
 	config.Warnf = func(format string, args ...any) { logMsg("warn", "config", fmt.Sprintf(format, args...)) }
+	auditLog := func(message string) { logMsg("info", "audit", message) }
+	authSrv.SetAuditLogger(auditLog)
 
 	if _, err := os.Stat(cfgPath); err != nil {
 		// 기본값(config.json)이 없을 때 config.local.json 이 있으면 그것으로 폴리 —
@@ -166,7 +225,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "설정 파일이 없습니다: %s\n", cfgPath)
 		os.Exit(1)
 	}
-	cfg, err := config.Load(cfgPath)
+	cfg, err := config.LoadSecure(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
@@ -178,19 +237,41 @@ func main() {
 		logLevel = v
 	}
 	if err := config.CheckPerms(cfgPath); err != nil {
-		logMsg("warn", "-", err.Error())
-	}
-	warn, err := config.CheckArgvExposure(allowArgv)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, config.Mask(err.Error()))
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if warn != "" {
-		logMsg("warn", "-", warn)
+	if needsArgvExposureCheck(cfg) {
+		warn, err := config.CheckArgvExposure(allowArgv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, config.Mask(err.Error()))
+			os.Exit(1)
+		}
+		if warn != "" {
+			logMsg("warn", "-", warn)
+		}
 	}
 
 	if listen == "" {
 		listen = cfg.Listen
+	}
+	if tlsCert == "" {
+		tlsCert = cfg.TLSCertFile
+	}
+	if tlsKey == "" {
+		tlsKey = cfg.TLSKeyFile
+	}
+	transport := listenerTransport{
+		addr: listen, certFile: tlsCert, keyFile: tlsKey,
+		allowInsecureHTTP: allowHTTP || cfg.AllowInsecureHTTP,
+	}
+	if !once {
+		if err := transport.validate(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if !once && !transport.tlsEnabled() && transport.allowInsecureHTTP && !transport.loopback() {
+		logMsg("warn", "-", "비루프백 평문 HTTP break-glass 모드입니다; forwarded header를 신뢰하지 않으므로 운영에서는 직접 TLS 또는 루프백 프록시를 사용하십시오")
 	}
 	runtimeDir := poller.ExpandUser(cfg.RuntimeDir)
 
@@ -325,6 +406,79 @@ func main() {
 	apiSrv := httpapi.New(cache, states, cfg, store, eventLog, avail, edgeMgr, webSrv,
 		cfg.CORSAllowedOrigins, overlay)
 
+	// Server-resident critical delivery. The source is the same fleet+edge
+	// snapshot consumed by the UI, but the engine has its own persisted queue and
+	// therefore continues when every browser is closed.
+	notifier, err := alerting.New(alerting.Options{
+		StateDir: runtimeDir,
+		Config:   cfg.Notifications,
+		Sender:   webSrv,
+		Snapshot: func() ([]alerting.Signal, map[string]bool, bool) {
+			fleet, _, _ := cache.Snapshot()
+			devices := []map[string]any{}
+			if fleet != nil {
+				view := deviceview.BuildDevices(fleet, apiSrv.DisplayCfg(), 30)
+				if raw, ok := view["devices"].([]any); ok {
+					for _, item := range raw {
+						if device, ok := item.(map[string]any); ok {
+							devices = append(devices, device)
+						}
+					}
+				}
+			}
+			edgeStatus := edgeMgr.CollectorStatus()
+			devices = append(devices, edgeMgr.Latest()...)
+			// nil fleet means Cache.Update has not run yet; an empty non-nil
+			// fleet is the valid zero-cluster deployment. Configured edge
+			// workers likewise need one completed round before reconciliation.
+			ftReady, ready := notificationSourceReadiness(fleet, states, edgeStatus)
+			edgeReady := edgeNotificationSourceReady(edgeStatus)
+			edgeHosts := make(map[string]bool, edgeStatus.Configured)
+			for _, device := range edgeMgr.Devices() {
+				edgeHosts[device.Key] = true
+				ftReady[device.Key] = edgeReady
+			}
+			ftReady[edgeCollectorConditionHost] = edgeReady
+			signals := notificationSignals(devices)
+			for i := range signals {
+				switch {
+				case edgeHosts[signals[i].Host]:
+					signals[i].SourceUnready = !edgeReady
+				case ftReady[signals[i].Host]:
+					// This cluster's current fast snapshot is authoritative.
+				default:
+					// Unknown and individually unready sources fail closed. The
+					// engine still ingests signals from other ready hosts.
+					signals[i].SourceUnready = true
+				}
+			}
+			// A current collector error is itself an authoritative positive
+			// condition even though that host cannot authorize recoveries until
+			// a later successful snapshot. Never label stale device data as down.
+			signals = append(signals, notificationCollectorSignals(fleet, states)...)
+			signals = append(signals, notificationEdgeCollectorSignals(edgeStatus)...)
+			return signals, ftReady, ready
+		},
+		SilenceWithError: func() (map[string]bool, map[string]bool, error) {
+			state, err := webSrv.ExportUIStateWithError()
+			if err != nil {
+				return nil, nil, err
+			}
+			acked, maintenance := notificationSilence(state, time.Now())
+			return acked, maintenance, nil
+		},
+		Logf: func(level, component, message string) {
+			logMsg(normalizeLevel(level), component, message)
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "notification engine initialization failed: %v\n", err)
+		os.Exit(1)
+	}
+	apiSrv.Notifier = notifier
+	start(notifier.Start)
+	logMsg("info", "notify", fmt.Sprintf("server notification engine started enabled=%t", cfg.Notifications.Enabled))
+
 	// 이벤트 워처(표시 라벨은 오버레이를 따른다 — PUT 즉시 반영).
 	watcher := poller.NewEventWatcher(eventLog, cache, states, edgeMgr.Latest,
 		func(key string) string { return apiSrv.DisplayCfg()[key].Label })
@@ -364,7 +518,8 @@ func main() {
 		}
 		webSrv.ServeHTTP(w, r)
 	})
-	srv := &http.Server{Addr: listen, Handler: authSrv.Handler(root)}
+	srv := &http.Server{Addr: listen, Handler: authSrv.Handler(webauth.AuditMutations(root, auditLog))}
+	transport.configureServerTLS(srv)
 	webfront.ApplyHardening(srv)
 
 	// 그레이스풀 셧다운: 워커 정지 → avail flush → 트랩 수신기 닫기.
@@ -377,8 +532,14 @@ func main() {
 		_ = srv.Shutdown(context.Background())
 	}()
 
-	logMsg("info", "-", fmt.Sprintf("HTTP 리스닝 http://%s (fleet/topology/health + webfront)", listen))
-	serveErr := srv.ListenAndServe()
+	var serveErr error
+	if transport.tlsEnabled() {
+		logMsg("info", "-", fmt.Sprintf("HTTPS 리스닝 https://%s (fleet/topology/health + webfront)", listen))
+		serveErr = srv.ListenAndServeTLS(transport.certFile, transport.keyFile)
+	} else {
+		logMsg("info", "-", fmt.Sprintf("HTTP 리스닝 http://%s (fleet/topology/health + webfront)", listen))
+		serveErr = srv.ListenAndServe()
+	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		if errors.Is(serveErr, syscall.EADDRINUSE) || strings.Contains(serveErr.Error(), "Only one usage of each socket address") {
 			logMsg("error", "-", "HTTP 서버 실패: 포트가 이미 사용 중입니다 — 실행 중인 serverdesk 인스턴스를 확인하세요 (Windows: schtasks /End /TN serverdesk 후 재실행): "+serveErr.Error())
@@ -450,14 +611,15 @@ func convertEdgeDevices(in []config.EdgeDevice) []edge.DeviceConfig {
 			Name: d.Name, IP: d.IP, Community: d.Community,
 			Vendor: d.Vendor, Company: d.Company, Factory: d.Factory,
 			Site: d.Site, AssetTag: d.AssetTag, FloorPos: d.FloorPos,
-			ExtraIPs:    append([]string{}, d.ExtraIPs...),
-			FinsPort:    d.FinsPort,
-			FinsSrcNode: d.FinsSrcNode,
-			User:        d.User,
-			Password:    d.Password,
-			BMCIP:       d.BmcIP,
-			BMCUser:     d.BmcUser,
-			BMCPassword: d.BmcPassword,
+			ExtraIPs:       append([]string{}, d.ExtraIPs...),
+			FinsPort:       d.FinsPort,
+			FinsSrcNode:    d.FinsSrcNode,
+			User:           d.User,
+			Password:       d.Password,
+			BMCIP:          d.BmcIP,
+			BMCUser:        d.BmcUser,
+			BMCPassword:    d.BmcPassword,
+			TLSFingerprint: d.TLSFingerprint,
 		})
 	}
 	return out
@@ -479,4 +641,230 @@ func fleetClusters(fleet map[string]any) []map[string]any {
 func mapStr(m map[string]any, key string) string {
 	s, _ := m[key].(string)
 	return s
+}
+
+func needsArgvExposureCheck(cfg *config.Config) bool {
+	return cfg != nil && len(cfg.Clusters) > 0
+}
+
+func edgeNotificationSourceReady(status poller.EdgeCollectorStatus) bool {
+	return status.Configured == 0 || (!status.LastRoundAt.IsZero() && status.LastError == "")
+}
+
+// notificationSourceReadiness returns per-FT-source trust as well as fleet-wide
+// readiness. The alert engine uses the former to keep accepting critical
+// signals from healthy collectors while the latter conservatively pauses all
+// recovery reconciliation whenever any source is uncertain.
+func notificationSourceReadiness(fleet map[string]any, states []*poller.ClusterState, edgeStatus poller.EdgeCollectorStatus) (map[string]bool, bool) {
+	trusted := make(map[string]bool, len(states))
+	if fleet == nil {
+		return trusted, false
+	}
+	views := make(map[string]map[string]any, len(states))
+	for _, cluster := range fleetClusters(fleet) {
+		if key := mapStr(cluster, "key"); key != "" {
+			views[key] = cluster
+		}
+	}
+	allReady := true
+	for _, state := range states {
+		if state == nil {
+			allReady = false
+			continue
+		}
+		view := views[state.Key]
+		collection, ok := view["collection"].(map[string]any)
+		ready := state.Age("fast") != nil && ok && hasCollectionAge(collection["fast_age_secs"]) && hasSuccessfulFastSnapshot(collection)
+		trusted[state.Key] = ready
+		if !ready {
+			// Mark("fast") can race ahead of the cache refresher. Do not treat
+			// that gap as ready: notificationSignals must describe the same
+			// post-success snapshot whose readiness we are proving.
+			allReady = false
+		}
+	}
+	return trusted, allReady && edgeNotificationSourceReady(edgeStatus)
+}
+
+func notificationSourceReady(fleet map[string]any, states []*poller.ClusterState, edgeStatus poller.EdgeCollectorStatus) bool {
+	_, ready := notificationSourceReadiness(fleet, states, edgeStatus)
+	return ready
+}
+
+func notificationCollectorSignals(fleet map[string]any, states []*poller.ClusterState) []alerting.Signal {
+	if fleet == nil {
+		return nil
+	}
+	views := make(map[string]map[string]any, len(states))
+	for _, cluster := range fleetClusters(fleet) {
+		if key := mapStr(cluster, "key"); key != "" {
+			views[key] = cluster
+		}
+	}
+	out := make([]alerting.Signal, 0)
+	for _, state := range states {
+		if state == nil {
+			continue
+		}
+		collection, _ := views[state.Key]["collection"].(map[string]any)
+		errorsByTier, _ := collection["errors"].(map[string]any)
+		message, _ := errorsByTier["fast"].(string)
+		if strings.TrimSpace(message) == "" {
+			continue
+		}
+		out = append(out, alerting.Signal{
+			Key: "collector:" + state.Key + ":fast", Host: state.Key,
+			Description:        "FT collector unavailable — current AVCLI fast collection failed",
+			SuppressEscalation: true,
+		})
+	}
+	return out
+}
+
+const edgeCollectorConditionHost = "serverdesk:edge-collector"
+
+func notificationEdgeCollectorSignals(status poller.EdgeCollectorStatus) []alerting.Signal {
+	if status.Configured == 0 || strings.TrimSpace(status.LastError) == "" {
+		return nil
+	}
+	return []alerting.Signal{{
+		Key: "collector:edge:round", Host: edgeCollectorConditionHost,
+		Description:        "Edge collector unavailable — current collection round failed",
+		SuppressEscalation: true,
+	}}
+}
+
+func hasSuccessfulFastSnapshot(collection map[string]any) bool {
+	lastSuccess, ok := collection["last_success"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, ok := lastSuccess["fast"]; !ok {
+		return false
+	}
+	errorsByTier, ok := collection["errors"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if raw, exists := errorsByTier["fast"]; exists {
+		message, ok := raw.(string)
+		return ok && strings.TrimSpace(message) == ""
+	}
+	return true
+}
+
+func hasCollectionAge(value any) bool {
+	switch age := value.(type) {
+	case *float64:
+		return age != nil
+	case float64, float32, int, int64, json.Number:
+		return true
+	default:
+		return false
+	}
+}
+
+func notificationSignals(devices []map[string]any) []alerting.Signal {
+	var out []alerting.Signal
+	for _, device := range devices {
+		host := mapStr(device, "id")
+		if host == "" {
+			host = mapStr(device, "host")
+		}
+		if host == "" {
+			continue
+		}
+		meta, _ := device["meta"].(map[string]any)
+		if strings.EqualFold(mapStr(device, "status"), "down") {
+			description := "Device offline — no node responded to the collector"
+			downSince := mapStr(meta, "downSince")
+			ackTime := normalizeNotificationAckTime(downSince)
+			out = append(out, alerting.Signal{
+				Key: "state:" + host + ":down", Host: host,
+				Description: description,
+				AckKey:      strings.Join([]string{host, "DEVICE_STATE", description, ackTime}, "\x01"),
+				StartedAt:   parseNotificationTime(downSince),
+			})
+		}
+		alerts, _ := meta["alerts"].([]any)
+		for _, raw := range alerts {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			severity := strings.ToLower(mapStr(item, "sev"))
+			if severity == "" {
+				severity = strings.ToLower(mapStr(item, "severity"))
+			}
+			name := mapStr(item, "name")
+			if severity != "critical" || name == "DEVICE_STATE" {
+				continue
+			}
+			description := mapStr(item, "desc")
+			if description == "" {
+				description = mapStr(item, "description")
+			}
+			if description == "" {
+				description = name
+			}
+			rawTime := mapStr(item, "time")
+			ackTime := normalizeNotificationAckTime(rawTime)
+			material := strings.Join([]string{host, name, description, ackTime}, "\x00")
+			digest := sha256.Sum256([]byte(material))
+			out = append(out, alerting.Signal{
+				Key: "alert:" + fmt.Sprintf("%x", digest[:16]), Host: host,
+				Description: description, AckKey: strings.Join([]string{host, name, description, ackTime}, "\x01"),
+				StartedAt: parseNotificationTime(rawTime),
+			})
+		}
+	}
+	return out
+}
+
+func normalizeNotificationAckTime(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "no-time"
+	}
+	value = strings.Replace(value, "T", " ", 1)
+	return strings.TrimSuffix(value, "Z")
+}
+
+func parseNotificationTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed
+		}
+	}
+	kst := time.FixedZone("KST", 9*60*60)
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if parsed, err := time.ParseInLocation(layout, value, kst); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func notificationSilence(ui map[string]any, now time.Time) (map[string]bool, map[string]bool) {
+	acked := map[string]bool{}
+	maintenance := map[string]bool{}
+	if raw, ok := ui["ack"].(map[string]any); ok {
+		for key := range raw {
+			acked[key] = true
+		}
+	}
+	if raw, ok := ui["maint"].(map[string]any); ok {
+		for host, value := range raw {
+			entry, _ := value.(map[string]any)
+			until, err := time.Parse(time.RFC3339Nano, mapStr(entry, "until"))
+			if err != nil {
+				until, err = time.Parse(time.RFC3339, mapStr(entry, "until"))
+			}
+			if err == nil && until.After(now) {
+				maintenance[host] = true
+			}
+		}
+	}
+	return acked, maintenance
 }

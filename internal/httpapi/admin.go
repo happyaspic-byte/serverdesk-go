@@ -9,7 +9,6 @@ package httpapi
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,8 +33,15 @@ var editFields = []string{"label", "company", "factory", "site", "asset_tag", "f
 // typeToKind 는 프런트 타입 → 엣지 kind. PC/WIN/PI 는 실수집기 미구현이라 명시 거절.
 var typeToKind = map[string]string{"SRV": "server", "NAS": "nas", "PLC": "plc", "PRN": "printer"}
 
-// ftTypes 는 FT 클러스터 타입 코드다.
-var ftTypes = map[string]bool{"EV": true, "EDGE": true, "END": true, "FTS": true}
+// ftTypePlatforms is intentionally limited to collectors actually implemented
+// by this binary. ztC Endurance/FTServer do not expose the AVCLI contract used
+// by AvcliWorker and must never be silently accepted as if they did.
+var ftTypePlatforms = map[string]string{"EV": "everrun", "EDGE": "ztcedge"}
+
+var unsupportedFTTypes = map[string]string{
+	"END": "ztC Endurance collection is not implemented",
+	"FTS": "ftServer collection is not implemented",
+}
 
 var (
 	keyRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{1,39}$`)
@@ -59,12 +65,57 @@ func (s *Server) findClusterState(key string) *poller.ClusterState {
 }
 
 func (s *Server) findEdgeCfg(key string) *config.EdgeDevice {
+	s.edgeCfgMu.RLock()
+	defer s.edgeCfgMu.RUnlock()
+	if s.Cfg == nil {
+		return nil
+	}
 	for i := range s.Cfg.EdgeDevices {
 		if s.Cfg.EdgeDevices[i].Key == key {
-			return &s.Cfg.EdgeDevices[i]
+			copy := s.Cfg.EdgeDevices[i]
+			return &copy
 		}
 	}
 	return nil
+}
+
+func (s *Server) edgeCfgCount() int {
+	s.edgeCfgMu.RLock()
+	defer s.edgeCfgMu.RUnlock()
+	if s.Cfg == nil {
+		return 0
+	}
+	return len(s.Cfg.EdgeDevices)
+}
+
+func (s *Server) appendEdgeCfg(device config.EdgeDevice) {
+	s.edgeCfgMu.Lock()
+	s.Cfg.EdgeDevices = append(s.Cfg.EdgeDevices, device)
+	s.edgeCfgMu.Unlock()
+}
+
+func (s *Server) removeEdgeCfg(key string) {
+	s.edgeCfgMu.Lock()
+	out := s.Cfg.EdgeDevices[:0]
+	for _, device := range s.Cfg.EdgeDevices {
+		if device.Key != key {
+			out = append(out, device)
+		}
+	}
+	s.Cfg.EdgeDevices = append([]config.EdgeDevice(nil), out...)
+	s.edgeCfgMu.Unlock()
+}
+
+func (s *Server) patchEdgeCfg(key string, fields map[string]string) bool {
+	s.edgeCfgMu.Lock()
+	defer s.edgeCfgMu.Unlock()
+	for i := range s.Cfg.EdgeDevices {
+		if s.Cfg.EdgeDevices[i].Key == key {
+			applyEdgeMeta(&s.Cfg.EdgeDevices[i], fields)
+			return true
+		}
+	}
+	return false
 }
 
 // putThresholds 는 PUT /api/admin/thresholds — 사용률 임계값 변경(파일 기록 + 라이브 반영).
@@ -91,6 +142,246 @@ func (s *Server) putThresholds(w http.ResponseWriter, r *http.Request) {
 	s.send(w, r, 200, map[string]any{"ok": true, "warn": warn, "crit": crit})
 }
 
+func (s *Server) notificationResponse() map[string]any {
+	cfg := config.NotificationConfig{}
+	if s.Notifier != nil {
+		cfg = s.Notifier.Config()
+	} else if s.Cfg != nil {
+		cfg = s.Cfg.Notifications
+	}
+	out := map[string]any{
+		"enabled": cfg.Enabled, "configured": cfg.WebhookURL != "",
+		"escalation_hours": cfg.EscalationHours,
+		"retry_max":        cfg.RetryMax, "retry_base_seconds": cfg.RetryBaseSeconds,
+	}
+	if s.Notifier != nil {
+		status := s.Notifier.Status()
+		out["runtime"] = status // compatibility with early UI integration builds
+		out["status"] = status
+	}
+	return out
+}
+
+func (s *Server) getNotifications(w http.ResponseWriter, r *http.Request) {
+	s.send(w, r, http.StatusOK, s.notificationResponse())
+}
+
+func (s *Server) persistedNotificationWebhook() (string, error) {
+	if s.Store == nil {
+		return "", errors.New("configuration store is unavailable")
+	}
+	doc, err := s.Store.ReadDoc()
+	if err != nil {
+		return "", err
+	}
+	return notificationWebhookFromDoc(doc)
+}
+
+func notificationWebhookFromDoc(doc map[string]json.RawMessage) (string, error) {
+	var persisted struct {
+		WebhookURL string `json:"webhook_url"`
+	}
+	if raw, ok := doc["notifications"]; ok {
+		if err := json.Unmarshal(raw, &persisted); err != nil {
+			return "", fmt.Errorf("decode persisted notifications: %w", err)
+		}
+	}
+	return persisted.WebhookURL, nil
+}
+
+func cloneRawDocument(doc map[string]json.RawMessage) map[string]json.RawMessage {
+	copy := make(map[string]json.RawMessage, len(doc))
+	for key, value := range doc {
+		copy[key] = append(json.RawMessage(nil), value...)
+	}
+	return copy
+}
+
+// restoreNotificationSection rolls back only the notification section while
+// retaining unrelated concurrent config changes. A bounded CAS loop avoids
+// replacing another administrator's newer document. After rollback it
+// checkpoints the restored document once more so .bak no longer points at the
+// rejected generation and its newly provisioned managed secret can be pruned.
+func (s *Server) restoreNotificationSection(raw json.RawMessage, existed bool) error {
+	for attempt := 0; attempt < 3; attempt++ {
+		current, err := s.Store.ReadDoc()
+		if err != nil {
+			return err
+		}
+		restored := cloneRawDocument(current)
+		if existed {
+			restored["notifications"] = append(json.RawMessage(nil), raw...)
+		} else {
+			delete(restored, "notifications")
+		}
+		if err := s.Store.CompareAndReplaceDoc(current, restored); err == nil {
+			return s.checkpointRestoredConfig()
+		} else if !errors.Is(err, config.ErrConfigChanged) {
+			return err
+		}
+	}
+	return config.ErrConfigChanged
+}
+
+func (s *Server) checkpointRestoredConfig() error {
+	for attempt := 0; attempt < 3; attempt++ {
+		current, err := s.Store.ReadDoc()
+		if err != nil {
+			return err
+		}
+		if err := s.Store.CompareAndReplaceDoc(current, cloneRawDocument(current)); err == nil {
+			return nil
+		} else if !errors.Is(err, config.ErrConfigChanged) {
+			return err
+		}
+	}
+	return config.ErrConfigChanged
+}
+
+func (s *Server) putNotifications(w http.ResponseWriter, r *http.Request) {
+	if s.Store == nil || s.Notifier == nil || s.Cfg == nil {
+		s.send(w, r, http.StatusServiceUnavailable, map[string]any{"error": "server notification service is unavailable"})
+		return
+	}
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	body, ok := s.readJSONBody(w, r)
+	if !ok || body == nil {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": "JSON 본문이 필요합니다"})
+		return
+	}
+	oldRuntime := s.Notifier.Config()
+	next := oldRuntime
+	beforeDoc, err := s.Store.ReadDoc()
+	if err != nil {
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "existing notification settings could not be read"})
+		return
+	}
+	oldNotificationRaw, oldNotificationExisted := beforeDoc["notifications"]
+	persistedURL, err := notificationWebhookFromDoc(beforeDoc)
+	if err != nil {
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "existing notification settings could not be read"})
+		return
+	}
+	if value, exists := body["enabled"]; exists {
+		enabled, valid := value.(bool)
+		if !valid {
+			s.send(w, r, http.StatusBadRequest, map[string]any{"error": "enabled must be boolean"})
+			return
+		}
+		next.Enabled = enabled
+	}
+	if value, exists := body["webhook_url"]; exists {
+		urlValue, valid := value.(string)
+		if !valid {
+			s.send(w, r, http.StatusBadRequest, map[string]any{"error": "webhook_url must be a string"})
+			return
+		}
+		if candidate := strings.TrimSpace(urlValue); candidate != "" {
+			persistedURL = candidate
+		}
+	}
+	resolvedURL, err := config.ResolveNotificationWebhookReference(persistedURL, s.Store.CredentialDirectory())
+	if err != nil {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": "webhook credential reference could not be resolved"})
+		return
+	}
+	next.WebhookURL = resolvedURL
+	readInt := func(key string, current int) (int, bool) {
+		value, exists := body[key]
+		if !exists {
+			return current, true
+		}
+		number, valid := value.(float64)
+		if !valid || number != float64(int(number)) {
+			return 0, false
+		}
+		return int(number), true
+	}
+	var valid bool
+	if next.EscalationHours, valid = readInt("escalation_hours", next.EscalationHours); !valid ||
+		(next.EscalationHours != 0 && next.EscalationHours != 4 && next.EscalationHours != 24) {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": "escalation_hours must be 0, 4, or 24"})
+		return
+	}
+	if next.RetryMax, valid = readInt("retry_max", next.RetryMax); !valid || next.RetryMax < 1 || next.RetryMax > 20 {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": "retry_max must be between 1 and 20"})
+		return
+	}
+	if next.RetryBaseSeconds, valid = readInt("retry_base_seconds", next.RetryBaseSeconds); !valid || next.RetryBaseSeconds < 1 || next.RetryBaseSeconds > 300 {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": "retry_base_seconds must be between 1 and 300"})
+		return
+	}
+	if err := s.Notifier.ValidateConfig(next); err != nil {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": "notification settings rejected: " + err.Error()})
+		return
+	}
+	persisted := map[string]any{
+		"enabled": next.Enabled, "webhook_url": persistedURL,
+		"escalation_hours": next.EscalationHours, "retry_max": next.RetryMax,
+		"retry_base_seconds": next.RetryBaseSeconds,
+	}
+	raw, err := json.Marshal(persisted)
+	if err != nil {
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "notification settings could not be encoded"})
+		return
+	}
+	afterDoc := cloneRawDocument(beforeDoc)
+	afterDoc["notifications"] = raw
+	if err := s.Store.CompareAndReplaceDoc(beforeDoc, afterDoc); err != nil {
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "notification settings could not be saved"})
+		return
+	}
+	config.RegisterSecret(next.WebhookURL)
+	if err := s.Notifier.UpdateConfig(next); err != nil {
+		rollbackErr := s.restoreNotificationSection(oldNotificationRaw, oldNotificationExisted)
+		// UpdateConfig is transactional by contract; the second call also
+		// reconciles defensive/fake implementations that mutated before erroring.
+		runtimeRollbackErr := s.Notifier.UpdateConfig(oldRuntime)
+		if rollbackErr != nil || runtimeRollbackErr != nil {
+			logf("error", "notify", fmt.Sprintf("notification update rollback failed config=%v runtime=%v", rollbackErr, runtimeRollbackErr))
+		}
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "notification runtime state could not be saved"})
+		return
+	}
+	logf("info", "notify", fmt.Sprintf("server notification settings updated enabled=%t escalation_hours=%d", next.Enabled, next.EscalationHours))
+	s.send(w, r, http.StatusOK, s.notificationResponse())
+}
+
+func (s *Server) testNotifications(w http.ResponseWriter, r *http.Request) {
+	if s.Notifier == nil {
+		s.send(w, r, http.StatusServiceUnavailable, map[string]any{"error": "server notification service is unavailable"})
+		return
+	}
+	raw, err := readCapped(r, 64*1024)
+	if err != nil {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": "invalid notification test JSON"})
+		return
+	}
+	body := map[string]any{}
+	if trimmed := strings.TrimSpace(string(raw)); trimmed != "" {
+		if err := json.Unmarshal(raw, &body); err != nil || body == nil {
+			s.send(w, r, http.StatusBadRequest, map[string]any{"error": "invalid notification test JSON"})
+			return
+		}
+	}
+	target := ""
+	if value, exists := body["webhook_url"]; exists {
+		var valid bool
+		target, valid = value.(string)
+		if !valid {
+			s.send(w, r, http.StatusBadRequest, map[string]any{"error": "webhook_url must be a string"})
+			return
+		}
+	}
+	status, err := s.Notifier.Test(r.Context(), strings.TrimSpace(target))
+	if err != nil {
+		s.send(w, r, http.StatusBadGateway, map[string]any{"error": "server webhook test failed"})
+		return
+	}
+	s.send(w, r, http.StatusOK, map[string]any{"ok": true, "status": status})
+}
+
 // doPut 은 PUT /api/clusters/<key> — 표시 메타 수정(poller.py do_PUT).
 func (s *Server) doPut(w http.ResponseWriter, r *http.Request, path string) {
 	if !s.writeGate(w, r) {
@@ -98,6 +389,10 @@ func (s *Server) doPut(w http.ResponseWriter, r *http.Request, path string) {
 	}
 	if path == "/api/admin/thresholds" {
 		s.putThresholds(w, r)
+		return
+	}
+	if path == "/api/admin/notifications" {
+		s.putNotifications(w, r)
 		return
 	}
 	if !strings.HasPrefix(path, "/api/clusters/") {
@@ -138,6 +433,8 @@ func (s *Server) doPut(w http.ResponseWriter, r *http.Request, path string) {
 		s.send(w, r, 400, map[string]any{"error": "floor_pos 형식: '행,열' (예: 1,3) 또는 빈 값"})
 		return
 	}
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 
 	// key 는 clusters[] 를 먼저 본다 — key 중복 시 엣지 쪽은 API 편집 불가(운영 계약).
 	st := s.findClusterState(key)
@@ -183,7 +480,13 @@ func (s *Server) doPut(w http.ResponseWriter, r *http.Request, path string) {
 	if st != nil {
 		s.applyClusterMeta(st, fields)
 	} else {
-		applyEdgeMeta(edgeCfg, fields)
+		if !s.patchEdgeCfg(key, fields) {
+			logf("error", "manage", fmt.Sprintf("config 저장 후 런타임 장비 누락(%s)", key))
+			s.send(w, r, http.StatusInternalServerError, map[string]any{
+				"error": "표시 설정은 저장되었지만 런타임 반영에 실패했습니다 — 서비스를 재시작하세요",
+			})
+			return
+		}
 		if s.Edge != nil {
 			s.Edge.PatchMeta(key, fields)
 		}
@@ -253,6 +556,8 @@ func (s *Server) doDelete(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	key, _ := url.PathUnescape(strings.TrimPrefix(path, "/api/clusters/"))
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	if s.findClusterState(key) != nil {
 		s.send(w, r, 400, map[string]any{"error": "FT 클러스터는 API 로 제거하지 않습니다 — config.local.json 에서 삭제 후 폴러 재시작"})
 		return
@@ -262,19 +567,55 @@ func (s *Server) doDelete(w http.ResponseWriter, r *http.Request, path string) {
 		s.send(w, r, 404, map[string]any{"error": "장비 없음: " + key})
 		return
 	}
-	if err := s.Store.RemoveEdgeDevice(key); err != nil {
+	body, ok := s.readJSONBody(w, r)
+	if !ok {
+		return
+	}
+	reason, err := operatorReason(body)
+	if err != nil {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	beforeDoc, err := s.Store.ReadDoc()
+	if err != nil {
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "config 읽기 실패"})
+		return
+	}
+	afterDoc, err := edgeDeletionDocument(beforeDoc, key)
+	if err != nil {
+		s.send(w, r, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	audit, err := s.prepareMutationAudit("device.delete", key, reason)
+	if err != nil {
+		logf("error", "audit", fmt.Sprintf("장비 삭제 감사 준비 실패(%s): %v", key, err))
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "감사 기록 저장 실패 — 장비를 삭제하지 않았습니다"})
+		return
+	}
+	if err := s.Store.CompareAndReplaceDoc(beforeDoc, afterDoc); err != nil {
+		_ = s.recordMutationAudit(audit, "failed")
+		if errors.Is(err, config.ErrConfigChanged) {
+			s.send(w, r, http.StatusConflict, map[string]any{"error": "설정이 동시에 변경되었습니다. 새로고침 후 다시 시도하세요"})
+			return
+		}
 		logf("error", "manage", fmt.Sprintf("config 저장 실패(%s 제거): %v", key, err))
 		s.send(w, r, 500, map[string]any{"error": "config 저장 실패 — 폴러 로그를 확인하세요"})
 		return
 	}
-	// 메모리 제거: 설정 목록 + 실행 중 워커(스냅샷은 EdgeManager.Latest 가 걸러낸다).
-	out := s.Cfg.EdgeDevices[:0]
-	for _, d := range s.Cfg.EdgeDevices {
-		if d.Key != key {
-			out = append(out, d)
+	if err := s.recordMutationAudit(audit, "committed"); err != nil {
+		rollbackErr := s.Store.CompareAndReplaceDoc(afterDoc, beforeDoc)
+		if rollbackErr == nil {
+			_ = s.recordMutationAudit(audit, "rolled_back")
+			logf("error", "audit", fmt.Sprintf("장비 삭제 감사 완료 실패로 롤백(%s): %v", key, err))
+			s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "감사 기록 저장 실패 — 장비 삭제를 롤백했습니다"})
+			return
 		}
+		logf("error", "audit", fmt.Sprintf("장비 삭제 감사 실패 후 config 롤백도 실패(%s): audit=%v rollback=%v", key, err, rollbackErr))
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "감사 기록과 삭제 롤백에 실패했습니다 — 즉시 폴러 로그와 설정을 확인하세요"})
+		return
 	}
-	s.Cfg.EdgeDevices = append([]config.EdgeDevice(nil), out...)
+	// 메모리 제거: 설정 목록 + 실행 중 워커(스냅샷은 EdgeManager.Latest 가 걸러낸다).
+	s.removeEdgeCfg(key)
 	if s.Edge != nil {
 		s.Edge.Remove(key)
 	}
@@ -289,6 +630,10 @@ func (s *Server) doPost(w http.ResponseWriter, r *http.Request, path string) {
 	}
 	if path == "/api/admin/config/import" {
 		s.handleConfigImport(w, r)
+		return
+	}
+	if path == "/api/admin/notifications/test" {
+		s.testNotifications(w, r)
 		return
 	}
 	if path != "/api/clusters" && path != "/api/clusters/test" {
@@ -313,7 +658,17 @@ func (s *Server) doPost(w http.ResponseWriter, r *http.Request, path string) {
 // addDevice 는 장비 추가다(poller.py _add_device).
 // 엣지는 핫애드(재시작 불필요), FT 클러스터는 저장 후 재시작 필요(명시 응답).
 func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[string]any) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	typ := strings.ToUpper(bodyStr(body, "type"))
+	if reason, unsupported := unsupportedFTTypes[typ]; unsupported {
+		s.send(w, r, 400, map[string]any{"error": reason + "; no configuration was saved"})
+		return
+	}
+	if s.Store == nil {
+		s.send(w, r, 503, map[string]any{"error": "configuration store is unavailable; no device was saved"})
+		return
+	}
 	key := bodyStr(body, "key")
 	ip := bodyStr(body, "mgmt")
 	if !keyRe.MatchString(key) {
@@ -337,8 +692,8 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 		name = key
 	}
 
-	if ftTypes[typ] {
-		entry := map[string]any{"key": key, "name": name, "mgmt_ip": ip}
+	if platform, supported := ftTypePlatforms[typ]; supported {
+		entry := map[string]any{"key": key, "name": name, "mgmt_ip": ip, "platform": platform}
 		for _, k := range []string{"company", "factory", "site", "asset_tag", "floor_pos"} {
 			if v := disp[k]; v != "" {
 				entry[k] = v
@@ -454,19 +809,30 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 		}
 	}
 
+	// Resolve references before persistence so a missing runtime credential cannot
+	// leave a half-added device in the file. Plaintext is retained in this copy;
+	// Store.AddEntry converts it to secret:// before it reaches disk.
+	var devCfg config.EdgeDevice
+	if b, err := json.Marshal(entry); err == nil {
+		_ = json.Unmarshal(b, &devCfg)
+	}
+	if err := config.ResolveEdgeDeviceSecretReferencesFrom(&devCfg, s.Store.CredentialDirectory()); err != nil {
+		logf("error", "manage", fmt.Sprintf("엣지 자격증명 해석 실패(%s): %v", key, err))
+		s.send(w, r, 400, map[string]any{"error": "자격증명 참조를 읽을 수 없습니다"})
+		return
+	}
+	for _, secret := range []string{devCfg.Community, devCfg.WebPassword, devCfg.Password, devCfg.BmcPassword} {
+		config.RegisterSecret(secret)
+	}
 	if err := s.Store.AddEntry(config.SectionEdgeDevices, entry); err != nil {
 		logf("error", "manage", fmt.Sprintf("config 추가 저장 실패(%s): %v", key, err))
 		s.send(w, r, 500, map[string]any{"error": "config 저장 실패 — 폴러 로그를 확인하세요"})
 		return
 	}
 	// 핫애드 — 설정·워커 동시 반영(다음 라운드부터 실폴러, 수 초 내 첫 라운드).
-	var devCfg config.EdgeDevice
-	if b, err := json.Marshal(entry); err == nil {
-		_ = json.Unmarshal(b, &devCfg)
-	}
-	s.Cfg.EdgeDevices = append(s.Cfg.EdgeDevices, devCfg)
+	s.appendEdgeCfg(devCfg)
 	if s.Edge != nil {
-		if b, err := json.Marshal(entry); err == nil {
+		if b, err := json.Marshal(devCfg); err == nil {
 			var dc edge.DeviceConfig
 			if json.Unmarshal(b, &dc) == nil {
 				s.Edge.Add(dc)
@@ -526,13 +892,21 @@ func (s *Server) connTest(ctx context.Context, body map[string]any) map[string]a
 		}
 	}()
 
-	if ftTypes[typ] {
+	if _, supported := ftTypePlatforms[typ]; supported {
 		out["transport"] = "avcli"
 		out["reachable"] = tcpOK(ip, 443) || tcpOK(ip, 22)
 		if !out["reachable"].(bool) {
 			warn("관리 콘솔(443/22) 응답 없음")
 		}
 		warn("자격증명 검증은 폴러 재시작 후 첫 수집에서 이뤄집니다")
+		return out
+	}
+	if reason, unsupported := unsupportedFTTypes[typ]; unsupported {
+		out["ok"] = false
+		out["supported"] = false
+		out["transport"] = "unsupported"
+		setAuthErr(reason)
+		warn(reason + "; connection test was not attempted")
 		return out
 	}
 	if typ == "PLC" {
@@ -659,15 +1033,6 @@ func finsProbe(ctx context.Context, ip string, port int, cmd []byte, sa1 byte) (
 	return len(resp) >= 14 && resp[12] == 0 && resp[13] == 0, rtt
 }
 
-// insecureHTTP 는 자체서명 인증서의 장비 웹 API(PVE/Redfish)용 클라이언트다.
-// 폐쇄망 장비는 CA 체인이 없어 검증을 끈다(Python ssl._create_unverified_context).
-var insecureHTTP = &http.Client{
-	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec — 폐쇄망 장비 계약
-	},
-}
-
 // pveTicket 은 Proxmox 티켓 발급 POST 다(읽기 목적의 인증 프로브).
 // 반환: (HTTP 상태코드, 오류). 상태코드가 0 이면 전송 자체 실패다.
 func pveTicket(ctx context.Context, ip, user, pw, fp string) (int, error) {
@@ -678,10 +1043,7 @@ func pveTicket(ctx context.Context, ip, user, pw, fp string) (int, error) {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	cl := insecureHTTP
-	if fp != "" {
-		cl = edge.DeviceHTTPClient(5*time.Second, fp)
-	}
+	cl := edge.DeviceHTTPClient(5*time.Second, fp)
 	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, err
@@ -701,10 +1063,7 @@ func redfishGet(ctx context.Context, host, user, pw, path, fp string) (int, erro
 		return 0, err
 	}
 	req.SetBasicAuth(user, pw)
-	cl := insecureHTTP
-	if fp != "" {
-		cl = edge.DeviceHTTPClient(5*time.Second, fp)
-	}
+	cl := edge.DeviceHTTPClient(5*time.Second, fp)
 	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, err

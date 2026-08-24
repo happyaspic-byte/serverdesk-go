@@ -4,30 +4,46 @@
 // ---------------------------------------------------------------------------
 
 import { _num, DASH, makeL } from './base.js';
+import { formatConsoleTime, timestampKey, CONSOLE_TIME_ZONE } from '../../util/ui_state.js';
 
 /* ===========================================================================
  * 2. 시간 파싱/포맷 (Vigil buildModel.ts 이식)
  * ======================================================================== */
 
-const _pad2 = (n) => String(n).padStart(2, '0');
-
 /** 'YYYY-MM-DDTHH:MM:SSZ' 등 → 'YYYY-MM-DD HH:MM:SS'. */
 export function tsNorm(t) {
-  return String(t == null ? '' : t).replace('T', ' ').replace('Z', '');
+  const raw = String(t == null ? '' : t).trim();
+  if (!raw) return '';
+  // 명시적 UTC/offset 값은 콘솔 표준(KST)으로 변환한다. 시간대 없는 레거시 값은
+  // 수집기 계약상 KST이므로 텍스트를 보존하고 KST 라벨만 붙인다.
+  if (/(?:Z|[+\-]\d{2}:?\d{2})$/i.test(raw)) return formatConsoleTime(raw);
+  return raw.replace('T', ' ') + ' KST';
+}
+
+/**
+ * 경보 확인 키 전용 레거시 정규화. 표시 시간대 변환과 의도적으로 분리한다.
+ * 서버 /ack에 이미 저장된 키 계약(T→공백, 끝 Z 제거, 결측 no-time)을 바꾸면 안 된다.
+ */
+export function ackTimeNorm(t) {
+  const raw = String(t == null ? '' : t).trim();
+  if (!raw) return 'no-time';
+  return raw.replace('T', ' ').replace(/Z$/i, '');
+}
+
+/** ACK value may be a legacy ISO string or the durable `{ts, by, reason}` record. */
+export function ackTimestampKey(value) {
+  const raw = value && typeof value === 'object' ? value.ts : value;
+  const parsed = Date.parse(String(raw || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export function _nowStamp() {
-  const d = new Date();
-  return d.getFullYear() + '-' + _pad2(d.getMonth() + 1) + '-' + _pad2(d.getDate()) +
-    ' ' + _pad2(d.getHours()) + ':' + _pad2(d.getMinutes()) + ':' + _pad2(d.getSeconds());
+  return formatConsoleTime(new Date());
 }
 
 /** 타임스탬프 문자열 → epoch ms (없으면 0). data.js tsOf 는 로컬 시각을 쓰므로 로컬로 파싱한다. */
 export function tsKey(ts) {
-  const s = String(ts == null ? '' : ts).trim().replace(' ', 'T');
-  if (!s) return 0;
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? 0 : d.getTime();
+  return timestampKey(ts);
 }
 
 /** 경과 초(미래/파싱실패는 null). */
@@ -62,9 +78,10 @@ export function shortTime(t, todayStr) {
 }
 
 export function _todayStr() {
-  const d = new Date();
-  return d.getFullYear() + '-' + _pad2(d.getMonth() + 1) + '-' + _pad2(d.getDate());
+  return formatConsoleTime(new Date(), false).slice(0, 10);
 }
+
+export { CONSOLE_TIME_ZONE };
 
 /* ---- 라이선스 날짜 ('Mon Jun 29 17:01:47 KST 2026') ---- */
 const _MO = { Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06', Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12' };
@@ -100,4 +117,3 @@ export function licTone(days) {
   if (days <= 60) return 'warn';
   return 'mut';
 }
-

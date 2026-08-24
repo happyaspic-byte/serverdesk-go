@@ -9,6 +9,7 @@ package httpapi
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"serverdesk/internal/config"
 	"serverdesk/internal/deviceview"
@@ -38,10 +40,16 @@ type Server struct {
 	Cfg    *config.Config
 	Store  *config.Store
 	Events *poller.EventLog
-	Avail  *poller.AvailTracker
-	Edge   *poller.EdgeManager
+	// Audit is the fail-closed durable sink for destructive operator actions.
+	// Production uses Events; the interface also permits deterministic failure
+	// injection in transaction tests.
+	Audit AuditRecorder
+	Avail *poller.AvailTracker
+	Edge  *poller.EdgeManager
 	// Gate 는 쓰기 경로의 동일출처 검사에 쓰는 webfront 서버다(GateWrite).
 	Gate *webfront.Server
+	// Notifier is the optional server-resident critical webhook controller.
+	Notifier NotificationController
 
 	StartedAt time.Time
 	CORS      []string
@@ -51,6 +59,21 @@ type Server struct {
 	// 이 두 키와 PUT 즉시 반영분을 여기서 들고 있는다.
 	ovlMu          sync.Mutex
 	displayOverlay map[string]map[string]string
+	notifyMu       sync.Mutex
+	// deviceMu serializes complete add/edit/delete transactions so a slower
+	// request cannot apply an older in-memory result after a newer disk commit.
+	deviceMu sync.Mutex
+	// edgeCfgMu protects the runtime copy of Cfg.EdgeDevices from concurrent
+	// health reads and operator mutations served by net/http goroutines.
+	edgeCfgMu sync.RWMutex
+}
+
+type NotificationController interface {
+	ValidateConfig(config.NotificationConfig) error
+	UpdateConfig(config.NotificationConfig) error
+	Config() config.NotificationConfig
+	Test(context.Context, string) (int, error)
+	Status() map[string]any
 }
 
 // New 는 /api 핸들러를 만든다. overlay 는 NewDisplayOverlay 로 만든 것을 넘긴다.
@@ -60,6 +83,7 @@ func New(cache *poller.FleetCache, states []*poller.ClusterState, cfg *config.Co
 	overlay map[string]map[string]string) *Server {
 	return &Server{
 		Cache: cache, States: states, Cfg: cfg, Store: store, Events: events,
+		Audit: events,
 		Avail: avail, Edge: edge, Gate: gate, StartedAt: time.Now(),
 		CORS: cors, displayOverlay: overlay,
 	}
@@ -244,6 +268,10 @@ func (s *Server) readJSONBody(w http.ResponseWriter, r *http.Request) (map[strin
 	if len(body) == 0 {
 		return nil, true // 본문 없음 — Python 의 None 과 같게 호출부에서 400 처리
 	}
+	if !utf8.Valid(body) {
+		s.send(w, r, 400, map[string]any{"error": "JSON 본문은 유효한 UTF-8이어야 합니다"})
+		return nil, false
+	}
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, true // 파싱 실패도 None 취급(Python 동일)
@@ -254,15 +282,29 @@ func (s *Server) readJSONBody(w http.ResponseWriter, r *http.Request) (map[strin
 // ServeHTTP 는 /api 라우팅이다. 패닉은 500 으로 변환한다(Python do_GET 의
 // 맨 바깥 except 와 같은 격리).
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimRight(r.URL.Path, "/")
+	if path == "" {
+		path = "/"
+	}
 	defer func() {
 		if rec := recover(); rec != nil {
 			logf("error", "http", fmt.Sprintf("HTTP 핸들러 예외: %v\n%s", rec, debug.Stack()))
 			s.send(w, r, 500, map[string]any{"error": "internal"})
 		}
 	}()
-	path := strings.TrimRight(r.URL.Path, "/")
-	if path == "" {
-		path = "/"
+	// 액션 endpoint 는 현재 mutation 구현이 없지만 라우트 계약 자체는 명시한다.
+	// POST 는 쓰기 가드를 거친 구조화된 501, 그 외 메서드는 일반 404 대신 405다.
+	if clusterID, ok := clusterActionTarget(path); ok {
+		if r.Method == http.MethodPost {
+			if s.writeGate(w, r) {
+				s.clusterActionUnsupported(w, r, clusterID)
+			}
+			return
+		}
+		if r.Method != http.MethodOptions {
+			s.clusterActionMethodNotAllowed(w, r)
+			return
+		}
 	}
 
 	switch r.Method {
@@ -304,6 +346,7 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 		}
 		if path == "/api/devices" || fmtQ == "devices" || fmtQ == "device" || fmtQ == "serverdesk" {
 			out := deviceview.BuildDevices(fleet, s.DisplayCfg(), s.refreshSec())
+			out["capabilities"] = s.capabilities()
 			// 실 엣지 디바이스 — FT 클러스터 바로 뒤에 append.
 			devices := []map[string]any{}
 			for _, dv := range listAny(out["devices"]) {
@@ -361,8 +404,12 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 		s.send(w, r, 200, out)
 	case "/api/admin/config/export":
 		s.handleConfigExport(w, r)
+	case "/api/admin/notifications":
+		s.getNotifications(w, r)
 	case "/api/admin/health":
 		s.send(w, r, 200, s.health(fleet, ts))
+	case "/api/capabilities":
+		s.send(w, r, 200, map[string]any{"capabilities": s.capabilities()})
 	case "/api/availability.csv":
 		s.handleAvailabilityCSV(w, r)
 	case "/api/health":
@@ -374,7 +421,9 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 			"service": "everrun-poller", "version": poller.Version,
 			"endpoints": []string{"/api/fleet", "/api/devices",
 				"/api/fleet?format=devices", "/api/topology",
-				"/api/topology?model=full", "/api/health", "/api/admin/health"}})
+				"/api/topology?model=full", "/api/health", "/api/admin/health",
+				"/api/capabilities"},
+			"capabilities": s.capabilities()})
 	default:
 		s.send(w, r, 404, map[string]any{"error": "not found", "path": path})
 	}
@@ -489,11 +538,22 @@ func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
 	if s.Edge != nil {
 		edgeSnapshot = s.Edge.CollectorStatus()
 	} else if s.Cfg != nil {
-		edgeSnapshot.Configured = len(s.Cfg.EdgeDevices)
+		edgeSnapshot.Configured = s.edgeCfgCount()
 	}
 	edgeStatus, edgeSeverity := edgeCollectorHealth(uptime, edgeSnapshot)
 	if edgeSeverity != "" {
 		bump(edgeSeverity)
+	}
+
+	notificationStatus := map[string]any{"enabled": false, "configured": false, "healthy": true}
+	if s.Notifier != nil {
+		notificationStatus = s.Notifier.Status()
+		if value, ok := notificationStatus["last_error"].(string); ok {
+			notificationStatus["last_error"] = config.Mask(value)
+		}
+		if healthy, _ := notificationStatus["healthy"].(bool); !healthy {
+			bump("degraded")
+		}
 	}
 
 	return map[string]any{
@@ -509,6 +569,7 @@ func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
 		},
 		"event_store":    eventStatus,
 		"edge_collector": edgeStatus,
+		"notifications":  notificationStatus,
 		"clusters":       clusters,
 	}
 }

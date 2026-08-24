@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import {
-  TYPES, FT_TYPES, isFT, isNoTel, deriveStatus, deriveSync, availN,
+  TYPES, FT_TYPES, TYPE_KEYS, isFT, isNoTel, deriveStatus, deriveSync, availN,
 } from '../data.js';
 import { COLOR } from '../../util/fmt.js';
 import {
@@ -13,13 +13,14 @@ import {
 } from './base.js';
 import {
   statusTone, statusLabel, statusAnim, pctTone, pctToneAlloc,
-  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, fmtAvailN,
-  fmtDowntimeYr, fmtUptimeD,
+  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint, fmtAvailN,
+  fmtDowntimeYr, fmtUptimeD, deviceCode,
 } from './format.js';
 import {
   tsNorm, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
 } from './time.js';
+import { activeMaint } from './alert.js';
 
 /* ===========================================================================
  * 10. buildTopo — Vigil topo.ts 이식(회사→공장→장비→노드→EAC→VM)
@@ -932,7 +933,7 @@ export function buildTopo(a, b) {
     lanes.forEach((lane, i) => {
       const n = lane.node;
       const st = nodeStatus(n);
-      const nMaint = _nodeMaint(n);
+      const nMaint = nodeMaint(n);
       const eff = nMaint ? 'deg' : st;
       const laneCy = laneTop + lane.h / 2;
       nodeCy.push(laneCy); nodeSt.push(st);
@@ -1137,7 +1138,7 @@ export function buildTopo(a, b) {
         let ny = devCy - stackH(rawN.length, XN.h, XN.gy) / 2;
         rawN.forEach((n, i) => {
           const st = nodeStatus(n);
-          const nMaint = _nodeMaint(n);
+          const nMaint = nodeMaint(n);
           const cy = ny + XN.h / 2;
           const eff = nMaint ? 'deg' : st;
           pushBox({

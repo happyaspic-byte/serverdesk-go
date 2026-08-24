@@ -15,7 +15,8 @@ import { setUsageThresholds } from '../util/fmt.js';
 export const TYPES = {
   EV:   { label: 'everRun',        short: 'EV',   kindEN: 'Datacenter FT',          kindKO: '데이터센터 FT',     icon: 'ph-stack' },
   EDGE: { label: 'ztC Edge',       short: 'EDGE', kindEN: 'Edge FT',                kindKO: '엣지 FT',          icon: 'ph-cpu' },
-  END:  { label: 'ztC Endurance',  short: 'END',  kindEN: 'Datacenter FT',          kindKO: '데이터센터 FT',     icon: 'ph-hard-drives' },
+  // 레거시 import 표시 전용. 현재 수집기에는 Endurance ingestion/persistence 계약이 없다.
+  END:  { label: 'ztC Endurance',  short: 'END',  kindEN: 'Legacy imported record', kindKO: '레거시 가져오기 레코드', icon: 'ph-hard-drives', supported: false },
   FTS:  { label: 'ftServer',       short: 'FTS',  kindEN: 'Fault-tolerant server',  kindKO: '무정지 서버',       icon: 'ph-shield-check' },
   SRV:  { label: '서버', labelEN: 'Server', short: 'SRV',  kindEN: 'General server',         kindKO: '일반 서버',        icon: 'ph-hard-drive' },
   PLC:  { label: 'PLC',            short: 'PLC',  kindEN: 'Controller',             kindKO: '제어기',           icon: 'ph-squares-four' },
@@ -278,6 +279,52 @@ function normalizeTrap(t) {
  */
 export const API_URL = '/api/devices';
 
+const CLUSTER_ACTIONS_DEFAULT_REASON = 'Server did not advertise cluster action support.';
+const CLUSTER_ACTIONS_DEFAULT_REASON_KO = '서버가 클러스터 제어 지원을 알리지 않았습니다.';
+
+/**
+ * 서버 capability 응답을 fail-closed 형태로 정규화한다.
+ * supported=true 뿐 아니라 개별 action allowlist에도 있어야 실행 가능하다.
+ */
+export function normalizeCapabilities(raw) {
+  const root = raw && typeof raw === 'object' ? raw : {};
+  const src = root.cluster_actions && typeof root.cluster_actions === 'object'
+    ? root.cluster_actions : {};
+  const actions = Array.isArray(src.actions)
+    ? Array.from(new Set(src.actions.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim())))
+    : [];
+  const supported = src.supported === true;
+  return {
+    cluster_actions: {
+      supported,
+      // 빈 allowlist를 "모두 허용"으로 해석하지 않는다. 광고되지 않은 action은 항상 차단한다.
+      actions: supported ? actions : [],
+      endpoint: typeof src.endpoint === 'string' ? src.endpoint : '/api/clusters/{id}/action',
+      reason: typeof src.reason === 'string' && src.reason.trim()
+        ? src.reason.trim() : CLUSTER_ACTIONS_DEFAULT_REASON,
+      reason_ko: typeof src.reason_ko === 'string' && src.reason_ko.trim()
+        ? src.reason_ko.trim() : CLUSTER_ACTIONS_DEFAULT_REASON_KO,
+    },
+  };
+}
+
+/** 특정 cluster action의 실행 가능 여부. 누락·오염·부분 광고 모두 기본 거절한다. */
+export function clusterActionAvailability(capabilities, action) {
+  const cap = normalizeCapabilities(capabilities).cluster_actions;
+  const key = String(action || '');
+  if (!cap.supported) {
+    return { supported: false, reason: cap.reason, reason_ko: cap.reason_ko };
+  }
+  if (!cap.actions.includes(key)) {
+    return {
+      supported: false,
+      reason: 'Server did not advertise support for action: ' + key,
+      reason_ko: '서버가 이 제어 작업의 지원을 알리지 않았습니다: ' + key,
+    };
+  }
+  return { supported: true, reason: '', reason_ko: '' };
+}
+
 function redirectToLogin() {
   if (typeof window === 'undefined' || !window.location) return;
   const next = window.location.pathname + window.location.search + window.location.hash;
@@ -334,6 +381,8 @@ export async function pull(url, timeoutMs) {
       // 사용률 임계값 — 서버(config.thresholds) 정본. pullPatch 가 라이브 반영한다.
       thresholds: (j && j.thresholds && typeof j.thresholds.warn === 'number' && typeof j.thresholds.crit === 'number')
         ? { warn: j.thresholds.warn, crit: j.thresholds.crit } : null,
+      // 변경 기능은 서버 광고만 신뢰한다. 필드가 없는 구버전 서버는 안전하게 미지원 처리.
+      capabilities: normalizeCapabilities(j && j.capabilities),
       // 폴러가 실장비에서 읽은 뒤 흐른 시간. 클라이언트 수신 시각(lastPoll)과 다르다 —
       // 수집이 밀리면 '방금 받았지만 값은 몇 분 낡은' 상태가 되고, lastPoll 만 보면 그걸 못 본다.
       cacheAgeSec: (j && typeof j.cache_age_secs === 'number' && j.cache_age_secs >= 0)
@@ -396,6 +445,11 @@ export async function pullPatch(state, url, timeoutMs) {
       source: 'live',
       refreshSec: r.refreshSec,
       lastPoll: r.polledAt,
+      lastAttempt: Date.now(),
+      pollPending: false,
+      // 직전 실패의 stale=true를 정상 응답에서 반드시 지운다. 폴러 자체가 캐시
+      // 지연을 보고한 성공 응답만 stale로 유지한다.
+      stale: !!r.stale,
       // 이벤트 이력(폴러 events[]) — 로그 화면 tail 의 정본. 활성 경보 스냅샷과 달리
       // 해소된 경보·상태 전이가 이력으로 남는다.
       liveEventLog: r.events,
@@ -404,6 +458,7 @@ export async function pullPatch(state, url, timeoutMs) {
       // 백엔드 총평 — compute 가 자체 재도출값과 대조해 더 나쁜 쪽을 택한다.
       pollerOverall: r.overall || null,
       thresholds: r.thresholds || null,
+      capabilities: r.capabilities,
       cacheAgeSec: r.cacheAgeSec,
     };
   }
@@ -412,7 +467,8 @@ export async function pullPatch(state, url, timeoutMs) {
     source: 'live',
     liveError: r.error || 'unreachable',
     stale: true,
-    lastPoll: Date.now(),
+    lastAttempt: Date.now(),
+    pollPending: false,
   };
 }
 
@@ -546,66 +602,10 @@ export function pushMaint(delta, timeoutMs) { return pushState(MAINT_URL, delta,
 /** 장비 메모 델타를 서버에 본다(pushAck 과 같은 계약·재시도). */
 export function pushNotes(delta, timeoutMs) { return pushState(NOTES_URL, delta, timeoutMs); }
 
-const ESCAL_URL = '/escal';
-const NOTIFY_URL = '/notify';
-
-/**
- * 에스컬레이션 클레임 — 서버가 락 안에서 add-if-absent 로 병합하고, 실제로 새로 들어간
- * 키만 added 로 돌려준다. 콘솔이 여러 개 열리든 added 를 받은 한 쪽만 웹훅을 쏜다(중복 발송 방지).
- * 실패하면 null(다음 틱에 다시 시도).
- */
-export async function claimEscal(keys, timeoutMs) {
-  if (typeof fetch !== 'function' || !keys || !keys.length) return null;
-  const set = {};
-  const iso = new Date().toISOString();
-  keys.forEach((k) => { set[k] = iso; });
-  let timer = null;
-  try {
-    const opt = {
-      method: 'PUT', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ set }),
-    };
-    if (typeof AbortController === 'function') {
-      const ctrl = new AbortController();
-      timer = setTimeout(() => { try { ctrl.abort(); } catch (_) { /* noop */ } }, timeoutMs || 2500);
-      opt.signal = ctrl.signal;
-    }
-    const r = await fetch(ESCAL_URL, opt);
-    if (!r || !r.ok) return null;
-    const j = await r.json();
-    return (j && Array.isArray(j.added)) ? j.added : null;
-  } catch (e) {
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-/** 웹훅 발송 — serve.py /notify 가 Slack(text)·Discord(content) 양식으로 중계한다. */
-export async function sendWebhook(url, text, timeoutMs) {
-  if (typeof fetch !== 'function' || !url || !text) return false;
-  let timer = null;
-  try {
-    const opt = {
-      method: 'POST', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, text }),
-    };
-    if (typeof AbortController === 'function') {
-      const ctrl = new AbortController();
-      timer = setTimeout(() => { try { ctrl.abort(); } catch (_) { /* noop */ } }, timeoutMs || 3000);
-      opt.signal = ctrl.signal;
-    }
-    const r = await fetch(NOTIFY_URL, opt);
-    if (!r || !r.ok) return false;
-    const j = await r.json().catch(() => null);
-    return !!(j && j.ok);
-  } catch (e) {
-    return false;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+/** Server response replaces local fallback; null means the server was unreachable. */
+export function authoritativeSharedState(localValue, remoteValue) {
+  return (remoteValue && typeof remoteValue === 'object' && !Array.isArray(remoteValue))
+    ? remoteValue : (localValue || {});
 }
 
 /** 이전 맵 → 다음 맵의 차이를 델타로 계산한다(순수 · 테스트 가능). */

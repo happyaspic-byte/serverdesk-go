@@ -97,6 +97,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.sc-nd-row-link,.sc-nd-group-btn{
+  appearance:none; border:0; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer;
+}
+.sc-nd-row-link{ padding:3px 4px; margin:-3px -4px; border-radius:var(--r-xs); }
+.sc-nd-row-link:hover .sc-nd-host{ text-decoration:underline; text-underline-offset:2px; }
 
 /* 저하/오프라인 상태 칩(색맹 대응, minor#8) — 노드 셀 이름 옆 상시 텍스트. */
 .sc-nd-status { flex-shrink: 0; padding: 2px 8px; letter-spacing: .01em; }
@@ -245,6 +250,7 @@
   user-select: none;
   transition: background var(--dur) var(--ease);
 }
+.sc-nd-group-btn{ display:block; width:100%; padding:0; }
 .sc-nd-group--fa td {
   background: var(--canvas);
   padding-left: 34px;

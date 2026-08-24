@@ -25,6 +25,8 @@ export {
   isFT, isNoTel, deriveStatus, deriveSync, availN, COLOR,
 };
 
+export { normalizeCapabilities, clusterActionAvailability } from './data.js';
+
 /* 도메인 모듈 재수출 (compute/*) */
 export {
   clamp, cmpKo, langOf, makeL,
@@ -33,12 +35,12 @@ export {
 
 export {
   statusTone, statusLabel, statusAnim, pctTone, pctToneAlloc,
-  typeIconOf, typeInfo, usageOf, syncInfo, isMaint,
+  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint,
   fmtAvailN, fmtDowntimeYr, fmtUptimeD,
 } from './compute/format.js';
 
 export {
-  tsNorm, tsKey, agoSec, agoText, shortTime,
+  tsNorm, ackTimeNorm, ackTimestampKey, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
 } from './compute/time.js';
 
@@ -74,11 +76,11 @@ export {
 import { clamp, cmpKo, langOf, makeL, SEV_RANK, sevInfo, histOf } from './compute/base.js';
 import {
   statusTone, statusLabel, statusAnim, pctTone,
-  typeIconOf, typeInfo, usageOf, syncInfo, isMaint,
+  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint,
   fmtAvailN, fmtUptimeD,
 } from './compute/format.js';
 import {
-  tsNorm, tsKey, agoSec, agoText, shortTime,
+  tsNorm, ackTimestampKey, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
 } from './compute/time.js';
 import { sortRows } from './compute/node.js';
@@ -87,6 +89,7 @@ import {
   buildClusters, buildCapacity, buildManageTree, buildSearch,
 } from './compute/cluster.js';
 import { buildDetail } from './compute/detail.js';
+import { normalizeCapabilities, clusterActionAvailability } from './data.js';
 import {
   COMPANY_PALETTE, buildTopo, buildCompanyColors,
 } from './compute/topo.js';
@@ -96,10 +99,11 @@ export default {
   buildClusters, buildCapacity, buildManageTree, buildSearch, buildCompanyColors,
   clamp, cmpKo, langOf, makeL,
   statusTone, statusLabel, statusAnim, pctTone,
-  typeIconOf, typeInfo, usageOf, syncInfo, isMaint,
-  fmtAvailN, fmtUptimeD, tsNorm, tsKey, agoSec, agoText, shortTime,
+  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint,
+  fmtAvailN, fmtUptimeD, tsNorm, ackTimestampKey, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
   sevInfo, SEV_RANK, histOf, sortRows,
   COMPANY_PALETTE, TYPES, FT_TYPES, isFT, isNoTel,
   deriveStatus, deriveSync, availN, COLOR,
+  normalizeCapabilities, clusterActionAvailability,
 };

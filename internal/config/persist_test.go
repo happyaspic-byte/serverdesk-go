@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +201,271 @@ func TestAddEntry(t *testing.T) {
 	}
 }
 
+func TestStoreProtectsNewSecretsWhenReferencesRequired(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentialDir := filepath.Join(dir, "credentials")
+	if err := os.Mkdir(credentialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SERVERDESK_CREDENTIALS_DIRECTORY", credentialDir)
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"secret_policy":"require-references","clusters":[],"edge_devices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	if err := store.AddEntry(SectionEdgeDevices, map[string]any{
+		"key": "pve-a", "kind": "proxmox", "password": "new-device-password",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "new-device-password") || !strings.Contains(string(data), "secret://") {
+		t.Fatalf("stored config did not protect secret: %s", data)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EdgeDevices[0].Password != "new-device-password" {
+		t.Fatalf("resolved password = %q", loaded.EdgeDevices[0].Password)
+	}
+}
+
+func TestStoreUsesManagedCredentialStoreNotSystemdReadOnlyDirectory(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.local.json")
+	if err := os.WriteFile(configPath, []byte(`{"secret_policy":"require-references","clusters":[],"edge_devices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	systemdReadOnly := filepath.Join(root, "systemd-read-only")
+	if err := os.Mkdir(systemdReadOnly, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CREDENTIALS_DIRECTORY", systemdReadOnly)
+	t.Setenv("SERVERDESK_CREDENTIALS_STORE", "")
+	t.Setenv("SERVERDESK_CREDENTIALS_DIRECTORY", "")
+
+	store := NewStore(configPath)
+	wantStore := filepath.Join(root, "credentials")
+	if store.CredentialDirectory() != wantStore {
+		t.Fatalf("managed credential directory = %q, want %q", store.CredentialDirectory(), wantStore)
+	}
+	if err := store.AddEntry(SectionEdgeDevices, map[string]any{
+		"key": "nas-ui", "kind": "nas", "ip": "10.0.0.2", "community": "private-community",
+	}); err != nil {
+		t.Fatalf("UI-style add with read-only systemd credentials: %v", err)
+	}
+	entries, err := os.ReadDir(systemdReadOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("wrote into systemd CREDENTIALS_DIRECTORY: %v", entries)
+	}
+	managed, err := os.ReadDir(wantStore)
+	if err != nil || len(managed) != 1 {
+		t.Fatalf("managed credentials = %v, %v", managed, err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "private-community") || !strings.Contains(string(data), "secret://serverdesk.managed.edge_devices.nas-ui.community.") {
+		t.Fatalf("config secret was not replaced by a versioned reference: %s", data)
+	}
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EdgeDevices[0].Community != "private-community" {
+		t.Fatalf("managed credential did not resolve after restart: %q", loaded.EdgeDevices[0].Community)
+	}
+}
+
+func TestStoreProtectsNotificationWebhookAndResolvesAfterRestart(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.local.json")
+	if err := os.WriteFile(path, []byte(`{"secret_policy":"require-references","clusters":[],"edge_devices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	const webhook = "https://hooks.slack.com/services/private-token"
+	if err := store.SetSectionValue("notifications", map[string]any{
+		"enabled": true, "webhook_url": webhook, "escalation_hours": 4,
+		"retry_max": 5, "retry_base_seconds": 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "private-token") || !strings.Contains(string(data), "secret://serverdesk.managed.notifications.webhook_url.") {
+		t.Fatalf("webhook was not protected: %s", data)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Notifications.WebhookURL != webhook || !loaded.Notifications.Enabled {
+		t.Fatalf("reloaded notifications = %#v", loaded.Notifications)
+	}
+}
+
+func TestCommittedConfigSurvivesParentSyncFailureWithoutRuntimeSplitOrDanglingSecret(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.local.json")
+	if err := os.WriteFile(path, []byte(`{"secret_policy":"require-references","clusters":[],"edge_devices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	put := func(url string) error {
+		return store.SetSectionValue("notifications", map[string]any{
+			"enabled": true, "webhook_url": url, "escalation_hours": 4,
+			"retry_max": 5, "retry_base_seconds": 5,
+		})
+	}
+	if err := put("https://hooks.slack.com/services/old-token"); err != nil {
+		t.Fatal(err)
+	}
+	originalSync := syncConfigParent
+	originalWarn := Warnf
+	var warnings []string
+	syncConfigParent = func(string) error { return errors.New("injected directory sync failure") }
+	Warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() {
+		syncConfigParent = originalSync
+		Warnf = originalWarn
+	})
+	const rotated = "https://hooks.slack.com/services/new-token"
+	if err := put(rotated); err != nil {
+		t.Fatalf("visible committed update returned a split-brain error: %v", err)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("directory sync failure was not surfaced")
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("committed config contains a dangling secret reference: %v", err)
+	}
+	if loaded.Notifications.WebhookURL != rotated {
+		t.Fatalf("runtime reload saw %q, want rotated target", loaded.Notifications.WebhookURL)
+	}
+	entries, err := os.ReadDir(store.CredentialDirectory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("crash fallback credential generation was removed: %v", entries)
+	}
+}
+
+func TestStoreManagedSecretsAreVersionedAndOldGenerationIsCleaned(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	if err := os.WriteFile(path, []byte(`{"secret_policy":"require-references","clusters":[],"edge_devices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	add := func(value string) {
+		t.Helper()
+		if err := store.AddEntry(SectionEdgeDevices, map[string]any{
+			"key": "pve", "kind": "proxmox", "ip": "10.0.0.3", "password": value,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("first-password")
+	firstEntries, err := os.ReadDir(store.CredentialDirectory())
+	if err != nil || len(firstEntries) != 1 {
+		t.Fatalf("first credential files = %v, %v", firstEntries, err)
+	}
+	firstName := firstEntries[0].Name()
+	if err := store.RemoveEdgeDevice("pve"); err != nil {
+		t.Fatal(err)
+	}
+	add("rotated-password")
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EdgeDevices[0].Password != "rotated-password" {
+		t.Fatalf("rotated value = %q", loaded.EdgeDevices[0].Password)
+	}
+	entries, err := os.ReadDir(store.CredentialDirectory())
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("versioned credential files = %v, %v", entries, err)
+	}
+	if entries[0].Name() == firstName {
+		t.Fatalf("stale credential generation was retained: %s", firstName)
+	}
+}
+
+func TestAddEntryRejectsCrossTypeKeyCollision(t *testing.T) {
+	path := copyFixture(t)
+	store := NewStore(path)
+	if err := store.AddEntry(SectionEdgeDevices, map[string]any{"key": "everrun", "kind": "nas"}); err == nil {
+		t.Fatal("edge key collided with existing cluster")
+	}
+	if err := store.AddEntry(SectionClusters, map[string]any{"key": "nas-1", "mgmt_ip": "10.0.0.4"}); err == nil {
+		t.Fatal("cluster key collided with existing edge device")
+	}
+}
+
+func TestStoreCleansPartiallyProvisionedManagedSecretsOnFailure(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	original := []byte(`{"secret_policy":"require-references","clusters":[],"edge_devices":[]}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	err := store.AddEntry(SectionEdgeDevices, map[string]any{
+		"key": "broken", "kind": "proxmox", "admin_password": "written-first", "password": "bad\x00value",
+	})
+	if err == nil {
+		t.Fatal("invalid second secret unexpectedly persisted")
+	}
+	entries, readErr := os.ReadDir(store.CredentialDirectory())
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("partial credential provisioning left orphans: %v", entries)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("failed transaction changed config: %s", after)
+	}
+}
+
+func TestCredentialCleanupNeverDeletesExternalNames(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	if err := os.WriteFile(path, []byte(`{"secret_policy":"require-references","clusters":[],"edge_devices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	if err := StoreCredential(store.CredentialDirectory(), "vendor-provisioned", "external-value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSectionValue("thresholds", map[string]any{"warn": 80, "crit": 95}); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := readCredentialFile(store.CredentialDirectory(), "vendor-provisioned"); err != nil || value != "external-value" {
+		t.Fatalf("external credential was deleted or changed: %q, %v", value, err)
+	}
+}
+
 func TestRemoveEdgeDevice(t *testing.T) {
 	path := copyFixture(t)
 	s := NewStore(path)
@@ -239,5 +505,54 @@ func TestStoreKeepsTrailingNewlineAndUTF8(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "한글이름") {
 		t.Error("비ASCII 가 이스케이프됐다(ensure_ascii=False 규약 위반)")
+	}
+}
+
+func TestStoreNeverFollowsFixedTempOrBackupSymlinks(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	if err := os.WriteFile(path, []byte(`{"secret_policy":"allow-plaintext","clusters":[],"edge_devices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(root, "victim")
+	const sentinel = "must-not-be-overwritten"
+	if err := os.WriteFile(victim, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, legacyName := range []string{path + ".tmp", path + ".bak"} {
+		if err := os.Symlink(victim, legacyName); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+	}
+	store := NewStore(path)
+	if err := store.SetSectionValue("thresholds", map[string]any{"warn": 80, "crit": 95}); err != nil {
+		t.Fatalf("safe atomic update failed: %v", err)
+	}
+	data, err := os.ReadFile(victim)
+	if err != nil || string(data) != sentinel {
+		t.Fatalf("fixed-name symlink target changed: %q, %v", data, err)
+	}
+	if got := readDoc(t, path)["thresholds"].(map[string]any)["crit"]; got != float64(95) {
+		t.Fatalf("config update missing: %v", got)
+	}
+}
+
+func TestStoreRejectsSymlinkConfigPath(t *testing.T) {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real.json")
+	original := []byte(`{"secret_policy":"allow-plaintext","clusters":[],"edge_devices":[]}`)
+	if err := os.WriteFile(realPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(root, "config.json")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := NewStore(linkPath).SetSectionValue("thresholds", map[string]any{"warn": 80, "crit": 95}); err == nil {
+		t.Fatal("symlink config path was accepted")
+	}
+	after, err := os.ReadFile(realPath)
+	if err != nil || string(after) != string(original) {
+		t.Fatalf("symlink target changed: %s, %v", after, err)
 	}
 }

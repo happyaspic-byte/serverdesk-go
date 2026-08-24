@@ -237,9 +237,8 @@ export default {
     };
     root.addEventListener('click', this._onClick);
 
-    // 카드(role=button tabindex=0)의 키보드 활성화 — Enter/Space 로 클릭과 동일 동작(상세 진입).
-    // 테이블 행(data-nd-row, role=button tabindex=0)도 동일 패턴 — 키보드 사용자가 정렬 테이블에서
-    // 마우스 없이 상세로 진입할 수 있게 한다(카드 구현을 그대로 미러링).
+    // 카드(role=button tabindex=0)의 키보드 활성화. 테이블은 행에 인터랙티브 role을
+    // 씌우지 않고 셀 안 네이티브 버튼이 키보드 동작을 담당한다.
     // Space 는 preventDefault 로 페이지 스크롤을 막는다.
     // 그룹 헤더(data-nd-group)도 같은 패턴으로 클릭과 동일 동작을 준다
     // (manage.js 의 data-mng-toggle 키보드 처리와 동일 구조).
@@ -252,21 +251,6 @@ export default {
         e.preventDefault();
         ctx.goDetail(card.dataset.id);
         return;
-      }
-      const row = e.target.closest('[data-nd-row]');
-      if (row && root.contains(row)) {
-        e.preventDefault();
-        ctx.goDetail(row.dataset.id);
-        return;
-      }
-      const grp = e.target.closest('[data-nd-group]');
-      if (grp && root.contains(grp)) {
-        e.preventDefault();
-        const key = grp.dataset.ndGroup;
-        const cur = ctx.store.getState().nodesCollapsed || {};
-        const next = Object.assign({}, cur);
-        next[key] = !next[key];
-        ctx.store.setState({ nodesCollapsed: next });
       }
     };
     root.addEventListener('keydown', this._onKeydown);
@@ -578,12 +562,12 @@ export default {
   _patchGroup(gr, e) {
     gr.caret.textContent = e.open ? '▾' : '▸';
     // role=button 토글이므로 펼침 상태를 AT 에 노출한다(manage.js patchGroup 전례).
-    gr.tr.setAttribute('aria-expanded', e.open ? 'true' : 'false');
+    gr.button.setAttribute('aria-expanded', e.open ? 'true' : 'false');
     gr.label.textContent = e.label;
     gr.count.textContent = String(e.count);
     gr.dot.className = 'u-dot is-' + e.worst;
     if (gr.status) gr.status.textContent = e.statusLabel || '';
-    gr.tr.setAttribute('aria-label', [e.label, e.statusLabel, e.count].filter(Boolean).join(' — '));
+    gr.button.setAttribute('aria-label', [e.label, e.statusLabel, e.count].filter(Boolean).join(' — '));
   },
 
   _rebuildRows(entries, ctx) {
@@ -596,9 +580,10 @@ export default {
     // 기억해 새 DOM 의 같은 행으로 포커스를 복원한다(manage.js 모달 재빌드 전례).
     const prevActive = (document.activeElement && this._tbody.contains(document.activeElement))
       ? document.activeElement : null;
-    const prevKey = prevActive ? prevActive.getAttribute('data-nd-group') : null;
-    const prevRowId = (prevActive && prevActive.getAttribute('data-nd-row') != null)
-      ? prevActive.getAttribute('data-id') : null;
+    const prevGroup = prevActive && prevActive.closest ? prevActive.closest('[data-nd-group]') : null;
+    const prevRow = prevActive && prevActive.closest ? prevActive.closest('[data-nd-row]') : null;
+    const prevKey = prevGroup ? prevGroup.getAttribute('data-nd-group') : null;
+    const prevRowId = prevRow ? prevRow.getAttribute('data-id') : null;
     dom.clear(this._tbody);
     this._rowRefs.clear();
     this._groupRefs.clear();
@@ -619,18 +604,16 @@ export default {
       const label = el('span', { class: 'sc-nd-g-label' });
       const status = el('span', { class: 'sc-nd-g-status' });
       const count = el('span', { class: 'u-mono sc-nd-g-count' });
-      const td = el('td', { colspan: String(COLS.length) }, [
-        el('span', { class: 'u-row sc-nd-g-row' }, [caret, dot, label, status, count]),
-      ]);
+      const button = el('button', {
+        class: 'sc-nd-group-btn', type: 'button', 'data-nd-group': e.key,
+        'aria-expanded': e.open ? 'true' : 'false',
+      }, [el('span', { class: 'u-row sc-nd-g-row' }, [caret, dot, label, status, count])]);
+      const td = el('td', { colspan: String(COLS.length) }, [button]);
       const tr = el('tr', {
         class: 'sc-nd-group' + (e.g === 'fa' ? ' sc-nd-group--fa' : ''),
-        'data-nd-group': e.key,
-        // 접기/펼치기 헤더 — 키보드 활성화(_onKeydown 이 Enter/Space 처리, manage.js 토글 패턴).
-        // aria-expanded 는 생성 시에도 현재 펼침 상태로 부여하고, 이후 _patchGroup 이 갱신한다.
-        role: 'button', tabindex: '0', 'aria-expanded': e.open ? 'true' : 'false',
       }, [td]);
       this._tbody.appendChild(tr);
-      this._groupRefs.set(e.key, { tr, caret, dot, label, status, count });
+      this._groupRefs.set(e.key, { tr, button, caret, dot, label, status, count });
     };
 
     entries.forEach((e2) => {
@@ -641,10 +624,10 @@ export default {
     // 파괴 전 포커스됐던 그룹 헤더/장비 행이 새 DOM 에도 있으면 포커스 복원.
     if (prevKey) {
       const restored = this._groupRefs.get(prevKey);
-      if (restored) restored.tr.focus();
+      if (restored) restored.button.focus();
     } else if (prevRowId) {
       const restoredRow = this._rowRefs.get(prevRowId);
-      if (restoredRow) restoredRow.tr.focus();
+      if (restoredRow) restoredRow.detailBtn.focus();
     }
   },
 
@@ -654,7 +637,8 @@ export default {
       const host = el('span', { class: 'u-mono sc-nd-host' });
       // 저하/오프라인 행에 상태 텍스트 칩 상시 노출 — 닷 색 단독 구분 제거(색맹 대응, minor#8).
       const stChip = el('span', { class: 'u-badge sc-nd-status', hidden: true });
-      const tdNode = el('td', {}, [el('span', { class: 'u-row' }, [dot, host, stChip])]);
+      const detailBtn = el('button', { class: 'sc-nd-row-link', type: 'button' }, [host]);
+      const tdNode = el('td', {}, [el('span', { class: 'u-row' }, [dot, detailBtn, stChip])]);
 
       const typeIcoSlot = el('span', { class: 'sc-nd-type-ico' });
       const typeLabel = el('span', { class: 'sc-nd-type-label' });
@@ -679,12 +663,12 @@ export default {
       ]);
       const uptime = el('td', { class: 'is-num u-mono' });
 
-      const tr = el('tr', { 'data-nd-row': true, 'data-id': r.id, role: 'button', tabindex: '0' }, [
+      const tr = el('tr', { 'data-nd-row': true, 'data-id': r.id }, [
         tdNode, tdType, tdSite, cpu, mem, tdSync, avail, uptime,
       ]);
       this._tbody.appendChild(tr);
       this._rowRefs.set(r.id, {
-        tr, dot, host, stChip, typeIcoSlot, typeLabel, site, cpu, mem, syncIcoSlot, syncLabel,
+        tr, detailBtn, dot, host, stChip, typeIcoSlot, typeLabel, site, cpu, mem, syncIcoSlot, syncLabel,
         availVal, availSub, uptime,
         _typeIcon: null, _syncIcon: null,
       });
@@ -699,7 +683,7 @@ export default {
     refs.dot.setAttribute('title', r.host + ' · ' + r.statusLabel);
     // 키보드/스크린리더용 — 행 활성화(Enter/Space) 시 이동할 대상과 현재 상태를 이름으로 제공
     // (카드 뷰의 role=button tabindex=0 패턴을 테이블 행에도 그대로 미러링).
-    refs.tr.setAttribute('aria-label', (r.label || r.host || '') + ' — ' + (r.statusLabel || ''));
+    refs.detailBtn.setAttribute('aria-label', L('Open ', '상세 열기: ') + (r.label || r.host || '') + ' — ' + (r.statusLabel || ''));
     // G24: 그룹 헤더가 회사를 말하므로 행 라벨은 프리픽스를 벗긴 장비코드(manage G8·topo G5 동일 규칙).
     const nmFull = r.label || r.host || '';
     refs.host.textContent = (r.company && nmFull.indexOf(r.company) === 0)

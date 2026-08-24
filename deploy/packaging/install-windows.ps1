@@ -1,7 +1,9 @@
+param([string]$HealthUrl)
+
 # serverdesk Windows installer - run in an elevated PowerShell:
 #   powershell -ExecutionPolicy Bypass -File install-windows.ps1
-# Steps: create C:\serverdesk -> copy exe/config -> allow firewall 6005 -> register + start Scheduled Task.
-# Optional: if avcli.zip + jre.zip sit next to this script, Stratus collection (avcli) is installed too.
+# Steps: validate package/config -> install -> configure the actual listen port -> start + health-check.
+# Licensed Stratus AVCLI/JRE/MIB artifacts are provisioned separately and are never unpacked here.
 $ErrorActionPreference = 'Stop'
 $src = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dst = 'C:\serverdesk'
@@ -9,23 +11,56 @@ $authPath = "$dst\auth.json"
 $initialLoginPath = "$dst\initial-login.txt"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $binarySource = "$src\serverdesk-windows-amd64.exe"
+$commonSource = "$src\windows-deployment-common.ps1"
 $installMarker = "$dst\.install-in-progress"
 $destinationCreatedByRun = $false
 $mayMigrateLegacyAcl = $false
-if (-not (Test-Path -LiteralPath $binarySource -PathType Leaf)) {
-    throw "Required package binary is missing: $binarySource"
+foreach ($requiredAsset in @($binarySource, $commonSource, "$src\config.example.json",
+    "$src\update.ps1", "$src\uninstall.ps1")) {
+    if (-not (Test-Path -LiteralPath $requiredAsset -PathType Leaf)) {
+        throw "Required package asset is missing: $requiredAsset"
+    }
+    $requiredItem = Get-Item -LiteralPath $requiredAsset -Force
+    if (($requiredItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Required package asset must not be a reparse point: $requiredAsset"
+    }
 }
+# The shared module executes in this elevated process. Validate every existing
+# component before dot-sourcing it so a package directory junction cannot escape
+# to attacker-controlled deployment code.
+$bootstrapCursor = [IO.Path]::GetFullPath($commonSource)
+while (-not [string]::IsNullOrWhiteSpace($bootstrapCursor)) {
+    $bootstrapItem = Get-Item -LiteralPath $bootstrapCursor -Force
+    if (($bootstrapItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Required package path must not traverse a reparse point: $($bootstrapItem.FullName)"
+    }
+    $bootstrapParent = Split-Path -Parent $bootstrapCursor
+    if ([string]::IsNullOrWhiteSpace($bootstrapParent) -or $bootstrapParent -eq $bootstrapCursor) { break }
+    $bootstrapCursor = $bootstrapParent
+}
+. $commonSource
+Assert-ServerdeskAdministrator
 $binarySourceItem = Get-Item -LiteralPath $binarySource -Force
 if (($binarySourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Refusing reparse-point package binary: $binarySource"
 }
-if (-not (Test-Path -LiteralPath "$src\config.example.json" -PathType Leaf)) {
-    throw 'Required config.example.json is missing.'
+$bundledVendorMib = $null
+$packageMibDir = "$src\docs\mibs"
+if (Test-Path -LiteralPath $packageMibDir) {
+    $packageMibItem = Get-Item -LiteralPath $packageMibDir -Force
+    if (($packageMibItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $packageMibItem.PSIsContainer) {
+        $bundledVendorMib = $packageMibItem
+    } else {
+        $bundledVendorMib = Get-ChildItem -LiteralPath $packageMibDir -Force -Recurse |
+            Where-Object {
+                $_.FullName -ine (Join-Path $packageMibDir 'README.md') -or
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $_.PSIsContainer
+            } | Select-Object -First 1
+    }
 }
-
-$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'This installer must be run from an elevated Administrator PowerShell session.'
+if ((Test-Path "$src\avcli.zip") -or (Test-Path "$src\jre.zip") -or ($null -ne $bundledVendorMib)) {
+    throw 'Vendor AVCLI/JRE/MIB artifacts must not be bundled. Provision licensed dependencies separately.'
 }
 
 if (Test-Path -LiteralPath $dst) {
@@ -38,23 +73,8 @@ if (Test-Path -LiteralPath $dst) {
         throw "Refusing unrecognized pre-existing installation destination: $dst"
     }
     $legacyTask = Get-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
-    $legacyActionRecognized = $false
-    if ($null -ne $legacyTask -and
-        [string]$legacyTask.Principal.UserId -in @('SYSTEM', 'S-1-5-18')) {
-        foreach ($action in @($legacyTask.Actions)) {
-            $executeName = [IO.Path]::GetFileName([string]$action.Execute)
-            $arguments = ([string]$action.Arguments).Trim()
-            $workingDirectory = ([string]$action.WorkingDirectory).TrimEnd('\')
-            $currentAction = $executeName -ieq 'cmd.exe' -and
-                $workingDirectory -ieq $dst -and
-                $arguments -ieq '/d /c run-serverdesk.cmd'
-            $legacyAction = $executeName -in @('cmd', 'cmd.exe') -and
-                $arguments -ieq '/c C:\serverdesk\serverdesk.exe -c C:\serverdesk\config.local.json >> C:\serverdesk\run.log 2>&1'
-            if ($currentAction -or $legacyAction) {
-                $legacyActionRecognized = $true
-            }
-        }
-    }
+    Assert-ServerdeskManagedTask $legacyTask $dst
+    $legacyActionRecognized = $null -ne $legacyTask
     $mayMigrateLegacyAcl = $legacyActionRecognized -and
         (Test-Path -LiteralPath "$dst\serverdesk.exe" -PathType Leaf) -and
         (Test-Path -LiteralPath "$dst\config.local.json" -PathType Leaf)
@@ -81,6 +101,63 @@ if (Test-Path -LiteralPath $dst) {
     $destinationCreatedByRun = $true
 }
 
+$originalAclEntries = @()
+$installTrackedBytes = @{}
+$installTrackedExisted = @{}
+$installCreatedDirectories = @()
+$docsExistedBefore = Test-Path -LiteralPath "$dst\docs"
+if (-not $destinationCreatedByRun) {
+    $aclItems = @((Get-Item -LiteralPath $dst -Force))
+    $aclItems += @(Get-ChildItem -LiteralPath $dst -Recurse -Force)
+    foreach ($item in $aclItems) {
+        $originalAclEntries += [PSCustomObject]@{ Path = $item.FullName; Acl = (Get-Acl -LiteralPath $item.FullName) }
+    }
+}
+foreach ($name in @('update.ps1', 'uninstall.ps1', 'windows-deployment-common.ps1',
+    'run-serverdesk.ps1', 'run-serverdesk.cmd', 'auth.json', 'initial-login.txt')) {
+    $path = Join-Path $dst $name
+    $present = Test-Path -LiteralPath $path -PathType Leaf
+    $installTrackedExisted[$name] = $present
+    if ($present) { $installTrackedBytes[$name] = [IO.File]::ReadAllBytes($path) }
+}
+
+function New-ServerdeskTrackedDirectory([string]$Path, [string]$InstallationRoot) {
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $rootPath = [IO.Path]::GetFullPath($InstallationRoot).TrimEnd('\')
+    if ($fullPath -eq $rootPath -or
+        -not $fullPath.StartsWith(($rootPath + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to create an unmanaged directory: $fullPath"
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        $existing = Get-Item -LiteralPath $fullPath -Force
+        if (-not $existing.PSIsContainer -or
+            ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Managed path must be a regular directory: $fullPath"
+        }
+        return @()
+    }
+
+    $missing = @()
+    $cursor = $fullPath
+    while (-not (Test-Path -LiteralPath $cursor)) {
+        $missing += $cursor
+        $cursor = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($cursor) -or
+            ($cursor -ine $rootPath -and
+             -not $cursor.StartsWith(($rootPath + '\'), [StringComparison]::OrdinalIgnoreCase))) {
+            throw "Managed directory escaped the installation root: $fullPath"
+        }
+    }
+    $parentItem = Get-Item -LiteralPath $cursor -Force
+    if (-not $parentItem.PSIsContainer -or
+        ($parentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Managed directory parent is unsafe: $cursor"
+    }
+    New-Item -ItemType Directory -Path $fullPath -Force | Out-Null
+    return @($missing)
+}
+
+try {
 & icacls.exe $dst /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to harden ACLs on $dst"
@@ -102,6 +179,10 @@ if ($null -ne (Get-ChildItem -LiteralPath $dst -Force | Select-Object -First 1))
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to reset child ACLs in $dst"
     }
+    & icacls.exe "$dst\*" /setowner '*S-1-5-32-544' /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to set trusted child owners in $dst"
+    }
 }
 function Assert-RegularNonReparseFile([string]$Path, [string]$Description) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -117,6 +198,10 @@ $freshInstall = -not (Test-Path -LiteralPath "$dst\config.local.json")
 if (-not $freshInstall) {
     Assert-RegularNonReparseFile "$dst\config.local.json" 'Existing config'
     $null = Get-Content "$dst\config.local.json" -Raw | ConvertFrom-Json
+    $preflightHealthUrl = if ($HealthUrl) { $HealthUrl } else { $env:SERVERDESK_HEALTH_URL }
+    $preflightEndpoint = Get-ServerdeskEndpoint -ConfigPath "$dst\config.local.json" -HealthUrl $preflightHealthUrl
+    $preflightAllowDegraded = $env:SERVERDESK_ALLOW_DEGRADED_COLLECTION -eq '1'
+    Test-ServerdeskAvcliPrerequisites -Endpoint $preflightEndpoint -ConfigPath "$dst\config.local.json" -AllowDegraded:$preflightAllowDegraded
 }
 
 if (Test-Path -LiteralPath $authPath) {
@@ -163,26 +248,43 @@ if (-not (Test-Path -LiteralPath $authPath)) {
 $hadExistingBinary = Test-Path -LiteralPath "$dst\serverdesk.exe" -PathType Leaf
 $binaryBackup = "$dst\serverdesk.exe.install-backup"
 if ($hadExistingBinary) {
+    if (Test-Path -LiteralPath $binaryBackup) {
+        throw "Stale installation backup requires operator inspection before retrying: $binaryBackup"
+    }
     Copy-Item "$dst\serverdesk.exe" $binaryBackup -Force
+    if ((Get-FileHash -LiteralPath "$dst\serverdesk.exe" -Algorithm SHA256).Hash -cne
+        (Get-FileHash -LiteralPath $binaryBackup -Algorithm SHA256).Hash) {
+        throw 'Installed binary backup verification failed before service stop.'
+    }
 }
 $hadExistingConfig = -not $freshInstall
 $existingConfigBytes = if ($hadExistingConfig) { [IO.File]::ReadAllBytes("$dst\config.local.json") } else { $null }
+$priorTask = Get-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
+$null = Assert-ServerdeskManagedTask $priorTask $dst
 $priorTaskXml = Export-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
+$priorTaskWasRunning = $false
+$priorTaskWasDisabled = $false
+if ($null -ne $priorTask) {
+    $priorTaskWasRunning = $priorTask.State -eq 'Running'
+    $priorTaskWasDisabled = $priorTask.State -eq 'Disabled'
+}
+$priorFirewall = Get-ServerdeskFirewallSnapshot
 
 try {
 # Stop the scheduled task before replacing files so the watchdog cannot race installation.
 Stop-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
-Get-Process serverdesk -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Stop-ServerdeskInstalledProcess "$dst\serverdesk.exe"
 Start-Sleep -Seconds 2
 Copy-Item $binarySource "$dst\serverdesk.exe" -Force
-foreach ($name in @('update.ps1', 'uninstall.ps1')) {
+foreach ($name in @('update.ps1', 'uninstall.ps1', 'windows-deployment-common.ps1')) {
     if (Test-Path "$src\$name") {
         Copy-Item "$src\$name" "$dst\$name" -Force
     }
 }
-if (Test-Path "$src\docs") {
-    Remove-Item "$dst\docs" -Recurse -Force -ErrorAction SilentlyContinue
+if ((Test-Path "$src\docs") -and -not (Test-Path "$dst\docs")) {
     Copy-Item "$src\docs" "$dst\docs" -Recurse -Force
+} elseif (Test-Path "$dst\docs") {
+    Write-Host '[INFO] keeping existing docs directory (customer/vendor files are never replaced on reinstall)'
 }
 
 if ($freshInstall) {
@@ -195,16 +297,26 @@ if ($freshInstall) {
 
 $cfg = Get-Content "$dst\config.local.json" -Raw | ConvertFrom-Json
 $configChanged = $false
-$runtimeDir = [string]$cfg.runtime_dir
-if ([string]::IsNullOrWhiteSpace($runtimeDir) -or -not [IO.Path]::IsPathRooted($runtimeDir)) {
-    $runtimeDir = "$dst\data"
+$runtimeValue = [string]$cfg.runtime_dir
+if ([string]::IsNullOrWhiteSpace($runtimeValue)) {
+    $runtimeValue = 'data'
     if ($cfg.PSObject.Properties['runtime_dir']) {
-        $cfg.runtime_dir = $runtimeDir
+        $cfg.runtime_dir = $runtimeValue
     } else {
-        $cfg | Add-Member -NotePropertyName runtime_dir -NotePropertyValue $runtimeDir
+        $cfg | Add-Member -NotePropertyName runtime_dir -NotePropertyValue $runtimeValue
     }
     $configChanged = $true
-    Write-Host "[INFO] runtime data path set to $runtimeDir"
+    Write-Host "[INFO] runtime data path set to $runtimeValue"
+}
+$runtimeDir = if ([IO.Path]::IsPathRooted($runtimeValue)) {
+    [IO.Path]::GetFullPath($runtimeValue).TrimEnd('\')
+} else {
+    [IO.Path]::GetFullPath((Join-Path $dst $runtimeValue)).TrimEnd('\')
+}
+$installRoot = [IO.Path]::GetFullPath($dst).TrimEnd('\')
+if ($runtimeDir -eq $installRoot -or
+    -not $runtimeDir.StartsWith(($installRoot + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+    throw "runtime_dir must be a child of the protected installation directory: $installRoot"
 }
 
 $legacyRemoved = $false
@@ -215,104 +327,64 @@ foreach ($name in @('sim_devices', 'sim_seed', '_sim_note')) {
         $configChanged = $true
     }
 }
-$hasBundledAvcli = (Test-Path "$src\avcli.zip") -and (Test-Path "$src\jre.zip")
-if ($mayMigrateLegacyAcl -and -not $hasBundledAvcli) {
-    $disabledAvcli = "$dst\avcli-disabled.exe"
-    Remove-Item -LiteralPath $disabledAvcli -Force -ErrorAction SilentlyContinue
-    if ($cfg.PSObject.Properties['avcli_bin']) {
-        $cfg.avcli_bin = $disabledAvcli
-    } else {
-        $cfg | Add-Member -NotePropertyName avcli_bin -NotePropertyValue $disabledAvcli
-    }
-    $emptyArgs = [string[]]@()
-    if ($cfg.PSObject.Properties['avcli_args']) {
-        $cfg.avcli_args = $emptyArgs
-    } else {
-        $cfg | Add-Member -NotePropertyName avcli_args -NotePropertyValue $emptyArgs
-    }
-    $configChanged = $true
-    Write-Host '[WARN] legacy ACL migrated without bundled avcli; collection is disabled until the full package is installed.'
-}
 if ($configChanged) {
     [IO.File]::WriteAllText("$dst\config.local.json", (($cfg | ConvertTo-Json -Depth 20) + [Environment]::NewLine), $utf8NoBom)
 }
 if ($legacyRemoved) {
     Write-Host "[INFO] removed legacy simulation settings"
 }
-New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+$installCreatedDirectories += @(New-ServerdeskTrackedDirectory $runtimeDir $dst)
+$credentialDir = "$dst\credentials"
+$installCreatedDirectories += @(New-ServerdeskTrackedDirectory $credentialDir $dst)
+& icacls.exe $credentialDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to harden credential store ACLs: $credentialDir" }
 
-# optional Stratus collection: avcli.zip (avcli.jar set) + jre.zip (Windows JRE)
-if ($hasBundledAvcli) {
-    Expand-Archive "$src\avcli.zip" -DestinationPath "$dst" -Force
-    Expand-Archive "$src\jre.zip" -DestinationPath "$dst\jre" -Force
-    $jre = (Get-ChildItem "$dst\jre" -Directory | Select-Object -First 1).FullName
-    $java = "$jre\bin\java.exe"
-    if (-not (Test-Path -LiteralPath $java)) {
-        throw "Bundled Java executable not found: $java"
-    }
-    $cfg = Get-Content "$dst\config.local.json" -Raw | ConvertFrom-Json
-    if ($cfg.PSObject.Properties['avcli_bin']) {
-        $cfg.avcli_bin = $java
-    } else {
-        $cfg | Add-Member -NotePropertyName avcli_bin -NotePropertyValue $java
-    }
-    $avcliArgs = @('-XX:+IgnoreUnrecognizedVMOptions', '-jar', "$dst\avcli\avcli.jar")
-    if ($cfg.PSObject.Properties['avcli_args']) {
-        $cfg.avcli_args = $avcliArgs
-    } else {
-        $cfg | Add-Member -NotePropertyName avcli_args -NotePropertyValue $avcliArgs
-    }
-    [IO.File]::WriteAllText("$dst\config.local.json", (($cfg | ConvertTo-Json -Depth 20) + [Environment]::NewLine), $utf8NoBom)
-    Remove-Item "$dst\avcli\avcli.bat" -Force -ErrorAction SilentlyContinue
-    Write-Host "[INFO] avcli + JRE installed - Stratus collection enabled"
-}
+$mibDir = "$dst\mibs"
+$installCreatedDirectories += @(New-ServerdeskTrackedDirectory $mibDir $dst)
+Write-Host "[INFO] Licensed MIB files may be provisioned separately in $mibDir; vendor MIBs are not bundled."
 
-Get-NetFirewallRule -DisplayName 'serverdesk 6005' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName 'serverdesk 6005' -Direction Inbound -Program "$dst\serverdesk.exe" -Protocol TCP -LocalPort 6005 -RemoteAddress LocalSubnet -Profile Domain,Private -Action Allow | Out-Null
-$runner = @'
-@echo off
-cd /d C:\serverdesk
-:restart
-serverdesk.exe -c config.local.json -auth auth.json >> run.log 2>&1
-set "SERVERDESK_EXIT=%ERRORLEVEL%"
->> run.log echo [%date% %time%] serverdesk exited with code %SERVERDESK_EXIT%; restarting in 5 seconds
-timeout /t 5 /nobreak >nul
-goto restart
-'@
-[IO.File]::WriteAllText("$dst\run-serverdesk.cmd", ($runner + [Environment]::NewLine), [Text.Encoding]::ASCII)
+& icacls.exe "$dst\*" /setowner '*S-1-5-32-544' /T /C | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to enforce trusted owners in $dst" }
 
-$taskAction = New-ScheduledTaskAction `
-    -Execute $env:ComSpec `
-    -Argument '/d /c run-serverdesk.cmd' `
-    -WorkingDirectory $dst
-$taskTrigger = New-ScheduledTaskTrigger -AtStartup
-$taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$taskSettings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable `
-    -RestartCount 999 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName serverdesk -Action $taskAction -Trigger $taskTrigger `
-    -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+$effectiveHealthUrl = if ($HealthUrl) { $HealthUrl } else { $env:SERVERDESK_HEALTH_URL }
+$endpoint = Get-ServerdeskEndpoint -ConfigPath "$dst\config.local.json" -HealthUrl $effectiveHealthUrl
+$allowDegraded = $env:SERVERDESK_ALLOW_DEGRADED_COLLECTION -eq '1'
+Test-ServerdeskAvcliPrerequisites -Endpoint $endpoint -ConfigPath "$dst\config.local.json" -AllowDegraded:$allowDegraded
+Set-ServerdeskFirewall -Endpoint $endpoint -Program "$dst\serverdesk.exe"
+Write-ServerdeskRunner "$dst\run-serverdesk.ps1" $credentialDir
+& icacls.exe "$dst\run-serverdesk.ps1" /setowner '*S-1-5-32-544' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Failed to set trusted owner on the runtime runner.' }
+Register-ServerdeskTask $dst
 Start-ScheduledTask -TaskName serverdesk
 Start-Sleep -Seconds 6
 
-    $code = (Invoke-WebRequest http://127.0.0.1:6005/api/health -UseBasicParsing -TimeoutSec 8).StatusCode
+    $code = Invoke-ServerdeskHealth $endpoint.HealthUrl
+    if ($null -ne $priorTask -and -not $priorTaskWasRunning) {
+        Stop-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
+    }
+    if ($priorTaskWasDisabled) { Disable-ScheduledTask -TaskName serverdesk | Out-Null }
     Remove-Item -LiteralPath $installMarker -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $binaryBackup -Force -ErrorAction SilentlyContinue
-    Write-Host "[OK] serverdesk is up - http://<this-server-ip>:6005  (health $code)"
+    if ($null -ne $priorTask -and -not $priorTaskWasRunning) {
+        Write-Host "[OK] install/update passed transient health validation; prior task state ($($priorTask.State)) was restored."
+    } elseif ($endpoint.Exposed) {
+        Write-Host "[OK] serverdesk is up - $($endpoint.DisplayUrl) (health $code)"
+    } else {
+        Write-Host "[OK] serverdesk is up locally - $($endpoint.DisplayUrl) (health $code); edit listen/TLS for remote access."
+    }
     Write-Host "     Update:    powershell -ExecutionPolicy Bypass -File C:\serverdesk\update.ps1 -Binary <new-exe>"
     Write-Host "     Uninstall: powershell -ExecutionPolicy Bypass -File C:\serverdesk\uninstall.ps1 -Full"
 } catch {
     $installError = $_
     Write-Host '[FAIL] installation failed - restoring the previous service state'
     Stop-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
-    Get-Process serverdesk -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Stop-ServerdeskInstalledProcess "$dst\serverdesk.exe"
     if ($hadExistingBinary -and (Test-Path -LiteralPath $binaryBackup -PathType Leaf)) {
         Copy-Item $binaryBackup "$dst\serverdesk.exe" -Force
+        if ((Get-FileHash -LiteralPath "$dst\serverdesk.exe" -Algorithm SHA256).Hash -cne
+            (Get-FileHash -LiteralPath $binaryBackup -Algorithm SHA256).Hash) {
+            throw "Rollback binary verification failed; preserve $binaryBackup for operator recovery."
+        }
     } elseif (-not $hadExistingBinary) {
         Remove-Item "$dst\serverdesk.exe" -Force -ErrorAction SilentlyContinue
     }
@@ -323,10 +395,64 @@ Start-Sleep -Seconds 6
     }
     if ($null -ne $priorTaskXml) {
         Register-ScheduledTask -TaskName serverdesk -Xml $priorTaskXml -Force | Out-Null
-        Start-ScheduledTask -TaskName serverdesk
+        if ($priorTaskWasRunning) { Start-ScheduledTask -TaskName serverdesk }
     } else {
         Unregister-ScheduledTask -TaskName serverdesk -Confirm:$false -ErrorAction SilentlyContinue
     }
+    Restore-ServerdeskFirewall $priorFirewall
     Remove-Item -LiteralPath $binaryBackup -Force -ErrorAction SilentlyContinue
     throw $installError
+}
+} catch {
+    $outerError = $_
+    $rollbackProblems = @()
+    if ($destinationCreatedByRun) {
+        try {
+            Stop-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
+            Stop-ServerdeskInstalledProcess "$dst\serverdesk.exe"
+            Unregister-ScheduledTask -TaskName serverdesk -Confirm:$false -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }
+        } catch { $rollbackProblems += $_.Exception.Message }
+    } else {
+        if (-not $docsExistedBefore) {
+            try { Remove-Item -LiteralPath "$dst\docs" -Recurse -Force -ErrorAction SilentlyContinue }
+            catch { $rollbackProblems += "remove newly copied docs: $($_.Exception.Message)" }
+        }
+        foreach ($name in $installTrackedExisted.Keys) {
+            $path = Join-Path $dst $name
+            try {
+                if ($installTrackedExisted[$name]) {
+                    [IO.File]::WriteAllBytes($path, [byte[]]$installTrackedBytes[$name])
+                } else {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                }
+            } catch { $rollbackProblems += "restore ${name}: $($_.Exception.Message)" }
+        }
+        foreach ($entry in @($originalAclEntries | Sort-Object { $_.Path.Length } -Descending)) {
+            try {
+                if (Test-Path -LiteralPath $entry.Path) {
+                    Set-Acl -LiteralPath $entry.Path -AclObject $entry.Acl
+                }
+            } catch { $rollbackProblems += "restore ACL $($entry.Path): $($_.Exception.Message)" }
+        }
+        foreach ($directory in @($installCreatedDirectories | Sort-Object Length -Descending -Unique)) {
+            try {
+                if (Test-Path -LiteralPath $directory) {
+                    $directoryItem = Get-Item -LiteralPath $directory -Force
+                    if (-not $directoryItem.PSIsContainer -or
+                        ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw 'path is no longer a regular directory'
+                    }
+                    if ($null -ne (Get-ChildItem -LiteralPath $directory -Force | Select-Object -First 1)) {
+                        throw 'new transaction directory is not empty; preserving it for inspection'
+                    }
+                    Remove-Item -LiteralPath $directory -Force
+                }
+            } catch { $rollbackProblems += "remove new directory ${directory}: $($_.Exception.Message)" }
+        }
+    }
+    if ($rollbackProblems.Count -gt 0) {
+        throw "Installation failed and local file/ACL rollback was incomplete: $($rollbackProblems -join '; '). Original: $($outerError.Exception.Message)"
+    }
+    throw $outerError
 }

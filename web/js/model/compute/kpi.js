@@ -10,22 +10,26 @@ import {
 import { COLOR } from '../../util/fmt.js';
 import {
   clamp, cmpKo, langOf, makeL, SEV_RANK, STALE_ALERT_DAYS,
-  sevInfo, histOf, _meta, _arr, _num, DASH, _strHash, _resolve,
+  sevInfo, histOf, _sparkHist, _meta, _arr, _num, DASH, _strHash, _resolve,
 } from './base.js';
 import {
   statusTone, statusLabel, statusAnim, pctTone, pctToneAlloc,
-  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, fmtAvailN,
-  fmtDowntimeYr, fmtUptimeD,
+  typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint, fmtAvailN,
+  fmtDowntimeYr, fmtUptimeD, deviceCode,
 } from './format.js';
 import {
-  tsNorm, tsKey, agoSec, agoText, shortTime,
+  tsNorm, ackTimeNorm, ackTimestampKey, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone, _nowStamp, _todayStr,
 } from './time.js';
 import { sortRows } from './node.js';
 import {
   alertAckKey, autoAckDue, toCsv, activeMaint,
   escalDue, expiredMaint, collectAlerts, collectTraps, alertMsgKo,
+  TEST_FIXTURE_RE,
 } from './alert.js';
+import {
+  buildClusterRows, buildCapacityModel, buildTree, buildSearchList,
+} from './cluster.js';
 
 /* ===========================================================================
  * 7. buildModel
@@ -246,8 +250,8 @@ export function buildModel(a, b) {
   //   없으면 고정값)를 써야 카드 키가 세션 시각과 무관하게 유지된다.
   const isAcked = (hostId, a, m) => !!ackMap[ackKeyOf(hostId, a.name, a.desc || a.name,
     (a && a.name === 'DEVICE_STATE')
-      ? (tsNorm(m && m.downSince) || tsNorm(m && m.issueSince) || ACK_TIME_MISSING)
-      : (tsNorm(a.time) || ACK_TIME_MISSING))];
+      ? ackTimeNorm((m && (m.downSince || m.issueSince)) || '')
+      : ackTimeNorm(a.time))];
 
   // FIX-1: status 만 보면 'op 인데 critical 경보를 든 장비'가 통째로 빠진다.
   // 백엔드 _derive_status 는 오보를 피하려 FT 장비를 의도적으로 op 로 고정하므로,
@@ -746,7 +750,7 @@ export function buildModel(a, b) {
     .filter((s) => _meta(s).error || tierErrOf(s).length > 0)
     .map((s) => _meta(s).label || s.host);
   const maintCnt = SERVERS.reduce((n, s) => n + _arr(_meta(s).nodes)
-    .filter((x) => _nodeMaint(x)).length, 0);
+    .filter((x) => nodeMaint(x)).length, 0);
   const lastPoll = Number(S.lastPoll) || 0;
   const pollAgoSec = lastPoll ? Math.max(0, Math.floor((Date.now() - lastPoll) / 1000)) : null;
   // 데이터의 '진짜' 나이 = 클라이언트가 받은 지 경과 + 폴러가 실장비에서 읽은 뒤 경과.
@@ -836,8 +840,8 @@ export function buildModel(a, b) {
   const _lat = [];
   Object.keys(ackMap).forEach((k) => {
     const t0 = _onsetByAckKey[k] || 0;
-    const t1 = Date.parse(ackMap[k] || '');
-    if (t0 && !isNaN(t1) && t1 >= t0) _lat.push((t1 - t0) / 3600000);
+    const t1 = ackTimestampKey(ackMap[k]);
+    if (t0 && t1 && t1 >= t0) _lat.push((t1 - t0) / 3600000);
   });
   _lat.sort((a, b) => a - b);
   const _med = _lat.length % 2
@@ -880,4 +884,3 @@ export function buildModel(a, b) {
   _memoResult = out;
   return out;
 }
-

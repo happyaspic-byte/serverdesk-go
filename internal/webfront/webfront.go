@@ -21,15 +21,18 @@ package webfront
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
 	"io/fs"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // MaxBodyBytes는 인증된 요청이라도 과도한 본문으로 메모리를 소모하지 못하게 하는 상한(1 MiB)이다.
@@ -153,6 +156,7 @@ type Server struct {
 	ack, maint, notes, escal *stateFile
 
 	notifyClient *http.Client
+	notifyLookup func(context.Context, string) ([]net.IPAddr, error)
 }
 
 // New 는 static(통합자가 web/ 에 뿌리를 둔 embed.FS 를 넘긴다)과 opts 로 Server 를 만든다.
@@ -170,18 +174,28 @@ func New(static fs.FS, opts Options) *Server {
 		}
 	}
 	s := &Server{
-		static:      static,
-		allowWrites: opts.AllowWrites,
-		notifyHosts: hosts,
-		sem:         make(chan struct{}, maxConcurrent),
-		notifyClient: &http.Client{
-			Timeout: notifyTimeout,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				// 리다이렉트 추종 금지 — 허용된 웹훅 호스트가 302 로 루프백/사설망을
-				// 가리키면 /notify 의 호스트 허용 목록이 우회된다. 웹훅 정상 응답은
-				// 200/204 라 끊어도 무해하다.
-				return http.ErrUseLastResponse
-			},
+		static:       static,
+		allowWrites:  opts.AllowWrites,
+		notifyHosts:  hosts,
+		sem:          make(chan struct{}, maxConcurrent),
+		notifyLookup: net.DefaultResolver.LookupIPAddr,
+	}
+	s.notifyClient = &http.Client{
+		Timeout: notifyTimeout,
+		Transport: &http.Transport{
+			Proxy:                 nil,
+			DialContext:           s.dialNotifyContext,
+			ForceAttemptHTTP2:     true,
+			DisableKeepAlives:     true, // resolve and validate on every delivery
+			TLSHandshakeTimeout:   notifyTimeout,
+			ResponseHeaderTimeout: notifyTimeout,
+			ExpectContinueTimeout: time.Second,
+		},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			// 리다이렉트 추종 금지 — 허용된 웹훅 호스트가 302 로 루프백/사설망을
+			// 가리키면 /notify 의 호스트 허용 목록이 우회된다. 웹훅 정상 응답은
+			// 200/204 라 끊어도 무해하다.
+			return http.ErrUseLastResponse
 		},
 	}
 	s.ack = &stateFile{path: filepath.Join(dir, "ack-state.json"), maxBytes: maxAckBytes, maxKeys: maxAckKeys}

@@ -66,11 +66,11 @@
   --accent:#B85C33; --accent-ink:#FAF7F1; --accent-deep:#9A4A28; --accent-soft:#F0DFD2;
 
   /* ---- 프라이머리 필 (primary CTA + 활성 세그먼트 전용) ---- */
-  --ink-fill:#B85C33; --ink-fill-ink:#FAF7F1; --ink-fill-hover:#9A4A28;
+  --ink-fill:#9A4A28; --ink-fill-ink:#FAF7F1; --ink-fill-hover:#7C3C21;
 
   /* ---- 상태색 (base=텍스트/마크 안전 대비 · bright=도트/소형 게이지 전용) — 웜 팔레트와 조화 ---- */
   --pos:#3A7A4E; --pos-bright:#5FA86F;
-  --warn:#B07400; --warn-bright:#D89A2B;
+  --warn:#7A5200; --warn-bright:#D89A2B;
   --neg:#C0453E;
   --blue:#B85C33;              /* info/중립 메트릭 — 액센트 테라코타와 동일 계열 */
 
@@ -79,7 +79,7 @@
 
   /* ---- rgb 채널 (투명 틴트용 rgba(var(--x-rgb),α) — 항상 토큰 경유) ---- */
   --pos-rgb:58,122,78; --pos-bright-rgb:95,168,111;
-  --warn-rgb:176,116,0; --warn-bright-rgb:216,154,43;
+  --warn-rgb:122,82,0; --warn-bright-rgb:216,154,43;
   --neg-rgb:192,69,62;
   --accent-rgb:184,92,51; --accent-deep-rgb:154,74,40;
   --blue-rgb:184,92,51; --teal-rgb:78,145,137; --purple-rgb:139,127,184; --orange-rgb:201,123,63;
@@ -334,11 +334,16 @@ input:-webkit-autofill:focus{
 }
 
 [hidden]{ display:none !important; }
+.u-sr-only{ position:absolute !important; width:1px !important; height:1px !important; padding:0 !important;
+  margin:-1px !important; overflow:hidden !important; clip:rect(0,0,0,0) !important;
+  white-space:nowrap !important; border:0 !important; }
 
 :focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:6px; }
 @media (forced-colors: active){
   :focus-visible{ outline-color:Highlight; }
   .btn--primary,.chip.is-active{ forced-color-adjust:auto; }
+  .confirm-dialog,.hd-banner,.rail-live,.hd-bell-dot{ border:1px solid CanvasText; }
+  .hd-bell-dot{ forced-color-adjust:auto; }
 }
 
 /* scrollbar */
@@ -414,11 +419,13 @@ main[data-screen-root],
 .hd-icon-btn{ width:36px; height:36px; border-radius:50%; border:1px solid var(--shell-line); display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--shell-muted); background:var(--shell-2); flex-shrink:0; transition:all var(--dur) var(--ease); }
 .hd-icon-btn:hover{ background:var(--shell-hover); border-color:var(--shell-active); color:var(--shell-ink); }
 .hd-bell{ position:relative; }
-.hd-bell-dot{ position:absolute; top:6px; right:7px; width:7px; height:7px; border-radius:50%; background:var(--neg); border:1.5px solid var(--shell); display:none; }
+.hd-bell-dot{ position:absolute; top:-5px; right:-7px; min-width:19px; height:19px; padding:0 4px;
+  border-radius:var(--r-pill); background:var(--neg); color:var(--ink-on-fill); border:2px solid var(--shell);
+  display:none; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:800; letter-spacing:-.03em; }
 /* 표시 제어는 JS(app.js renderBell)의 hidden 속성이 담당 — 톤 클래스는 is-neg/is-warn/is-info 만 온다. */
-.hd-bell-dot:not([hidden]){ display:block; }
+.hd-bell-dot:not([hidden]){ display:flex; }
 .hd-bell-dot.is-neg{ background:var(--neg); }
-.hd-bell-dot.is-warn{ background:var(--warn-bright); }
+.hd-bell-dot.is-warn{ background:var(--warn-bright); color:var(--ink); }
 .hd-bell-dot.is-info{ background:var(--blue); }
 /* 로그인 계정 표시와 서버 세션 로그아웃. */
 .hd-profile{ display:flex; align-items:center; gap:8px; flex-shrink:0; margin:0; }
@@ -668,6 +675,24 @@ table.table{ width:100%; border-collapse:collapse; font-size:var(--fs-13); }
 .modal-foot{ display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:16px 22px; border-top:1px solid var(--line); flex-shrink:0; }
 .modal-foot--between{ justify-content:space-between; }
 
+/* 공용 위험 작업 확인 — app.js requestOperatorConfirmation */
+.confirm-overlay{ z-index:100; }
+.confirm-dialog{ width:min(520px,100%); max-height:min(88vh,720px); overflow:auto; background:var(--surface);
+  color:var(--ink); border:1px solid var(--line); border-radius:var(--r-xl); box-shadow:var(--shadow-lg);
+  padding:22px; display:flex; flex-direction:column; gap:14px; animation:popin var(--dur) var(--ease-spring); }
+.confirm-title{ font-size:var(--fs-18); font-weight:var(--fw-bold); line-height:1.3; }
+.confirm-impact{ color:var(--ink2); font-size:var(--fs-13); line-height:1.55; white-space:pre-line; }
+.confirm-operator{ margin:0; padding:8px 10px; border:1px solid var(--line); border-radius:var(--r-sm);
+  background:var(--surface-2); color:var(--ink2); font-size:var(--fs-12); }
+.confirm-field{ display:flex; flex-direction:column; gap:6px; }
+.confirm-field label{ font-size:var(--fs-12); font-weight:var(--fw-semi); color:var(--ink); }
+.confirm-field input,.confirm-field textarea{ width:100%; border:1px solid var(--line); border-radius:var(--r-sm);
+  background:var(--surface); color:var(--ink); padding:10px 11px; font:inherit; resize:vertical; }
+.confirm-help{ color:var(--muted); font-size:var(--fs-12); }
+.confirm-error,.field-error{ color:var(--neg-on-tint); font-size:var(--fs-12); font-weight:var(--fw-semi); }
+[aria-invalid="true"]{ border-color:var(--neg) !important; box-shadow:0 0 0 2px rgba(var(--neg-rgb),.16); }
+.confirm-actions{ display:flex; justify-content:flex-end; gap:8px; padding-top:4px; }
+
 .modal-tabs{ display:flex; gap:2px; background:var(--line2); border:1px solid var(--line); border-radius:var(--r-sm); padding:3px; flex-shrink:0; }
 .modal-tab{ flex:1; text-align:center; border-radius:calc(var(--r-sm) - 3px); padding:7px 0; font-size:var(--fs-13); font-weight:var(--fw-semi); color:var(--ink2); cursor:pointer; transition:background var(--dur) var(--ease),color var(--dur) var(--ease); }
 .modal-tab:hover{ color:var(--ink); }
@@ -787,7 +812,10 @@ table.table{ width:100%; border-collapse:collapse; font-size:var(--fs-13); }
 /* 폴러 단절 배너 (index.html: hd-banner) — 17절 .banner--neg 룩을 그대로 계승 */
 .hd-banner{ display:flex; align-items:center; gap:10px; padding:9px 22px; font-size:var(--fs-13); font-weight:var(--fw-semi);
   background:var(--surface); color:var(--ink); border-left:3px solid var(--neg); border-bottom:1px solid var(--line); flex-shrink:0; }
-.hd-banner-text{ flex:1; min-width:0; }
+.hd-banner-copy{ flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.hd-banner-text{ min-width:0; }
+.hd-banner-meta{ color:var(--muted); font-size:var(--fs-11); font-weight:var(--fw-med); }
+.hd-banner-retry{ flex-shrink:0; min-height:32px; }
 .hd-banner-x{ flex-shrink:0; width:22px; height:22px; padding:0; border-radius:50%; color:inherit;
   display:flex; align-items:center; justify-content:center; font-size:var(--fs-16); line-height:1; opacity:.7; }
 .hd-banner-x:hover{ opacity:1; background:rgba(var(--neg-rgb),.14); }
@@ -799,9 +827,11 @@ table.table{ width:100%; border-collapse:collapse; font-size:var(--fs-13); }
   font-size:var(--fs-12); font-weight:var(--fw-med); letter-spacing:.03em; color:var(--shell-muted); }
 .rail-live .u-dot{ width:6px; height:6px; }
 .rail-live.is-live{ color:var(--pos-bright); }
+.rail-live.is-stale{ color:var(--shell-ink); text-decoration:underline; text-decoration-style:dashed; text-underline-offset:2px; }
+.rail-live.is-offline{ color:var(--shell-ink); font-weight:var(--fw-bold); }
 /* 접힘(기본) 레일은 좁으므로 LIVE 텍스트를 숨기고 상태 도트와 가용성 수치만 남긴다.
    펼침 상태에서는 라벨과 가용성을 한 줄로 정렬한다. */
-.rail:not(.is-open) .rail-live [data-field="sourceLabel"]{ display:none; }
+.rail:not(.is-open) .rail-live [data-field="sourceLabel"]{ display:inline; font-size:8px; letter-spacing:0; }
 .rail.is-open .rail-foot{ flex-direction:row; align-items:center; justify-content:space-between; width:100%; padding:9px 12px 0; }
 .rail.is-open .rail-live{ font-size:var(--fs-12); gap:8px; }
 .rail.is-open .rail-live .u-dot{ width:7px; height:7px; }
@@ -817,6 +847,22 @@ table.table{ width:100%; border-collapse:collapse; font-size:var(--fs-13); }
    compute.js가 내보내는 row.anim('pulse'|'blink')을 화면이 그대로 class로 쓸 수 있게 한다.
    blink 유틸은 제거(C2): 'blink'(down) 신호는 이제 정적 색+형태로 표현하고 상시 깜빡임을 켜지 않는다. */
 .pulse{ animation:pulse var(--dur-pulse-slow) infinite; }
+
+/* 1025–1279px: 데스크톱 셸의 1280px 최소폭 때문에 생기던 수평 잘림을 해제한다. */
+@media (min-width:1025px) and (max-width:1279px){
+  .app{ min-width:0; }
+  .hd{ padding-inline:14px; gap:10px; }
+  .hd-search{ width:min(360px,34vw); }
+  .hd-profile-role,.hd-sub{ display:none; }
+  .hd-clock{ font-size:var(--fs-11); padding-inline:2px; }
+  .screen-root,.main{ min-width:0; }
+}
+
+@media (pointer:coarse){
+  .btn,.hd-icon-btn,.hd-logout,.rail-icon,.rail-toggle,.modal-tab,.modal-close,
+  .sc-mng-act,.sc-inc-bulk,.sc-cl-row-link,.sc-nd-row-link,.sc-nd-group-btn,
+  .sc-set-seg-btn,.sc-set-co-pal,.sc-ov-more,.sc-ov-alert-ack{ min-height:44px; min-width:44px; }
+}
 
 /* 고밀도 모드 (settings.setg.dense → app.js가 body에 토글) */
 body.is-dense{ font-size:var(--fs-13); }
@@ -845,7 +891,8 @@ body.is-dense .kpi{ padding:12px 14px; }
   .toast,
   .hd-search-results,
   .modal,
-  .modal-overlay{ animation:none !important; }
+  .modal-overlay,
+  .confirm-dialog{ animation:none !important; }
   /* 안전망(표준 a11y 패턴) — 위 목록 밖 잔여 모션까지 일괄 정지. */
   *, *::before, *::after{
     animation-duration:.01ms !important;
@@ -978,6 +1025,16 @@ body.is-dense .kpi{ padding:12px 14px; }
   /* 모바일 그리드 열수도 화면 소유(§8) — 전역 1열 스톰프 삭제(위 태블릿 블록 주석 참조).
      nodes 의 ≤640 3열 미니 스탯 그리드, topology 캔버스 내부 1.5:1 kv 그리드까지
      무차별 1열로 뭉개던 규칙이었다. */
+}
+
+@media (max-width:560px){
+  .modal-overlay{ padding:10px; align-items:flex-end; }
+  .confirm-dialog{ width:100%; max-height:92vh; padding:18px; border-radius:var(--r-lg); }
+  .confirm-actions{ flex-direction:column-reverse; }
+  .confirm-actions .btn{ width:100%; min-height:44px; }
+  .hd-banner{ padding:9px 12px; align-items:flex-start; flex-wrap:wrap; }
+  .hd-banner-copy{ flex-basis:calc(100% - 28px); }
+  .hd-banner-retry{ margin-left:20px; }
 }
 
 /* ---- 인쇄(리포트 납품) — 크롬/엣지 인쇄 시 셸 크롬을 걷고 본문만 낸다 ---- */

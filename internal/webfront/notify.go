@@ -2,14 +2,23 @@ package webfront
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
 )
+
+var notifyDeniedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"), // shared carrier-grade NAT
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmark/internal test networks
+}
 
 // defaultNotifyHosts 는 /notify 릴리의 대상 호스트 허용 목록 기본값이다.
 // /notify 는 LAN 의 누구든 {url, text} 만 보내면 서버가 대신 POST 해 주는 브리지라,
@@ -42,6 +51,140 @@ func notifyHostAllowed(host string, allowed []string) bool {
 		}
 	}
 	return false
+}
+
+// ValidateNotifyTarget applies the same SSRF allowlist used by the interactive
+// relay to server-resident notification delivery.
+func (s *Server) ValidateNotifyTarget(target string) error {
+	u, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("need an http(s) webhook URL without userinfo")
+	}
+	host := strings.ToLower(u.Hostname())
+	if !notifyHostAllowed(host, s.notifyHosts) {
+		return fmt.Errorf("notify target host not allowed (register it via SERVERDESK_NOTIFY_HOSTS)")
+	}
+	if u.Scheme == "http" {
+		ip := net.ParseIP(host)
+		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return fmt.Errorf("notify target must use HTTPS unless it is loopback")
+		}
+	}
+	return nil
+}
+
+func explicitLoopbackNotifyHost(host string) bool {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func prohibitedNotifyIP(ip net.IP) bool {
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	for _, prefix := range notifyDeniedPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateNotifyResolution rejects the entire answer set when any A/AAAA
+// result enters a local or special-use range. Rejecting mixed answers prevents
+// a resolver from steering a later retry to an unchecked private address.
+func validateNotifyResolution(host string, addrs []net.IPAddr) error {
+	if len(addrs) == 0 {
+		return fmt.Errorf("webhook destination has no addresses")
+	}
+	loopbackTarget := explicitLoopbackNotifyHost(host)
+	for _, addr := range addrs {
+		if loopbackTarget {
+			if addr.IP == nil || !addr.IP.IsLoopback() {
+				return fmt.Errorf("loopback webhook name resolved outside loopback")
+			}
+			continue
+		}
+		if prohibitedNotifyIP(addr.IP) {
+			return fmt.Errorf("webhook destination resolved to a prohibited address")
+		}
+	}
+	return nil
+}
+
+// dialNotifyContext resolves once, validates every answer, then dials one of
+// those exact addresses. The HTTP transport still performs TLS with the
+// original request hostname, preserving certificate hostname verification.
+func (s *Server) dialNotifyContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("invalid webhook destination")
+	}
+	lookup := s.notifyLookup
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIPAddr
+	}
+	addrs, err := lookup(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("webhook destination resolution failed")
+	}
+	if err := validateNotifyResolution(host, addrs); err != nil {
+		return nil, err
+	}
+	dialer := net.Dialer{Timeout: notifyTimeout}
+	var lastErr error
+	for _, addr := range addrs {
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no validated webhook address")
+	}
+	return nil, lastErr
+}
+
+// SendWebhook sends one bounded, non-redirecting webhook request. deliveryID is
+// stable across retries and is exposed as Idempotency-Key for webhook gateways
+// that support deduplication. Errors intentionally omit the target URL because
+// webhook paths commonly contain bearer secrets.
+func (s *Server) SendWebhook(ctx context.Context, target, message, deliveryID string) (int, error) {
+	if err := s.ValidateNotifyTarget(target); err != nil {
+		return 0, err
+	}
+	message = truncateRunes(strings.TrimSpace(message), 1900)
+	if message == "" {
+		return 0, fmt.Errorf("webhook message is empty")
+	}
+	payload := marshalJSON(map[string]any{"text": message, "content": message})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return 0, fmt.Errorf("webhook request could not be created")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if deliveryID != "" {
+		req.Header.Set("Idempotency-Key", deliveryID)
+	}
+	resp, err := s.notifyClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("webhook request failed")
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, fmt.Errorf("webhook returned HTTP %d: %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	return resp.StatusCode, nil
 }
 
 // handleNotify 는 웹훅 중계다: {url, text} → 대상 URL 로 POST. Slack 은 text, Discord 는
@@ -79,35 +222,16 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "need http(s) url and text")
 		return
 	}
-	host := ""
-	if u, err := url.Parse(target); err == nil {
-		host = strings.ToLower(u.Hostname())
-	}
-	if host == "" || !notifyHostAllowed(host, s.notifyHosts) {
-		writeJSONError(w, http.StatusForbidden,
-			"notify target host not allowed (register it via --notify-hosts)")
+	if err := s.ValidateNotifyTarget(target); err != nil {
+		writeJSONError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	payload := marshalJSON(map[string]any{"text": text, "content": text})
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(payload))
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "webhook relay failed: "+err.Error())
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.notifyClient.Do(req)
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "webhook relay failed: "+err.Error())
-		return
-	}
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
-	code := resp.StatusCode
+	code, err := s.SendWebhook(r.Context(), target, text, "")
 	// Python urllib 은 2xx 가 아니면(NoRedirectHandler 라 3xx 도) HTTPError 를 던지므로
 	// 여기서도 2xx 외는 릴리 실패다 — 정상 웹훅 응답은 200/204 뿐이라 끊어도 무해하다.
-	if code < 200 || code >= 300 {
+	if err != nil {
 		writeJSONError(w, http.StatusBadGateway,
-			fmt.Sprintf("webhook relay failed: HTTP Error %d: %s", code, http.StatusText(code)))
+			"webhook relay failed: "+err.Error())
 		return
 	}
 	// 응답 모양은 Python 과 같게 유지한다({"ok":..., "status":...}) — 프런트가 이 필드를 읽는다.

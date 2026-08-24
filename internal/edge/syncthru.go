@@ -5,14 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strings"
 )
 
 // ── 삼성 SyncThru 웹(읽기 전용 GET) ────────────────────────────────────────
-// 프린터 자체서명 인증서라 TLS 검증은 생략한다(폐쇄망 낮부 장비 전용).
+// 자체서명 프린터는 명시적 SPKI SHA-256 피닝이 설정된 경우에만 연결한다.
 
 var (
 	// SyncThru 는 키 미인용 JS 리터럴을 낸다 — 표준 JSON 으로 완화 변환.
@@ -45,7 +44,7 @@ func swsGet(ctx context.Context, cl *http.Client, ip, path string) (map[string]a
 	if resp.StatusCode >= 400 {
 		return nil, &httpStatusError{Code: resp.StatusCode}
 	}
-	b, err := io.ReadAll(resp.Body)
+	b, err := readLimitedBody(resp.Body, maxCompressedDeviceResponseBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +54,7 @@ func swsGet(ctx context.Context, cl *http.Client, ip, path string) (map[string]a
 			return nil, err
 		}
 		defer zr.Close()
-		if b, err = io.ReadAll(zr); err != nil {
+		if b, err = readLimitedBody(zr, maxDeviceResponseBytes); err != nil {
 			return nil, err
 		}
 	}

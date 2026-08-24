@@ -12,9 +12,10 @@ export function $$(sel, root = document) {
 }
 
 // 엘리먼트 생성 헬퍼.
-// attrs: class/className → node.className, text → textContent, html → innerHTML,
+// attrs: class/className → node.className, text → textContent,
 //        style(object) → Object.assign(node.style,…), onClick 등 on<Event>(함수) → addEventListener,
 //        그 외는 setAttribute(true면 빈 값 속성).
+// 신뢰 경계가 불분명한 문자열을 주입할 수 있는 html/innerHTML 경로는 제공하지 않는다.
 // children: 문자열/숫자/노드 또는 그 배열(중첩 배열 허용).
 export function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -22,7 +23,6 @@ export function el(tag, attrs = {}, children = []) {
     if (v == null || v === false) continue;
     if (k === 'class' || k === 'className') node.className = v;
     else if (k === 'text') node.textContent = v;
-    else if (k === 'html') node.innerHTML = v;
     else if (k === 'style' && typeof v === 'object') Object.assign(node.style, v);
     else if (/^on[A-Z]/.test(k) && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
     else if (v === true) node.setAttribute(k, '');

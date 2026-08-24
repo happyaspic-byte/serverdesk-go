@@ -81,7 +81,7 @@ export function histOf(state, dev, field) {
 }
 
 /** 스파크라인용: 표본이 2개 미만이면 현재값으로 평평하게 채운다(선이 안 그려지는 문제 방지). */
-function _sparkHist(list, cur) {
+export function _sparkHist(list, cur) {
   if (Array.isArray(list) && list.length > 1) return list;
   const v = _num(cur);
   return v == null ? [] : [v, v];

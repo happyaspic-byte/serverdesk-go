@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"serverdesk/internal/webauth"
 )
 
 // ApplyHardening 은 통합자의 http.Server 에 slowloris 방지 deadline 을 설정한다.
@@ -25,22 +27,31 @@ func ApplyHardening(srv *http.Server) {
 	srv.MaxHeaderBytes = 64 << 10
 }
 
-// CheckSameOrigin 은 쓰기 요청의 Origin/Referer 가 Host 와 같은지 확인한다
-// (CSRF 성격의 LAN 요청 방지). 둘 다 netloc(host:port)만 뽑아 비교한다.
+// CheckSameOrigin 은 쓰기 요청의 Origin/Referer 가 요청의 신뢰된 scheme+Host 와 같은지 확인한다
+// (CSRF 성격의 LAN 요청 방지). 기본 포트는 canonicalize해 비교한다.
 // 헤더가 있는데 netloc 을 못 뽑으면('Origin: null'·'file://'·파싱 불가) 교차출처로
 // 간주해 거부한다(fail-close). 헤더가 아예 없으면(curl·서버 간 호출) 통과시킨다.
 func CheckSameOrigin(r *http.Request) bool {
-	own := strings.ToLower(r.Host)
+	scheme := webauth.TrustedRequestScheme(r)
+	ownURL, err := url.Parse(scheme + "://" + r.Host)
+	if err != nil || ownURL.User != nil {
+		return false
+	}
+	own := webauth.CanonicalAuthority(ownURL)
+	if own == "" {
+		return false
+	}
 	for _, hdr := range []string{"Origin", "Referer"} {
 		v := r.Header.Get(hdr)
 		if v == "" {
 			continue
 		}
 		u, err := url.Parse(v)
-		if err != nil || u.Host == "" || u.User != nil {
+		if err != nil || u.Host == "" || u.User != nil ||
+			strings.ToLower(u.Scheme) != scheme || webauth.CanonicalAuthority(u) != own {
 			return false // Python netloc 에는 userinfo 가 포함되므로 userinfo 있으면 불일치
 		}
-		if strings.ToLower(u.Host) != own {
+		if hdr == "Origin" && (u.Path != "" || u.RawQuery != "" || u.Fragment != "") {
 			return false
 		}
 	}

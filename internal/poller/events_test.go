@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -134,6 +135,192 @@ func TestEventLogBoundsEscapedJSONLine(t *testing.T) {
 	desc := log.List(1)[0].(map[string]any)["desc"].(string)
 	if len(desc) >= len(input) || log.Status()["healthy"] != true {
 		t.Fatalf("control-heavy event was not bounded: desc=%d status=%#v", len(desc), log.Status())
+	}
+}
+
+func TestEventLogAuditRecordIsStructuredAndSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	log := NewEventLog(path, 20)
+	stamp := time.Date(2026, 8, 24, 1, 2, 3, 456, time.UTC)
+	prepared := AuditRecord{
+		ID: "audit-123", Action: "device.delete", Target: "edge-1",
+		Reason: "장비 계약 종료", Operator: "admin", Phase: "prepared", Timestamp: stamp,
+	}
+	if err := log.RecordAudit(prepared); err != nil {
+		t.Fatalf("record prepared audit: %v", err)
+	}
+	committed := prepared
+	committed.Phase = "committed"
+	committed.Timestamp = stamp.Add(time.Second)
+	if err := log.RecordAudit(committed); err != nil {
+		t.Fatalf("record committed audit: %v", err)
+	}
+
+	reloaded := NewEventLog(path, 20)
+	items := reloaded.List(2)
+	if len(items) != 2 {
+		t.Fatalf("reloaded audit records = %d, want 2", len(items))
+	}
+	latest := items[0].(map[string]any)
+	for key, want := range map[string]string{
+		"audit_id": "audit-123", "action": "device.delete", "target": "edge-1",
+		"reason": "장비 계약 종료", "operator": "admin", "phase": "committed",
+		"ts": stamp.Add(time.Second).Format(time.RFC3339Nano),
+	} {
+		if latest[key] != want {
+			t.Errorf("%s = %#v, want %q", key, latest[key], want)
+		}
+	}
+	if latest["kind"] != "audit" || latest["desc"] != "장비 계약 종료" {
+		t.Fatalf("audit event projection = %#v", latest)
+	}
+	if reloaded.Status()["healthy"] != true {
+		t.Fatalf("reloaded event status = %#v", reloaded.Status())
+	}
+}
+
+func TestEventLogAuditRejectsInvalidReasonAndPersistenceFailure(t *testing.T) {
+	log := NewEventLog(filepath.Join(t.TempDir(), "events.jsonl"), 20)
+	base := AuditRecord{
+		ID: "audit-1", Action: "config.restore", Target: "configuration",
+		Operator: "admin", Phase: "prepared", Reason: strings.Repeat("가", maxAuditReasonRunes+1),
+	}
+	if err := log.RecordAudit(base); err == nil {
+		t.Fatal("oversized audit reason was accepted")
+	}
+	if log.Len() != 0 {
+		t.Fatalf("rejected audit entered ring: %d", log.Len())
+	}
+
+	bad := NewEventLog(filepath.Join(t.TempDir(), "missing", "events.jsonl"), 20)
+	base.Reason = "정상 사유"
+	if err := bad.RecordAudit(base); err == nil {
+		t.Fatal("audit persistence failure was hidden")
+	}
+	if bad.Len() != 0 || bad.Status()["healthy"] != false {
+		t.Fatalf("failed durable audit state = len %d status %#v", bad.Len(), bad.Status())
+	}
+}
+
+func TestEventLogAuditStructuredFieldsAreNeverSilentlyTruncated(t *testing.T) {
+	log := NewEventLog(filepath.Join(t.TempDir(), "events.jsonl"), 20)
+	record := AuditRecord{
+		ID: strings.Repeat("i", 64), Action: strings.Repeat("a", 128),
+		Target: strings.Repeat("가", 170), Reason: strings.Repeat("🙂", maxAuditReasonRunes),
+		Operator: strings.Repeat("o", 64), Phase: strings.Repeat("p", 32),
+	}
+	if err := log.RecordAudit(record); err != nil {
+		t.Fatalf("record boundary-sized audit: %v", err)
+	}
+	stored := log.List(1)[0].(map[string]any)
+	for key, want := range map[string]string{
+		"audit_id": record.ID, "action": record.Action, "target": record.Target,
+		"reason": record.Reason, "operator": record.Operator, "phase": record.Phase,
+	} {
+		if stored[key] != want {
+			t.Fatalf("%s was altered: got bytes=%d want bytes=%d", key, len(stored[key].(string)), len(want))
+		}
+	}
+
+	record.ID = "next"
+	record.Target += "가"
+	if err := log.RecordAudit(record); err == nil {
+		t.Fatal("over-byte-limit target was silently truncated")
+	}
+	if log.Len() != 1 {
+		t.Fatalf("rejected audit entered ring: %d", log.Len())
+	}
+}
+
+func TestEventWatcherRecordsStateAlertAndInventoryTransitions(t *testing.T) {
+	log := NewEventLog(filepath.Join(t.TempDir(), "watcher-events.jsonl"), 50)
+	cache := NewFleetCache()
+	devices := []map[string]any{
+		{
+			"id": "edge-1", "host": "edge-1.local", "status": "op",
+			"meta": map[string]any{"label": "Edge One", "alerts": []any{}},
+		},
+	}
+	w := NewEventWatcher(log, cache, nil,
+		func() []map[string]any { return devices },
+		func(key string) string { return "display-" + key })
+
+	// The first sample establishes a baseline and must not emit boot-time noise.
+	w.round()
+	if got := log.Len(); got != 0 {
+		t.Fatalf("baseline emitted %d events: %#v", got, log.List(50))
+	}
+	// Skip the intentional boot grace so subsequent rounds exercise real diffs.
+	w.t0 = time.Now().Add(-time.Duration(bootGrace+1) * time.Second)
+
+	devices = []map[string]any{
+		{
+			"id": "edge-1", "host": "edge-1.local", "status": "down",
+			"meta": map[string]any{
+				"label": "Edge One",
+				"alerts": []any{
+					map[string]any{"name": "FAN_FAIL", "desc": "", "sev": "critical"},
+					// DEVICE_STATE is represented by the dedicated state event, not duplicated.
+					map[string]any{"name": "DEVICE_STATE", "desc": "duplicate", "sev": "critical"},
+				},
+			},
+		},
+		{
+			"id": "edge-2", "host": "edge-2.local", "status": "op",
+			"meta": map[string]any{"label": "Edge Two", "alerts": []any{}},
+		},
+	}
+	w.round()
+
+	devices = []map[string]any{
+		{
+			"id": "edge-1", "host": "edge-1.local", "status": "deg",
+			"meta": map[string]any{
+				"label": "Edge One",
+				"alerts": []any{
+					// Unknown severities are deliberately normalized to warning.
+					map[string]any{"name": "HOT", "desc": "temperature", "severity": "unexpected"},
+				},
+			},
+		},
+	}
+	w.round()
+
+	events := log.List(50)
+	if len(events) != 7 {
+		t.Fatalf("transition events = %d, want 7: %#v", len(events), events)
+	}
+	seen := map[string]bool{}
+	for _, raw := range events {
+		ev := raw.(map[string]any)
+		key := eventString(ev, "kind") + "|" + eventString(ev, "host") + "|" +
+			eventString(ev, "sev") + "|" + eventString(ev, "desc")
+		seen[key] = true
+		if strings.Contains(eventString(ev, "desc"), "duplicate") {
+			t.Fatalf("DEVICE_STATE alert was duplicated: %#v", ev)
+		}
+	}
+	for _, want := range []string{
+		"state|edge-1.local|critical|상태 가동 → 오프라인",
+		"alert|edge-1.local|critical|FAN_FAIL",
+		"new|edge-2.local|info|장비 등록됨",
+		"state|edge-1.local|warning|상태 오프라인 → 저하",
+		"alert|edge-1.local|warning|temperature",
+		"clear|edge-1.local|info|해제: FAN_FAIL",
+		"gone|edge-2.local|info|장비 제거됨",
+	} {
+		if !seen[want] {
+			t.Errorf("missing event %q; got %#v", want, events)
+		}
+	}
+
+	if got := stateLabel("vendor-state"); got != "vendor-state" {
+		t.Fatalf("unknown state label = %q", got)
+	}
+	left := map[[3]string]bool{{"z", "", "warning"}: true, {"a", "", "critical"}: true}
+	diff := sortedAlertDiff(left, map[[3]string]bool{{"z", "", "warning"}: true})
+	if len(diff) != 1 || diff[0][0] != "a" {
+		t.Fatalf("sorted alert difference = %#v", diff)
 	}
 }
 

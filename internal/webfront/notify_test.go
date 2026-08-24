@@ -1,7 +1,9 @@
 package webfront
 
 import (
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -115,6 +117,40 @@ func TestNotifySSRFGuards(t *testing.T) {
 	}
 }
 
+func TestNotifyResolutionRejectsPrivateMixedAndReboundAnswers(t *testing.T) {
+	public := net.ParseIP("93.184.216.34")
+	cases := []struct {
+		name string
+		host string
+		ips  []net.IPAddr
+		ok   bool
+	}{
+		{"public", "alerts.example", []net.IPAddr{{IP: public}}, true},
+		{"private", "alerts.example", []net.IPAddr{{IP: net.ParseIP("10.0.0.5")}}, false},
+		{"link local", "alerts.example", []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}, false},
+		{"carrier NAT", "alerts.example", []net.IPAddr{{IP: net.ParseIP("100.64.1.2")}}, false},
+		{"IPv6 private", "alerts.example", []net.IPAddr{{IP: net.ParseIP("fd00::1")}}, false},
+		{"mixed", "alerts.example", []net.IPAddr{{IP: public}, {IP: net.ParseIP("127.0.0.1")}}, false},
+		{"localhost", "localhost", []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}, {IP: net.ParseIP("::1")}}, true},
+		{"localhost mixed", "localhost", []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}, {IP: public}}, false},
+	}
+	for _, tc := range cases {
+		err := validateNotifyResolution(tc.host, tc.ips)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s error=%v, ok=%v", tc.name, err, tc.ok)
+		}
+	}
+
+	s := newTestServer(t, Options{NotifyHosts: []string{"alerts.example"}})
+	s.notifyLookup = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	const target = "https://alerts.example/hooks/never-leak-token"
+	if _, err := s.SendWebhook(context.Background(), target, "critical", "id"); err == nil || strings.Contains(err.Error(), "never-leak-token") {
+		t.Fatalf("DNS rebound send error = %v", err)
+	}
+}
+
 func TestNotifyRedirectNotFollowed(t *testing.T) {
 	var targetHit atomic.Bool
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -149,5 +185,51 @@ func TestNotifyWebhookError(t *testing.T) {
 	rec := do(s, "POST", "/notify", strings.NewReader(`{"url":"`+hook.URL+`","text":"x"}`), nil)
 	if rec.Code != 502 || !strings.Contains(rec.Body.String(), "webhook relay failed") {
 		t.Errorf("webhook 500 = %d %s, want 502 relay failed", rec.Code, rec.Body.String())
+	}
+}
+
+func TestValidateNotifyTargetRequiresTLSOffLoopbackAndMasksSecrets(t *testing.T) {
+	s := newTestServer(t, Options{NotifyHosts: []string{"plain.example", "localhost", "::1"}})
+	const secret = "never-log-this-token"
+	if err := s.ValidateNotifyTarget("https://plain.example/hooks/" + secret); err != nil {
+		t.Fatalf("HTTPS target rejected: %v", err)
+	}
+	if err := s.ValidateNotifyTarget("http://localhost/hooks/" + secret); err != nil {
+		t.Fatalf("loopback HTTP target rejected: %v", err)
+	}
+	if err := s.ValidateNotifyTarget("http://[::1]/hooks/" + secret); err != nil {
+		t.Fatalf("IPv6 loopback HTTP target rejected: %v", err)
+	}
+	for _, target := range []string{
+		"http://plain.example/hooks/" + secret,
+		"https://user:" + secret + "@plain.example/hooks",
+	} {
+		err := s.ValidateNotifyTarget(target)
+		if err == nil {
+			t.Fatalf("unsafe target accepted: %s", target)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("validation error leaked target secret: %v", err)
+		}
+	}
+	notAllowed := s.ValidateNotifyTarget("https://blocked.example/hooks/" + secret)
+	if notAllowed == nil || !strings.Contains(notAllowed.Error(), "SERVERDESK_NOTIFY_HOSTS") || strings.Contains(notAllowed.Error(), secret) {
+		t.Fatalf("allowlist error = %v", notAllowed)
+	}
+}
+
+func TestSendWebhookUsesStableIdempotencyHeader(t *testing.T) {
+	gotID := make(chan string, 1)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotID <- r.Header.Get("Idempotency-Key")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer hook.Close()
+	s := notifyTestServer(t)
+	if status, err := s.SendWebhook(context.Background(), hook.URL, "critical", "delivery-stable-id"); err != nil || status != http.StatusNoContent {
+		t.Fatalf("SendWebhook status=%d err=%v", status, err)
+	}
+	if id := <-gotID; id != "delivery-stable-id" {
+		t.Fatalf("Idempotency-Key = %q", id)
 	}
 }

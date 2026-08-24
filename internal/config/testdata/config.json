@@ -1,4 +1,5 @@
 {
+	"secret_policy": "allow-plaintext",
   "_comment": "테스트 픽스처 — 가짜 자격증명만 사용한다(실제 비밀 없음).",
 
   "listen": "0.0.0.0:9890",

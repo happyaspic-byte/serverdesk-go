@@ -1,0 +1,35 @@
+-- Synthetic test fixture created by Roobicom. It contains no vendor MIB text.
+TEST-STRATUS-LIKE-MIB DEFINITIONS ::= BEGIN
+
+testVendorRoot OBJECT IDENTIFIER ::= { enterprises 458 }
+testEverRunRoot OBJECT IDENTIFIER ::= { testVendorRoot 115 }
+everRunTrapId OBJECT IDENTIFIER ::= { testEverRunRoot 2 }
+everRunTrapData OBJECT IDENTIFIER ::= { testEverRunRoot 3 }
+
+everRunTrapDescription OBJECT-TYPE
+    SYNTAX OCTET STRING
+    ACCESS read-only
+    STATUS mandatory
+    ::= { everRunTrapData 1 }
+
+everRunGenericTrap TRAP-TYPE
+    ENTERPRISE everRunTrapId
+    VARIABLES { everRunTrapDescription }
+    ::= 1
+
+everRunGuestCrashedTrap TRAP-TYPE
+    ENTERPRISE everRunTrapId
+    VARIABLES { everRunTrapDescription }
+    ::= 2
+
+everRunNodeUnreachableTrap TRAP-TYPE
+    ENTERPRISE everRunTrapId
+    VARIABLES { everRunTrapDescription }
+    ::= 3
+
+everRunNodeMaintenanceTrap TRAP-TYPE
+    ENTERPRISE everRunTrapId
+    VARIABLES { everRunTrapDescription }
+    ::= 4
+
+END

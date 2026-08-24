@@ -135,7 +135,9 @@ export default {
     ]);
     const emptyIco = el('span', { class: 'sc-inc-empty-ico' }, [icon('check', { size: 24 })]);
     const emptyTitle = el('div', { class: 'sc-inc-empty-title' });
-    const emptyBox = el('div', { class: 'card sc-inc-empty', hidden: true }, [emptyIco, emptyTitle]);
+    const emptySub = el('div', { class: 'sc-inc-empty-sub u-muted' });
+    const emptyAdd = el('button', { class: 'btn btn--primary sc-inc-empty-add', type: 'button', 'data-goto': 'manage', hidden: true });
+    const emptyBox = el('div', { class: 'card sc-inc-empty', hidden: true }, [emptyIco, emptyTitle, emptySub, emptyAdd]);
     const list = el('div', { class: 'sc-inc-list', hidden: true });
     // '전체' 필터 기본 뷰는 상위 N건만 — 나머지는 이 버튼으로 펼친다(minor#4, 무한 스크롤 높이 방지).
     const moreBtn = el('button', { class: 'sc-inc-more', type: 'button', 'data-inc-more': true, hidden: true });
@@ -178,14 +180,14 @@ export default {
       titleEl, subEl, kpiGrid,
       segCards, segLog, segStats, viewToggle, logTools, searchInput, searchClear, liveIco, liveLabel, liveBtn,
       statsWrap, statsBody, statsTools, csvAlertsBtn, csvLogBtn, csvDevsBtn, printBtn,
-      banner, skeleton, emptyBox, emptyTitle, list, moreBtn, lessBtn, cardWrap, bulkBar, ackAllBtn, ackNoneBtn,
+      banner, skeleton, emptyBox, emptyTitle, emptySub, emptyAdd, list, moreBtn, lessBtn, cardWrap, bulkBar, ackAllBtn, ackNoneBtn,
       consoleDot, consoleStatus, consoleCount, logList, logEmpty, logEmptyTitle, logEmptySub, logWrap,
       kpiRefs: [], rowRefs: [], rowSig: null, logSig: null, kpiSig: null,
     };
     this._S = S;
 
     // ---- 이벤트 위임(클릭 1개) --------------------------------------------
-    S.onClick = (ev) => {
+    S.onClick = async (ev) => {
       // 병합(×N) 행의 확인 버튼 — 멤버 전체 ackKey(data-ack-keys, ␂ 구분)를 일괄 처리한다(#29).
       // app.js 의 ackAlert 위임은 단일 키(data-ack-key)만 알므로, 복수 키는 여기서 처리하고 전파를
       // 막는다(막지 않으면 document 위임이 대표 키를 한 번 더 토글해 방금 확인이 취소된다).
@@ -198,10 +200,23 @@ export default {
           ev.stopPropagation();
           const cur = ctx.store.getState().ackedAlerts || {};
           const unack = keys.every((k) => cur[k]);
+          const approved = ctx.confirmAction ? await ctx.confirmAction({
+            title: unack ? ctx.L('Remove grouped acknowledgements', '묶음 경보 확인 해제') : ctx.L('Acknowledge grouped alerts', '묶음 경보 확인'),
+            impact: ctx.L(
+              keys.length + ' acknowledgement markers will be changed. Monitoring and source alerts remain unchanged.',
+              keys.length + '건의 확인 표시를 변경합니다. 모니터링과 원본 경보는 변경되지 않습니다.'
+            ),
+            confirmLabel: unack ? ctx.L('Remove ' + keys.length, keys.length + '건 해제') : ctx.L('Acknowledge ' + keys.length, keys.length + '건 확인'),
+            requireReason: true,
+          }) : { confirmed: true };
+          if (!approved) return;
           ctx.store.setState((s) => {
             const next = Object.assign({}, s.ackedAlerts);
             const now = new Date().toISOString();
-            keys.forEach((k) => { if (unack) delete next[k]; else next[k] = now; });
+            keys.forEach((k) => {
+              if (unack) delete next[k];
+              else next[k] = { ts: now, by: approved.operator || ctx.operator || 'admin', reason: approved.reason || '' };
+            });
             return { ackedAlerts: next };
           });
           ctx.showToast(unack
@@ -436,7 +451,9 @@ export function renderCardView(S, ctx, state, m) {
   const L = ctx.L;
   const pollStat = m.pollStat || {};
   const liveError = pollStat.liveError || null;
-  const loading = !liveError && (m.total || 0) === 0;
+  // pollPending/lastPoll이 최초 로딩의 정본이다. 장비 0대는 성공 응답일 수 있으므로
+  // 모델 total=0만으로 스켈레톤을 계속 보여주지 않는다.
+  const loading = !liveError && !!state.pollPending && !state.lastPoll;
   // 픽스처 필터는 빈 상태 판정보다 먼저 — 픽스처만 남은 뷰도 빈 카피가 떠야 한다(#265).
   let list = visibleCardAlerts(m.incList);
   // 일괄 바·'더 보기'의 포커스를 맨 먼저 기억한다(#564) — 아래 show(…, false) 가 매 렌더마다
@@ -449,6 +466,8 @@ export function renderCardView(S, ctx, state, m) {
   // 이전 성공 렌더의 stale N·data-ack-keys 가 남아 보이지 않는 경보가 일괄 처리될 수 있었다.
   // 재노출은 아래 성공 경로(라벨·키를 먼저 다시 싣는 뒤)뿐이다.
   show(S.bulkBar, false);
+  show(S.emptyAdd, false);
+  S.emptySub.textContent = '';
 
   if (liveError) {
     S.banner.querySelector('.sc-inc-banner-text').textContent =
@@ -461,8 +480,22 @@ export function renderCardView(S, ctx, state, m) {
     return;
   }
   if (!list.length) {
-    // 필터 0건은 '전체 정상'이 아니다(#30) — 필터 종류에 따라 카피를 분기한다(판정은 emptyCardTitle).
-    S.emptyTitle.textContent = emptyCardTitle(state.alertFilter, L);
+    const noDevices = !Array.isArray(state.fleet) || state.fleet.length === 0;
+    if (noDevices) {
+      S.emptyTitle.textContent = L('No devices configured', '등록된 장비가 없습니다');
+      S.emptySub.textContent = L(
+        'Add a supported device to begin monitoring.',
+        '지원되는 장비를 등록하면 모니터링을 시작할 수 있습니다.'
+      );
+      S.emptyAdd.textContent = L('Add device', '장비 추가');
+      show(S.emptyAdd, true);
+    } else {
+      // 필터 0건은 '전체 정상'이 아니다(#30) — 필터 종류에 따라 카피를 분기한다(판정은 emptyCardTitle).
+      S.emptyTitle.textContent = emptyCardTitle(state.alertFilter, L);
+      S.emptySub.textContent = state.alertFilter && state.alertFilter !== 'all'
+        ? L('Choose another severity filter to review the remaining alerts.', '다른 심각도 필터를 선택해 나머지 경보를 확인하세요.')
+        : L('All configured devices are currently clear.', '등록된 모든 장비에 현재 활성 경보가 없습니다.');
+    }
     show(S.banner, false); show(S.skeleton, false); show(S.emptyBox, true); show(S.list, false);
     return;
   }
