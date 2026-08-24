@@ -1,4 +1,6 @@
 #!/bin/sh
+# shellcheck disable=SC2016
+# Single-quoted strings below intentionally represent literal fixtures and grep contracts.
 # Rootless static checks for Linux packaging. This never changes networking,
 # systemd state, /opt, /etc, or /var. CI and release builders can run it.
 set -eu

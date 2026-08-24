@@ -69,18 +69,18 @@ cleanup_install() {
       fi
     fi
     if [ "$binary_backup" -eq 1 ] && [ -f "$DST/serverdesk.install-backup" ]; then
-      sudo cp -a "$DST/serverdesk.install-backup" "$DST/serverdesk" &&
-        sudo cmp -s "$DST/serverdesk.install-backup" "$DST/serverdesk" || {
+      if ! sudo cp -a "$DST/serverdesk.install-backup" "$DST/serverdesk" ||
+        ! sudo cmp -s "$DST/serverdesk.install-backup" "$DST/serverdesk"; then
         echo "[CRITICAL] rollback could not verify the original binary; backup preserved at $DST/serverdesk.install-backup" >&2
         rollback_failed=1
-      }
+      fi
     fi
     if [ "$unit_backup" -eq 1 ] && [ -f "$UNIT.install-backup" ]; then
-      sudo cp -a "$UNIT.install-backup" "$UNIT" &&
-        sudo cmp -s "$UNIT.install-backup" "$UNIT" || {
+      if ! sudo cp -a "$UNIT.install-backup" "$UNIT" ||
+        ! sudo cmp -s "$UNIT.install-backup" "$UNIT"; then
         echo "[CRITICAL] rollback could not verify the original unit; backup preserved at $UNIT.install-backup" >&2
         rollback_failed=1
-      }
+      fi
     elif [ "$unit_created" -eq 1 ]; then
       sudo rm -f "$UNIT" || {
         echo "[CRITICAL] rollback could not remove newly installed unit: $UNIT" >&2
@@ -88,11 +88,11 @@ cleanup_install() {
       }
     fi
     if [ "$net_unit_backup" -eq 1 ] && [ -f "$NET_UNIT.install-backup" ]; then
-      sudo cp -a "$NET_UNIT.install-backup" "$NET_UNIT" &&
-        sudo cmp -s "$NET_UNIT.install-backup" "$NET_UNIT" || {
+      if ! sudo cp -a "$NET_UNIT.install-backup" "$NET_UNIT" ||
+        ! sudo cmp -s "$NET_UNIT.install-backup" "$NET_UNIT"; then
         echo "[CRITICAL] rollback could not verify the original network unit; backup preserved at $NET_UNIT.install-backup" >&2
         rollback_failed=1
-      }
+      fi
     elif [ "$net_unit_created" -eq 1 ]; then
       sudo rm -f "$NET_UNIT" || {
         echo "[CRITICAL] rollback could not remove newly installed network unit: $NET_UNIT" >&2
@@ -100,11 +100,11 @@ cleanup_install() {
       }
     fi
     if [ "$net_helper_backup" -eq 1 ] && [ -f "$NET_HELPER.install-backup" ]; then
-      sudo cp -a "$NET_HELPER.install-backup" "$NET_HELPER" &&
-        sudo cmp -s "$NET_HELPER.install-backup" "$NET_HELPER" || {
+      if ! sudo cp -a "$NET_HELPER.install-backup" "$NET_HELPER" ||
+        ! sudo cmp -s "$NET_HELPER.install-backup" "$NET_HELPER"; then
         echo "[CRITICAL] rollback could not verify the original network helper; backup preserved at $NET_HELPER.install-backup" >&2
         rollback_failed=1
-      }
+      fi
     elif [ "$net_helper_created" -eq 1 ]; then
       sudo rm -f "$NET_HELPER" || {
         echo "[CRITICAL] rollback could not remove newly installed network helper: $NET_HELPER" >&2

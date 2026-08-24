@@ -2,10 +2,10 @@
 # Print a single local /api/health URL derived from config, or validate an override.
 set -eu
 
-[ "$#" -ge 1 ] && [ "$#" -le 3 ] || {
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
   echo "usage: $0 CONFIG_JSON [HEALTH_URL] [SERVICE_USER]" >&2
   exit 2
-}
+fi
 config=$1
 override=${2:-}
 service_user=${3:-serverdesk}
@@ -16,7 +16,10 @@ for command in jq getent ip stat realpath; do
     exit 1
   }
 done
-[ -f "$config" ] && [ ! -L "$config" ] || { echo "[FAIL] unsafe config: $config" >&2; exit 1; }
+if [ ! -f "$config" ] || [ -L "$config" ]; then
+  echo "[FAIL] unsafe config: $config" >&2
+  exit 1
+fi
 
 assert_local_health_host() {
   host=$1
@@ -86,8 +89,14 @@ if [ -n "$tls_cert" ]; then
   config_dir=$(CDPATH='' cd "$(dirname "$config")" && pwd)
   case "$tls_cert" in /*) ;; *) tls_cert=$config_dir/$tls_cert ;; esac
   case "$tls_key" in /*) ;; *) tls_key=$config_dir/$tls_key ;; esac
-  [ -f "$tls_cert" ] && [ ! -L "$tls_cert" ] || { echo "[FAIL] unsafe TLS certificate: $tls_cert" >&2; exit 1; }
-  [ -f "$tls_key" ] && [ ! -L "$tls_key" ] || { echo "[FAIL] unsafe TLS key: $tls_key" >&2; exit 1; }
+  if [ ! -f "$tls_cert" ] || [ -L "$tls_cert" ]; then
+    echo "[FAIL] unsafe TLS certificate: $tls_cert" >&2
+    exit 1
+  fi
+  if [ ! -f "$tls_key" ] || [ -L "$tls_key" ]; then
+    echo "[FAIL] unsafe TLS key: $tls_key" >&2
+    exit 1
+  fi
   if [ "$(realpath -s "$tls_key")" != "$(realpath "$tls_key")" ]; then
     echo "[FAIL] TLS key path must not traverse symlinks: $tls_key" >&2
     exit 1
