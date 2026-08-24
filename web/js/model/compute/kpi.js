@@ -90,6 +90,7 @@ export function buildModel(a, b) {
     // 패치로 바뀐다(app.js::computeStale) — 지문에 없으면 이 패치들이 캐시에 먹혀 개요 수집
     // 카드·incidents 로딩 판정이 백오프(최대 30초+) 동안 "실시간 정상"으로 고정된다(§4.1 함정).
     (state && state.source) || '',
+    !!(state && (state.sampleMode || state.demoMode)),
     !!(state && state.stale),
     (state && state.liveError) || '',
     fleet.length,
@@ -198,6 +199,7 @@ export function buildModel(a, b) {
       uptime: (s.status === 'down' || noTel || s.uptime < 0) ? DASH : fmtUptimeD(s.uptime),
       maint, maintLabel: L('MAINT', '점검'),
       maintWin, maintWinInfo: maintWin ? maintMap[s.id] : null,
+      sample: m.sample === true || m.demo === true,
       pending: !!m.pending, error: m.error || null,
       isFT: isFT(s.type), noTel,
       vms: m.vms || 0, vmRunning: m.vmRunning || 0,
@@ -767,10 +769,13 @@ export function buildModel(a, b) {
     // 어느 장비의 어느 수집 티어가 죽었는지 — 화면이 '수집 실패'만 말하고 끝내지 않게 한다.
     tierErrs: tierErrHosts.slice(0, 3),
   };
+  const sampleMode = S.sampleMode === true || S.demoMode === true
+    || S.source === 'sample' || S.source === 'demo';
   const pollStat = Object.assign({}, collect, {
-    source: 'live',
-    live: true,
-    sourceLabel: L('Live', '실시간'),
+    source: sampleMode ? 'sample' : 'live',
+    live: !sampleMode,
+    sample: sampleMode,
+    sourceLabel: sampleMode ? 'SAMPLE' : L('Live', '실시간'),
     lastPoll,
     ago: agoText(pollAgoSec, L, ko),
     agoSec: pollAgoSec,

@@ -2,7 +2,7 @@ import { setUsageThresholds } from '../util/fmt.js';
 // js/model/data.js — 실장비 데이터 모델
 // ---------------------------------------------------------------------------
 // TYPES 레지스트리 + /api/devices 정규화·폴링.
-// 서버가 반환한 장비만 화면에 제공하며 데모·시뮬레이션 데이터를 만들지 않는다.
+// 서버가 반환한 장비만 화면에 제공하며 클라이언트 자체 샘플·시뮬레이션 데이터는 만들지 않는다.
 // ---------------------------------------------------------------------------
 
 /* ===========================================================================
@@ -145,6 +145,10 @@ export function normalizeDevice(d, index = null) {
       // 플로어 맵 실배치 좌표('행,열') — 정규화 화이트리스트에 없으면 여기서 증발한다.
       floorPos: meta.floorPos ? String(meta.floorPos) : '',
       vendor: meta.vendor ? String(meta.vendor) : '',
+      // 서버가 명시적으로 제공한 읽기 전용 샘플 표시. `demo`는 과도기 응답 호환이며
+      // 어느 쪽이 와도 두 별칭을 함께 보존해 화면이 실제 장비로 오인하지 않게 한다.
+      sample: meta.sample === true || meta.demo === true,
+      demo: meta.sample === true || meta.demo === true,
       error: meta.error != null ? meta.error : null,
       pending: !!meta.pending,
       // #398: 폴리가 보는 상태(down/deg) 진입 시각 — 합성 DEVICE_STATE 경보의 세션 무관
@@ -340,7 +344,10 @@ function redirectToLogin() {
 export async function pull(url, timeoutMs) {
   const target = url || API_URL;
   const ms = typeof timeoutMs === 'number' ? timeoutMs : 2500;
-  const fail = (msg) => ({ ok: false, devices: [], error: msg, refreshSec: 30, polledAt: 0, stale: false });
+  const fail = (msg) => ({
+    ok: false, devices: [], error: msg, refreshSec: 30, polledAt: 0, stale: false,
+    source: 'live', sampleMode: false, demoMode: false,
+  });
 
   if (typeof fetch !== 'function') return fail('fetch unavailable');
 
@@ -360,10 +367,21 @@ export async function pull(url, timeoutMs) {
     }
     if (!r || !r.ok) return fail('HTTP ' + (r ? r.status : '?'));
     const j = await r.json();
-    const devices = normalize(j);
+    const responseSource = String((j && j.source) || '').toLowerCase();
+    const sampleMode = !!(j && (j.sample === true || j.demo === true
+      || responseSource === 'sample' || responseSource === 'demo'));
+    const devices = normalize(j).map((device) => {
+      if (!sampleMode) return device;
+      return Object.assign({}, device, {
+        meta: Object.assign({}, device.meta, { sample: true, demo: true }),
+      });
+    });
     return {
       ok: true,
       devices,
+      source: sampleMode ? 'sample' : 'live',
+      sampleMode,
+      demoMode: sampleMode,
       // 이벤트 이력 — 문자열 필드만 통과(폴러 EventLog 계약: ts/host/label/kind/sev/desc).
       events: Array.isArray(j && j.events) ? j.events.slice(0, 200).map((e) => ({
         time: String((e && e.ts) || ''), host: String((e && e.host) || ''),
@@ -441,8 +459,11 @@ export async function pullPatch(state, url, timeoutMs) {
   if (r.ok) {
     if (r.thresholds) setUsageThresholds(r.thresholds.warn, r.thresholds.crit);
     return {
-      fleet: mergeLocalWrites(st.fleet, r.devices),
-      source: 'live',
+      // 샘플 응답에는 운영 장비의 로컬 보류 수정을 절대 합치지 않는다.
+      fleet: r.sampleMode ? r.devices : mergeLocalWrites(st.fleet, r.devices),
+      source: r.source,
+      sampleMode: !!r.sampleMode,
+      demoMode: !!r.demoMode,
       refreshSec: r.refreshSec,
       lastPoll: r.polledAt,
       lastAttempt: Date.now(),
@@ -463,8 +484,13 @@ export async function pullPatch(state, url, timeoutMs) {
     };
   }
 
+  const wasSample = st.sampleMode === true || st.demoMode === true
+    || st.source === 'sample' || st.source === 'demo';
   return {
-    source: 'live',
+    // 직전 샘플 플릿을 화면에 유지하는 동안에는 실패 후에도 LIVE로 위장하지 않는다.
+    source: wasSample ? 'sample' : 'live',
+    sampleMode: wasSample,
+    demoMode: wasSample,
     liveError: r.error || 'unreachable',
     stale: true,
     lastAttempt: Date.now(),

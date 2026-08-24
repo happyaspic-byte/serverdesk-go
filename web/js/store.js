@@ -61,6 +61,10 @@ export const initialState = {
   // ── 데이터 ──
   fleet: [],               // device[] (§4.1)
   source: 'live',
+  // 서버가 명시적으로 광고한 읽기 전용 샘플 응답. 클라이언트는 샘플 장비를 만들지 않는다.
+  sampleMode: false,
+  // 구버전/과도기 서버의 `demo` 표기와도 상태 계약을 맞춘다.
+  demoMode: false,
   lastPoll: 0,             // 마지막 성공 응답 epoch ms (실패 시 갱신 금지)
   lastAttempt: 0,          // 성공/실패를 포함한 마지막 폴 시도 epoch ms
   pollPending: true,       // 최초 요청 진행 중 — 성공한 0대와 로딩을 구분

@@ -819,6 +819,7 @@ table.table{ width:100%; border-collapse:collapse; font-size:var(--fs-13); }
 .hd-banner-x{ flex-shrink:0; width:22px; height:22px; padding:0; border-radius:50%; color:inherit;
   display:flex; align-items:center; justify-content:center; font-size:var(--fs-16); line-height:1; opacity:.7; }
 .hd-banner-x:hover{ opacity:1; background:rgba(var(--neg-rgb),.14); }
+.hd-banner.is-sample{ border-left-color:var(--warn); background:rgba(var(--warn-rgb),.10); }
 
 /* 레일 하단 (index.html: rail-foot > rail-live + rail-avail) */
 .rail-foot{ display:flex; flex-direction:column; align-items:center; gap:4px; width:40px;
@@ -829,6 +830,7 @@ table.table{ width:100%; border-collapse:collapse; font-size:var(--fs-13); }
 .rail-live.is-live{ color:var(--pos-bright); }
 .rail-live.is-stale{ color:var(--shell-ink); text-decoration:underline; text-decoration-style:dashed; text-underline-offset:2px; }
 .rail-live.is-offline{ color:var(--shell-ink); font-weight:var(--fw-bold); }
+.rail-live.is-sample{ color:var(--warn-bright); font-weight:var(--fw-bold); letter-spacing:.06em; }
 /* 접힘(기본) 레일은 좁으므로 LIVE 텍스트를 숨기고 상태 도트와 가용성 수치만 남긴다.
    펼침 상태에서는 라벨과 가용성을 한 줄로 정렬한다. */
 .rail:not(.is-open) .rail-live [data-field="sourceLabel"]{ display:inline; font-size:8px; letter-spacing:0; }

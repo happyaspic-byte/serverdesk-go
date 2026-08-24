@@ -51,6 +51,8 @@ export function buildDetail(a, b, c) {
   const dev = (id == null || id === '' ? fleet[0] : fleet.find((s) => s.id === id)) || EMPTY_DEV;
   const m = _meta(dev);
   const ti = typeInfo(dev.type, L);
+  const sampleData = m.sample === true || m.demo === true
+    || S.sampleMode === true || S.demoMode === true || S.source === 'sample' || S.source === 'demo';
 
   const isPLC = dev.type === 'PLC';
   const isNAS = dev.type === 'NAS';
@@ -701,16 +703,22 @@ export function buildDetail(a, b, c) {
 
   /* ---- 제어(ControlsCard) ---- */
   // 스펙 §5.4: ControlsCard 는 everRun 계열(FT)만. 그 외 타입은 null.
-  const actionCapability = normalizeCapabilities(S.capabilities).cluster_actions;
+  const actionCapability = sampleData ? {
+    supported: false, actions: [], endpoint: '/api/clusters/{id}/action',
+    reason: 'Sample data is read-only.', reason_ko: '샘플 데이터는 조회만 가능합니다.',
+  } : normalizeCapabilities(S.capabilities).cluster_actions;
   const clusterActionKeys = [
     'node-workon', 'node-workoff', 'node-reboot', 'node-shutdown', 'node-recover',
     'vm-shutdown', 'vm-poweroff', 'vm-poweron',
   ];
   const actionAvailability = Object.fromEntries(clusterActionKeys.map((key) => [
-    key, clusterActionAvailability(S.capabilities, key),
+    key, sampleData ? {
+      supported: false, reason: 'Sample data is read-only.', reason_ko: '샘플 데이터는 조회만 가능합니다.',
+    } : clusterActionAvailability(S.capabilities, key),
   ]));
   const control = !ft ? null : {
     id: dev.id,
+    sample: sampleData,
     capability: actionCapability,
     availability: actionAvailability,
     nodes: _arr(m.nodes).map((n) => ({
@@ -812,6 +820,7 @@ export function buildDetail(a, b, c) {
 
   return {
     id: dev.id, host: m.label || dev.host, hostRaw: dev.host,
+    sample: sampleData,
     type: dev.type, typeLabel: ti.label, typeShort: ti.short, typeIcon: ti.icon,
     variant, isFT: ft, isServer, isSRV, isPLC, isPC, isNAS, isWIN, isPI, isDown,
     statusReason,

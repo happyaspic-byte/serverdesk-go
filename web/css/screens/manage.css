@@ -87,6 +87,7 @@
 
 .sc-mng-idb{ flex:1; min-width:0; display:flex; align-items:baseline; gap:var(--sp-2); flex-wrap:wrap; }
 .sc-mng-name{ font-size:var(--fs-12); font-weight:var(--fw-bold); }
+.sc-mng-sample{ font-size:9px; letter-spacing:.06em; }
 /* 플랫폼·관리 IP(예: 'ztC Edge · 10.21.11.22')는 관리자가 스캔하는 '기능적 식별자'다 —
    장식 힌트(--muted 3.2:1, WCAG AA 미달)가 아니라 보조 텍스트(--ink2 6.6:1)로 올려 대비를 확보한다.
    (--muted 전역은 그대로 두고 이 식별자 메타만 --ink2 로 승격.) */
