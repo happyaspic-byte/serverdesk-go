@@ -122,9 +122,16 @@ func TestReceiverCommunityFilter(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("필터 통과 트랩 미수신")
 	}
-	st := rx.Stats()
-	if st.DroppedBadCommunity != 1 || st.Delivered != 1 {
-		t.Errorf("stats = %+v", st)
+	deadline := time.Now().Add(time.Second)
+	for {
+		st := rx.Stats()
+		if st.DroppedBadCommunity == 1 && st.Delivered == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stats = %+v", st)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
