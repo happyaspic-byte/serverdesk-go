@@ -87,6 +87,34 @@ function parseTags(s) {
   }).filter((t) => t && t.name);
 }
 
+/** Pure helpers used by the destructive confirmation and Node regression tests. */
+export function deleteImpact(state, id) {
+  const st = state || {};
+  const target = String(id || '');
+  const prefix = target + '\u0001';
+  return {
+    target,
+    acknowledgements: Object.keys(st.ackedAlerts || {}).filter((key) => key === target || key.indexOf(prefix) === 0).length,
+    maintenanceWindow: !!(st.maint && st.maint[target]),
+    note: !!(st.notes && st.notes[target]),
+  };
+}
+
+export function validateDeleteConfirmation(form, L = (en) => en) {
+  const f = form || {};
+  const reason = String(f.delete_reason || '').trim();
+  if (!reason) {
+    return { field: 'delete_reason', message: L('Enter a reason.', '사유를 입력하세요.') };
+  }
+  if (Array.from(reason).length > 500) {
+    return { field: 'delete_reason', message: L('Use 500 characters or fewer.', '사유는 500자 이하로 입력하세요.') };
+  }
+  if (String(f.delete_phrase || '').trim() !== String(f.origKey || '')) {
+    return { field: 'delete_phrase', message: L('Type the exact device ID to confirm.', '확인을 위해 장비 ID를 정확히 입력하세요.') };
+  }
+  return null;
+}
+
 function emptyForm() {
   return {
     mode: 'add', origKey: '', _rev: 0,
@@ -96,7 +124,7 @@ function emptyForm() {
     vms: [{ name: '', ip: '' }],
     vendor: '', bmc_ip: '', model: '', asset_tag: '', floor_pos: '', api: '', api_orig: '', tags_text: '',
     win_user: '', win_pass: '',
-    tab: 'basic', showPw: {}, err: null,
+    tab: 'basic', showPw: {}, err: null, fieldErrors: {},
     testing: false, testResult: null, testErr: null, busy: false,
   };
 }
@@ -200,6 +228,21 @@ const screen = {
     // Space 는 preventDefault 로 페이지 스크롤을 막는다. 행 안의 수정·제거 등 네이티브
     // 버튼/입력에서는 동작하지 않는다(그 컨트롤 고유의 클릭이 담당 — 이중 동작·Space 활성화 방해 금지).
     this._onKeydown = (e) => {
+      const tab = e.target.closest && e.target.closest('[role="tab"][data-mng-tab]');
+      if (tab && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
+        const tabs = Array.from(tab.parentElement.querySelectorAll('[role="tab"]'));
+        const here = tabs.indexOf(tab);
+        let next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1
+          : (here + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+        e.preventDefault();
+        const key = tabs[next].getAttribute('data-mng-tab');
+        this.setForm({ tab: key, err: null, fieldErrors: {} });
+        queueMicrotask(() => {
+          const target = this.elModalHost && this.elModalHost.querySelector('#mng-tab-' + key);
+          if (target) target.focus();
+        });
+        return;
+      }
       if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
       const toggle = e.target.closest && e.target.closest('[data-mng-toggle]');
       if (toggle && this.root.contains(toggle)) {
@@ -232,6 +275,7 @@ const screen = {
     document.removeEventListener('keydown', this._onKey);
     // 화면 라우팅으로 모달이 열린 채 언마운트되는 경우 — 배경 inert 흔적을 남기지 않는다
     // (포커스 복원은 시도하지 않음: 이미 다른 화면으로 이동 중이라 대상 요소가 사라졌을 수 있다).
+    if (this._modalOpen) this._closeModalA11y(false);
     this._modalOpen = false; this._lastFocus = null;
     this.rowRefs && this.rowRefs.clear();
     this.grpRefs && this.grpRefs.clear();
@@ -446,11 +490,15 @@ const screen = {
 
     const btnEdit = el('button', {
       class: 'sc-mng-act', type: 'button', 'data-mng-edit': d.id,
-      title: L('Edit', '수정'), 'aria-label': L('Edit', '수정'),
+      title: d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정'),
+      'aria-label': d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정'),
+      disabled: d.type === 'END',
     }, [ctx.util.icon('pencil', { size: 14 })]);
     const btnDel = el('button', {
       class: 'sc-mng-act sc-mng-act--del', type: 'button', 'data-mng-del': d.id,
-      title: L('Remove', '제거'), 'aria-label': L('Remove', '제거'),
+      title: d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거'),
+      'aria-label': d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거'),
+      disabled: d.type === 'END',
     }, [ctx.util.icon('close', { size: 14 })]);
 
     const row = el('div', { class: 'sc-mng-row', 'data-mng-row': d.id, role: 'button', tabindex: '0' }, [
@@ -497,11 +545,15 @@ const screen = {
     const ver = el('span', { class: 'sc-mng-chip u-mono' });
     const btnEdit = el('button', {
       class: 'sc-mng-act', type: 'button', 'data-mng-edit': d.id,
-      title: L('Edit', '수정'), 'aria-label': L('Edit', '수정'),
+      title: d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정'),
+      'aria-label': d.type === 'END' ? L('Endurance editing is not supported', 'Endurance 수정은 현재 지원되지 않습니다') : L('Edit', '수정'),
+      disabled: d.type === 'END',
     }, [ctx.util.icon('pencil', { size: 14 })]);
     const btnDel = el('button', {
       class: 'sc-mng-act sc-mng-act--del', type: 'button', 'data-mng-del': d.id,
-      title: L('Remove', '제거'), 'aria-label': L('Remove', '제거'),
+      title: d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거'),
+      'aria-label': d.type === 'END' ? L('Legacy Endurance records are display-only', '레거시 Endurance 레코드는 조회 전용입니다') : L('Remove', '제거'),
+      disabled: d.type === 'END',
     }, [ctx.util.icon('close', { size: 14 })]);
     const foot = el('div', { class: 'sc-mng-card-foot' }, [
       ver,
@@ -596,6 +648,8 @@ const screen = {
     // 재빌드 전에 활성 필드의 data-mng-f 를 기억해 새 DOM의 같은 필드로 복원한다.
     const prevF = (document.activeElement && this.elModalHost.contains(document.activeElement))
       ? document.activeElement.getAttribute('data-mng-f') : null;
+    const prevTab = (document.activeElement && this.elModalHost.contains(document.activeElement)
+      && document.activeElement.getAttribute('data-mng-tab')) ? f.tab : null;
     this.elModalHost.textContent = '';
     this.elModalHost.appendChild(
       f.mode === 'delete' ? this.buildDeleteModal(f, ctx) : this.buildFormModal(f, step, ctx)
@@ -603,6 +657,7 @@ const screen = {
     this.patchModalErr(f);
     const restored = prevF && this.elModalHost.querySelector('[data-mng-f="' + prevF + '"]');
     if (restored) restored.focus();
+    else if (prevTab && this.elModalHost.querySelector('#mng-tab-' + prevTab)) this.elModalHost.querySelector('#mng-tab-' + prevTab).focus();
     else this._focusIntoModal();
   },
 
@@ -611,22 +666,34 @@ const screen = {
   _openModalA11y() {
     this._modalOpen = true;
     this._lastFocus = document.activeElement;
-    if (this.root) {
-      Array.from(this.root.children).forEach((c) => {
-        if (c !== this.elModalHost) c.setAttribute('aria-hidden', 'true');
-      });
-    }
+    const targets = [];
+    if (this.root) Array.from(this.root.children).forEach((c) => { if (c !== this.elModalHost) targets.push(c); });
+    ['.hd', '.rail', '.hd-banner', '.toast'].forEach((sel) => {
+      const node = document.querySelector(sel); if (node) targets.push(node);
+    });
+    this._inerted = targets.map((node) => ({
+      node,
+      inert: !!node.inert,
+      ariaHidden: node.getAttribute('aria-hidden'),
+    }));
+    this._inerted.forEach(({ node }) => {
+      node.inert = true;
+      node.setAttribute('aria-hidden', 'true');
+    });
   },
 
   // 모달 닫힘 — 인어트 해제 + 이전 포커스 복원.
-  _closeModalA11y() {
+  _closeModalA11y(restoreFocus = true) {
     this._modalOpen = false;
-    if (this.root) {
-      Array.from(this.root.children).forEach((c) => c.removeAttribute('aria-hidden'));
-    }
+    (this._inerted || []).forEach(({ node, inert, ariaHidden }) => {
+      node.inert = inert;
+      if (ariaHidden == null) node.removeAttribute('aria-hidden');
+      else node.setAttribute('aria-hidden', ariaHidden);
+    });
+    this._inerted = [];
     const prev = this._lastFocus;
     this._lastFocus = null;
-    if (prev && document.body.contains(prev) && typeof prev.focus === 'function') prev.focus();
+    if (restoreFocus && prev && document.body.contains(prev) && typeof prev.focus === 'function') prev.focus();
   },
 
   // 새로 빌드된 다이얼로그 내부로 포커스 이동 — 첫 폼 입력(data-mng-f), 없으면 다이얼로그 자체
@@ -653,11 +720,14 @@ const screen = {
   buildDeleteModal(f, ctx) {
     const { el } = ctx.util.dom;
     const L = ctx.L;
-    this.elErr = el('div', { class: 'sc-mng-err', hidden: true });
+    this.elErr = el('div', { class: 'sc-mng-err', role: 'alert', hidden: true });
     this.elTestErr = null;
+    const reasonErr = f.fieldErrors && f.fieldErrors.delete_reason;
+    const phraseErr = f.fieldErrors && f.fieldErrors.delete_phrase;
+    const impact = f.impact || { acknowledgements: 0, maintenanceWindow: false, note: false };
     const modal = el('div', {
       class: 'modal modal--narrow', role: 'dialog', 'aria-modal': 'true',
-      'aria-labelledby': 'mng-modal-title-del', tabindex: '-1',
+      'aria-labelledby': 'mng-modal-title-del', 'aria-describedby': 'mng-delete-impact', tabindex: '-1',
     }, [
       el('div', { class: 'modal-head' }, [
         el('h2', { class: 'modal-title', id: 'mng-modal-title-del', text: L('Remove device', '장비 제거') }),
@@ -665,11 +735,44 @@ const screen = {
           [ctx.util.icon('close', { size: 15 })]),
       ]),
       el('div', { class: 'modal-body' }, [
-        el('div', { class: 'confirm-danger' }, [
+        el('div', { class: 'confirm-danger', id: 'mng-delete-impact' }, [
           el('strong', { text: f.label || f.origKey }),
           document.createTextNode(' '),
           document.createTextNode(L('will be removed from monitoring. This cannot be undone.',
             '을(를) 모니터링에서 제거합니다. 되돌릴 수 없습니다.')),
+        ]),
+        el('dl', { class: 'sc-mng-delete-impact' }, [
+          el('dt', { text: L('Target ID', '대상 ID') }), el('dd', { class: 'u-mono', text: f.origKey }),
+          el('dt', { text: L('Acknowledgements removed', '삭제되는 경보 확인') }), el('dd', { text: String(impact.acknowledgements || 0) }),
+          el('dt', { text: L('Maintenance window removed', '삭제되는 점검 창') }), el('dd', { text: impact.maintenanceWindow ? L('Yes', '예') : L('No', '아니요') }),
+          el('dt', { text: L('Device note removed', '삭제되는 장비 메모') }), el('dd', { text: impact.note ? L('Yes', '예') : L('No', '아니요') }),
+          el('dt', { text: L('Operator', '운영자') }), el('dd', { text: f.operator || ctx.operator || 'admin' }),
+        ]),
+        el('div', { class: 'field' }, [
+          el('label', { class: 'field-label', for: 'mng-f-delete_reason', text: L('Confirmation reason (required)', '확인 사유 (필수)') }),
+          el('textarea', {
+            id: 'mng-f-delete_reason', class: 'field-input', rows: '3', required: true,
+            maxlength: '500',
+            'data-mng-f': 'delete_reason', value: f.delete_reason || '',
+            'aria-invalid': reasonErr ? 'true' : null,
+            'aria-describedby': 'mng-delete-reason-help' + (reasonErr ? ' mng-f-delete_reason-error' : ''),
+          }),
+          el('div', { class: 'field-hint', id: 'mng-delete-reason-help', text: L(
+            'Stored in the server audit trail after the device is removed.',
+            '장비 제거 후 서버 감사 기록에 영구 저장됩니다.'
+          ) }),
+          reasonErr ? el('div', { class: 'field-error', id: 'mng-f-delete_reason-error', text: reasonErr }) : null,
+        ]),
+        el('div', { class: 'field' }, [
+          el('label', { class: 'field-label', for: 'mng-f-delete_phrase', text: L('Type device ID to confirm', '확인을 위해 장비 ID 입력') }),
+          el('div', { class: 'field-hint u-mono', id: 'mng-delete-phrase-help', text: f.origKey }),
+          el('input', {
+            id: 'mng-f-delete_phrase', class: 'field-input', type: 'text', required: true, autocomplete: 'off',
+            'data-mng-f': 'delete_phrase', value: f.delete_phrase || '',
+            'aria-invalid': phraseErr ? 'true' : null,
+            'aria-describedby': 'mng-delete-phrase-help' + (phraseErr ? ' mng-f-delete_phrase-error' : ''),
+          }),
+          phraseErr ? el('div', { class: 'field-error', id: 'mng-f-delete_phrase-error', text: phraseErr }) : null,
         ]),
         this.elErr,
       ]),
@@ -689,8 +792,8 @@ const screen = {
     const L = ctx.L;
     const add = f.mode === 'add';
 
-    this.elErr = el('div', { class: 'sc-mng-err', hidden: true });
-    this.elTestErr = el('div', { class: 'sc-mng-err', hidden: true });
+    this.elErr = el('div', { class: 'sc-mng-err', role: 'alert', hidden: true });
+    this.elTestErr = el('div', { class: 'sc-mng-err', role: 'alert', hidden: true });
 
     const grid = el('div', { class: 'sc-mng-grid' });
     if (add) {
@@ -703,13 +806,19 @@ const screen = {
       else if (f.tab === 'conn') this.connGroup(f, grid, ctx);
       else if (f.tab === 'auth') this.authGroup(f, grid, ctx);
       else this.vmGroup(f, grid, ctx);
+      grid.id = 'mng-tabpanel';
+      grid.setAttribute('role', 'tabpanel');
+      grid.setAttribute('aria-labelledby', 'mng-tab-' + f.tab);
+      grid.tabIndex = 0;
     }
+
+    const modalNav = add ? this.stepBar(step, ctx) : this.tabBar(f, ctx);
 
     const body = el('div', { class: 'modal-body' }, [
       el('p', { class: 'sc-mng-hint', text: add
         ? L('Credentials are stored only in the poller config on the host.', '자격증명은 호스트의 폴러 설정에만 저장됩니다.')
         : L('Leave a password blank to keep the current one.', '비밀번호를 비우면 기존 값이 유지됩니다.') }),
-      add ? this.stepBar(step, ctx) : this.tabBar(f, ctx),
+      modalNav,
       grid,
       // datalist 는 grid(단계·탭 전환 시 통째로 교체)가 아니라 모달 공통 영역에 둔다 —
       // company·factory(기본 단계)와 vendor(연결 단계)처럼 list 참조 필드가 어느 단계에
@@ -790,7 +899,9 @@ const screen = {
     if (isFTType(f.type)) tabs.push(['vm', 'VM']);
     return el('div', { class: 'modal-tabs', role: 'tablist' }, tabs.map(([k, lab]) => el('button', {
       class: 'modal-tab' + (f.tab === k ? ' is-active' : ''), type: 'button', role: 'tab',
-      'aria-selected': f.tab === k ? 'true' : 'false', 'data-mng-tab': k, text: lab,
+      id: 'mng-tab-' + k, 'aria-controls': 'mng-tabpanel',
+      'aria-selected': f.tab === k ? 'true' : 'false', tabindex: f.tab === k ? '0' : '-1',
+      'data-mng-tab': k, text: lab,
     })));
   },
 
@@ -800,12 +911,16 @@ const screen = {
     const grid = el('div', { class: 'sc-mng-types' });
     typeDefs(L).forEach(([val, lab]) => {
       const sel = f.type === val;
+      const unsupported = val === 'END';
       grid.appendChild(el('button', {
         class: 'sc-mng-type' + (sel ? ' is-sel' : ''), type: 'button', 'data-mng-type': val,
         'aria-pressed': sel ? 'true' : 'false',
+        'aria-disabled': unsupported ? 'true' : null,
+        disabled: unsupported,
       }, [
         el('span', { class: 'sc-mng-type-ico' }, [ctx.util.icon(ICON_BY_TYPE[val] || 'box', { size: 17 })]),
         el('span', { class: 'sc-mng-type-lab', text: lab }),
+        unsupported ? el('span', { class: 'sc-mng-type-plan', text: L('Planned · not supported', '계획됨 · 현재 미지원') }) : null,
       ]));
     });
     return el('div', { class: 'sc-mng-full' }, [
@@ -834,14 +949,21 @@ const screen = {
     // 라벨↔입력 프로그래매틱 연결 — data-mng-f 와 같은 키로 안정 id 를 만든다
     // (renderModal 포커스 복원은 data-mng-f 기반이라 이 id 와 무관하게 동작한다).
     const fid = 'mng-f-' + k;
+    const hintId = fid + '-hint';
+    const errId = fid + '-error';
+    const error = f.fieldErrors && f.fieldErrors[k];
+    const described = [o.hint ? hintId : '', error ? errId : ''].filter(Boolean).join(' ');
     const kids = [el('label', { class: 'field-label', for: fid }, [label, o.req === true ? el('span', { class: 'sc-mng-req', text: ctx.L('required', '필수') }) : (o.req === false ? el('span', { class: 'sc-mng-opt', text: ctx.L('optional', '선택') }) : null)])];
     kids.push(el('input', {
       id: fid,
       class: 'field-input', type: o.type || 'text', 'data-mng-f': k,
       value: f[k] == null ? '' : String(f[k]), placeholder: ph || '',
       list: o.list || null, disabled: !!o.disabled, autocomplete: 'off',
+      required: o.req === true, 'aria-required': o.req === true ? 'true' : null,
+      'aria-invalid': error ? 'true' : null, 'aria-describedby': described || null,
     }));
-    if (o.hint) kids.push(el('div', { class: 'field-hint', text: o.hint }));
+    if (o.hint) kids.push(el('div', { class: 'field-hint', id: hintId, text: o.hint }));
+    if (error) kids.push(el('div', { class: 'field-error', id: errId, text: error }));
     return el('div', { class: 'field' + (o.full ? ' sc-mng-full' : '') }, kids);
   },
 
@@ -850,6 +972,8 @@ const screen = {
     const L = ctx.L;
     const o = opts || {};
     const fid = 'mng-f-' + k;
+    const errId = fid + '-error';
+    const error = f.fieldErrors && f.fieldErrors[k];
     // edit '기존 유지' 행에는 입력이 없다 — for 는 실제 입력을 렌더할 때만 단다.
     const keep = f.mode === 'edit' && !f.showPw[k];
     const head = el('label', keep ? { class: 'field-label' } : { class: 'field-label', for: fid }, [label,
@@ -865,12 +989,14 @@ const screen = {
       id: fid,
       class: 'field-input', type: 'password', 'data-mng-f': k, autocomplete: 'new-password',
       value: f[k] == null ? '' : String(f[k]), placeholder: o.ph || '••••••',
-    })]);
+      required: o.req === true, 'aria-required': o.req === true ? 'true' : null,
+      'aria-invalid': error ? 'true' : null, 'aria-describedby': error ? errId : null,
+    }), error ? el('div', { class: 'field-error', id: errId, text: error }) : null]);
   },
 
   basicFields(f, grid, ctx) {
     const L = ctx.L;
-    grid.appendChild(this.field(f, 'label', L('Device name', '장비 이름') + ' *', f.type === 'PLC' ? 'PLC 250.1' : 'LGV', ctx));
+    grid.appendChild(this.field(f, 'label', L('Device name', '장비 이름'), f.type === 'PLC' ? 'PLC 250.1' : 'LGV', ctx, { req: true }));
     grid.appendChild(this.field(f, 'company', L('Company', '회사'), '루비컴', ctx, { list: 'mng-companies' }));
     grid.appendChild(this.field(f, 'factory', L('Factory', '공장'), '1번공장', ctx, { list: 'mng-factories' }));
     grid.appendChild(this.field(f, 'asset_tag', L('Asset tag', '자산 태그'), 'RB-2024-001', ctx));
@@ -904,7 +1030,7 @@ const screen = {
                 : t === 'PRN' ? L('Printer IP', '프린터 IP')
                   : L('Management IP (AC)', '관리 IP (AC)');
     const ph = t === 'PLC' ? '192.168.250.1' : t === 'NAS' ? '172.30.1.99' : t === 'PI' ? '172.30.1.79' : '172.30.1.30';
-    grid.appendChild(this.field(f, 'mgmt', mgmtLabel + ' *', ph, ctx));
+    grid.appendChild(this.field(f, 'mgmt', mgmtLabel, ph, ctx, { req: true }));
     grid.appendChild(this.field(f, 'site', L('Site', '사이트'), 'LAN', ctx));
 
     if (isFTType(t)) {
@@ -937,7 +1063,7 @@ const screen = {
           ].map(([v, lab]) => el('option', { value: v, selected: (f.platform || '') === v, text: lab }))),
         ]));
         if (f.platform === 'redfish' || f.platform === 'both') {
-          grid.appendChild(this.field(f, 'bmc_ip', L('BMC / iLO IP', 'BMC / iLO IP') + ' *', '172.30.1.30', ctx));
+          grid.appendChild(this.field(f, 'bmc_ip', L('BMC / iLO IP', 'BMC / iLO IP'), '172.30.1.30', ctx, { req: true }));
           grid.appendChild(this.field(f, 'bmc_user', L('BMC user', 'BMC 계정'), f.mode === 'edit' ? L('keep current', '기존 유지') : 'Administrator', ctx));
           grid.appendChild(this.pwField(f, 'bmc_pass', L('BMC password', 'BMC 비밀번호'), ctx));
         }
@@ -1010,10 +1136,14 @@ const screen = {
       el('label', { class: 'field-label', text: L('VMs (name · IP)', 'VM (이름 · IP)') }),
     ]);
     (f.vms || []).forEach((vm, i) => {
+      const nameId = 'mng-vm-name-' + i;
+      const ipId = 'mng-vm-ip-' + i;
       wrap.appendChild(el('div', { class: 'sc-mng-vmrow' }, [
-        el('input', { class: 'field-input', 'data-mng-vm': String(i), 'data-mng-vmk': 'name', value: vm.name || '', placeholder: L('VM name', 'VM 이름') }),
-        el('input', { class: 'field-input', 'data-mng-vm': String(i), 'data-mng-vmk': 'ip', value: vm.ip || '', placeholder: '172.30.1.51' }),
-        el('button', { class: 'sc-mng-act', type: 'button', 'data-mng-vm-del': String(i), title: L('Remove', '삭제') },
+        el('label', { class: 'u-sr-only', for: nameId, text: L('VM name ' + (i + 1), 'VM ' + (i + 1) + ' 이름') }),
+        el('input', { id: nameId, class: 'field-input', 'data-mng-vm': String(i), 'data-mng-vmk': 'name', value: vm.name || '', placeholder: L('VM name', 'VM 이름') }),
+        el('label', { class: 'u-sr-only', for: ipId, text: L('VM IP ' + (i + 1), 'VM ' + (i + 1) + ' IP') }),
+        el('input', { id: ipId, class: 'field-input', 'data-mng-vm': String(i), 'data-mng-vmk': 'ip', value: vm.ip || '', placeholder: '172.30.1.51', inputmode: 'url' }),
+        el('button', { class: 'sc-mng-act', type: 'button', 'data-mng-vm-del': String(i), title: L('Remove', '삭제'), 'aria-label': L('Remove VM ' + (i + 1), 'VM ' + (i + 1) + ' 삭제') },
           [ctx.util.icon('close', { size: 13 })]),
       ]));
     });
@@ -1107,6 +1237,14 @@ const screen = {
     const name = t.getAttribute('data-mng-f');
     if (name) {
       f[name] = t.value;
+      if (f.fieldErrors && f.fieldErrors[name]) {
+        delete f.fieldErrors[name];
+        t.removeAttribute('aria-invalid');
+        const err = document.getElementById('mng-f-' + name + '-error');
+        if (err) err.remove();
+        f.err = null;
+        this.patchModalErr(f);
+      }
       // key 자동 생성(add 모드) — 재렌더 없이 내부 값만 갱신
       if (f.mode === 'add' && name === 'mgmt') this.autoKey(f);
       // 수집 방식(platform)은 보이는 자격증명 필드가 갈리므로 모달 재구성 필요.
@@ -1221,6 +1359,14 @@ const screen = {
       ctx.showToast(ctx.L('Device not found', '장비를 찾을 수 없습니다'));
       return;
     }
+    if (dev.type === 'END') {
+      ctx.store.setState({ editKey: null });
+      ctx.showToast(ctx.L(
+        'Endurance is display-only for imported legacy data; collection and editing are not supported.',
+        'Endurance는 가져온 레거시 데이터 조회만 가능하며 수집·수정은 현재 지원되지 않습니다.'
+      ));
+      return;
+    }
     const m = dev.meta || {};
     const nodes = (m.nodes || []).map((x) => x.ip || '');
     const vms = (m.vmList || []).map((v) => ({ name: v.name || '', ip: v.ip || '' }));
@@ -1256,9 +1402,19 @@ const screen = {
     const ctx = this.ctx;
     const dev = (ctx.store.getState().fleet || []).find((d) => d.id === id);
     if (!dev) return;
+    if (dev.type === 'END') {
+      ctx.showToast(ctx.L('Legacy Endurance records are display-only.', '레거시 Endurance 레코드는 조회 전용입니다.'));
+      return;
+    }
+    const st = ctx.store.getState();
     this.modalSig = '';
     ctx.store.setState({
-      form: { mode: 'delete', origKey: dev.id, label: (dev.meta && dev.meta.label) || dev.host, _rev: 0, err: null, showPw: {}, vms: [] },
+      form: {
+        mode: 'delete', origKey: dev.id, label: (dev.meta && dev.meta.label) || dev.host,
+        operator: ctx.operator || 'admin', impact: deleteImpact(st, dev.id),
+        delete_reason: '', delete_phrase: '',
+        _rev: 0, err: null, fieldErrors: {}, showPw: {}, vms: [],
+      },
     });
   },
 
@@ -1271,22 +1427,35 @@ const screen = {
   },
 
   /* ── 위저드 진행/검증 ─────────────────────────────────────────────────── */
+  setValidationError(field, message) {
+    const f = this.form(); if (!f) return;
+    const errors = Object.assign({}, f.fieldErrors || {}, { [field]: message });
+    this.setForm({ err: message, fieldErrors: errors });
+    queueMicrotask(() => {
+      const target = this.elModalHost && this.elModalHost.querySelector('[data-mng-f="' + field + '"]');
+      if (target) {
+        target.setAttribute('aria-invalid', 'true');
+        target.focus();
+      }
+    });
+  },
+
   next() {
     const ctx = this.ctx;
     const f = this.form(); if (!f) return;
     const L = ctx.L;
     const step = ctx.store.getState().wizardStep || 0;
-    if (step === 0 && !String(f.label || '').trim()) { this.setForm({ err: L('Device name is required', '장비 이름은 필수입니다') }); return; }
-    if (step === 1 && !String(f.mgmt || '').trim()) { this.setForm({ err: L('Management IP is required', '관리 IP는 필수입니다') }); return; }
-    if (step === 2) { const e = this.reqCredError(f, L); if (e) { this.setForm({ err: e }); return; } }
-    this.setForm({ err: null });
+    if (step === 0 && !String(f.label || '').trim()) { this.setValidationError('label', L('Device name is required', '장비 이름은 필수입니다')); return; }
+    if (step === 1 && !String(f.mgmt || '').trim()) { this.setValidationError('mgmt', L('Management IP is required', '관리 IP는 필수입니다')); return; }
+    if (step === 2) { const issue = this.reqCredIssue(f, L); if (issue) { this.setValidationError(issue.field, issue.message); return; } }
+    this.setForm({ err: null, fieldErrors: {} });
     ctx.store.setState({ wizardStep: Math.min(3, step + 1) });
   },
 
   /* '필수'(req:true 배지) 인증 필드 검증 — 배지 조건(reqCredFields)과 동일 조건.
      edit 모드는 '비우면 기존 유지' 계약(buildBody)이라, add 모드와 edit 에서 '변경'으로
      입력을 연(showPw) 비밀번호 필드만 검사한다. 비어 있는 첫 필드의 오류 문구 또는 null. */
-  reqCredError(f, L) {
+  reqCredIssue(f, L) {
     const add = f.mode === 'add';
     for (const [k, pw, en, ko] of reqCredFields(f.type, f.platform)) {
       // edit 의 미검사는 '기존 유지' placeholder 를 단 필드(비밀번호 미개방·복원 불가
@@ -1295,9 +1464,14 @@ const screen = {
       // 바꾸면(SNMP 장비는 복원값 없음) 또는 복원값을 지우면, * 배지만 달린 채 검증 없이
       // BMC 주소 없는 장비가 저장됐다(#318). 따라서 edit 에서도 항상 검사한다.
       if (!add && !(k === 'bmc_ip' || (pw && f.showPw && f.showPw[k]))) continue;
-      if (!String(f[k] || '').trim()) return L(en, ko);
+      if (!String(f[k] || '').trim()) return { field: k, message: L(en, ko) };
     }
     return null;
+  },
+
+  reqCredError(f, L) {
+    const issue = this.reqCredIssue(f, L);
+    return issue && issue.message;
   },
 
   /* ── 저장 / 삭제 (REST) ─────────────────────────────────────────────── */
@@ -1307,7 +1481,7 @@ const screen = {
       .filter((v) => v.ip);
     const nodes = [f.node0, f.node1].map((x) => String(x || '').trim()).filter(Boolean);
     const body = Object.assign({}, f, { nodes, vm_ips: vmips, tags: f.type === 'PLC' ? parseTags(f.tags_text) : [] });
-    ['tags_text', 'vms', 'showPw', 'err', 'testing', 'testResult', 'testErr', 'busy', '_rev', 'mode', 'origKey', 'api_orig', 'tab'].forEach((k) => { delete body[k]; });
+    ['tags_text', 'vms', 'showPw', 'err', 'fieldErrors', 'testing', 'testResult', 'testErr', 'busy', '_rev', 'mode', 'origKey', 'api_orig', 'tab'].forEach((k) => { delete body[k]; });
     // 비밀번호를 비워 두면 "기존 값 유지" 의도(수정 모달 힌트 문구와 동일) — 빈 문자열을 전송하면
     // 서버가 기존 자격증명을 빈 값으로 덮어쓸 수 있으므로 body에서 제외한다.
     ['node0_pass', 'node1_pass', 'admin_pass', 'root_pass', 'win_pass', 'bmc_pass'].forEach((k) => {
@@ -1350,22 +1524,22 @@ const screen = {
     const ctx = this.ctx;
     const f = this.form(); if (!f || f.busy) return;
     const L = ctx.L;
-    if (!String(f.mgmt || '').trim()) { this.setForm({ err: L('Management IP is required', '관리 IP는 필수입니다') }); return; }
-    if (!String(f.label || '').trim()) { this.setForm({ err: L('Device name is required', '장비 이름은 필수입니다') }); return; }
-    const reqErr = this.reqCredError(f, L);
-    if (reqErr) { this.setForm({ err: reqErr }); return; }
+    if (!String(f.mgmt || '').trim()) { this.setValidationError('mgmt', L('Management IP is required', '관리 IP는 필수입니다')); return; }
+    if (!String(f.label || '').trim()) { this.setValidationError('label', L('Device name is required', '장비 이름은 필수입니다')); return; }
+    const reqIssue = this.reqCredIssue(f, L);
+    if (reqIssue) { this.setValidationError(reqIssue.field, reqIssue.message); return; }
     const fp = String(f.floor_pos || '').trim();
-    if (fp && !/^\d{1,3}\s*[,\-]\s*\d{1,3}$/.test(fp)) { this.setForm({ err: L('Floor position format: row,col (e.g. 1,3)', '플로어 위치 형식: 행,열 (예: 1,3)') }); return; }
+    if (fp && !/^\d{1,3}\s*[,\-]\s*\d{1,3}$/.test(fp)) { this.setValidationError('floor_pos', L('Floor position format: row,col (e.g. 1,3)', '플로어 위치 형식: 행,열 (예: 1,3)')); return; }
     if (f.mode === 'add') this.autoKey(f);
     // key 입력 UI는 없고 mgmt 에서만 파생된다 — 오류는 사용자가 고칠 수 있는 mgmt 필드로 연결한다.
     if (f.mode === 'add' && !String(f.key || '').trim()) {
-      this.setForm({ err: L('Management IP/hostname must contain letters or digits (device key is derived from it)', '관리 IP·호스트명에 영문 또는 숫자가 있어야 합니다(장비 식별자가 여기서 만들어집니다)') });
+      this.setValidationError('mgmt', L('Management IP/hostname must contain letters or digits (device key is derived from it)', '관리 IP·호스트명에 영문 또는 숫자가 있어야 합니다(장비 식별자가 여기서 만들어집니다)'));
       return;
     }
     // 중복 key는 서버 POST 전에 막는다 — POST 후에 검사하면 서버에는 등록되고 로컬만
     // 실패해 상태가 어긋난다(사전 검증 블록으로 이동).
     if (f.mode === 'add' && (ctx.store.getState().fleet || []).some((d) => d.id === f.key)) {
-      this.setForm({ err: L('Duplicate key', '이미 존재하는 식별자입니다') }); return;
+      this.setValidationError('mgmt', L('Duplicate key', '이미 존재하는 식별자입니다')); return;
     }
 
     this.setForm({ busy: true, err: null });
@@ -1426,8 +1600,12 @@ const screen = {
     const ctx = this.ctx;
     const f = this.form(); if (!f || f.busy) return;
     const L = ctx.L;
+    const issue = validateDeleteConfirmation(f, L);
+    if (issue) { this.setValidationError(issue.field, issue.message); return; }
     this.setForm({ busy: true, err: null });
-    const res = await this.api('DELETE', '/api/clusters/' + encodeURIComponent(f.origKey));
+    const res = await this.api('DELETE', '/api/clusters/' + encodeURIComponent(f.origKey), {
+      reason: String(f.delete_reason || '').trim(),
+    });
     // submit 과 동형의 동일성 검사(#319) — 시작한 삭제 확인 폼이 아니면 현재 폼에
     // 오류를 주입하거나 닫지 않는다. 서버 성공분의 fleet 반영·토스트는 그대로 적용한다.
     const sameForm = this.form() === f;

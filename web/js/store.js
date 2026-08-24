@@ -15,8 +15,7 @@ export const LS_THEME = 'sd.theme';
 export const LS_SETG = 'sd.setg';
 export const LS_MAINT = 'sd.maint';
 export const LS_NOTES = 'sd.notes';
-// Critical 웹훅 {enabled,url} — 감사 지적: 저장 후 새로고침하면 '미설정'으로 증발해
-// 이 URL 에 의존하는 에스컬레이션(escHours)도 함께 죽는 결함이 있었다. 영속 대상에 편입한다.
+// 구형 브라우저 전용 웹훅 키. 서버 notifier 전환 후에는 마이그레이션 삭제에만 사용한다.
 export const LS_NOTIFY = 'sd.notify';
 // 확인 처리된 경보 키 집합 — 폴러가 해제 API 를 주지 않으므로 확인 상태는 클라이언트가 보관한다.
 export const LS_ACKED = 'sd.ackedAlerts';
@@ -24,6 +23,8 @@ const LS_DATA_SCHEMA = 'sd.dataSchema';
 const DATA_SCHEMA = 'live-only-v1';
 
 function migrateLocalState() {
+  // webhook 토큰을 포함할 수 있는 구형 값은 애플리케이션 상태로 읽기 전에 무조건 제거한다.
+  try { localStorage.removeItem(LS_NOTIFY); } catch (e) { /* private mode 등 무시 */ }
   try {
     if (localStorage.getItem(LS_DATA_SCHEMA) !== DATA_SCHEMA) {
       [LS_COMPANY_COLORS, LS_ACKED, LS_MAINT, LS_NOTES].forEach((key) => localStorage.removeItem(key));
@@ -60,10 +61,14 @@ export const initialState = {
   // ── 데이터 ──
   fleet: [],               // device[] (§4.1)
   source: 'live',
-  lastPoll: 0,             // epoch ms
+  lastPoll: 0,             // 마지막 성공 응답 epoch ms (실패 시 갱신 금지)
+  lastAttempt: 0,          // 성공/실패를 포함한 마지막 폴 시도 epoch ms
+  pollPending: true,       // 최초 요청 진행 중 — 성공한 0대와 로딩을 구분
   refreshSec: 30,          // stale 임계 계산용
   stale: false,
   liveError: null,
+  uiError: null,           // 화면 init/render 실패 — 전역 오류 표면에서 재시도 가능
+  syncError: null,         // ACK/점검 등 공유 상태 서버 반영 실패 — 전역 배너에서 명시
   liveEventLog: null,      // 폴러 events[] 이력(로그 tail 정본). 미수신 시 null — compute 는 배열로 방어
   pollerOverall: null,     // 폴러 계산 플릿 총평 'ok'|'warning'|'critical'|null
   cacheAgeSec: null,       // 폴러가 실장비를 읽은 뒤 흐른 초(null=미제공)
@@ -98,12 +103,11 @@ export const initialState = {
   wizardStep: 0,
   form: null,
   companyColorsDirty: false,
-  notify: { enabled: false, url: '' },
   ackedAlerts: {},
   thresholds: null,      // 서버 사용률 임계값 {warn,crit} — /api/devices 폴이 채움
   maint: {},
   notes: {},
-  setg: { refresh: true, sound: false, dense: false, ackAutoDays: 0, escHours: 0 },
+  setg: { refresh: true, sound: false, dense: false, ackAutoDays: 0 },
   // ── floor map(topology 보완 뷰)이 재사용하는 기존 필드 ──
   view3d: false,
   zoom: 1,
@@ -147,7 +151,6 @@ export function loadPersisted() {
           sound: typeof o.sound === 'boolean' ? o.sound : false,
           dense: typeof o.dense === 'boolean' ? o.dense : false,
           ackAutoDays: (o.ackAutoDays === 7 || o.ackAutoDays === 30) ? o.ackAutoDays : 0,
-          escHours: (o.escHours === 4 || o.escHours === 24) ? o.escHours : 0,
         };
       }
     }
@@ -156,7 +159,7 @@ export function loadPersisted() {
     const raw = localStorage.getItem(LS_ACKED);
     if (raw) {
       const o = JSON.parse(raw);
-      // 값은 확인 시각(ISO) — 나중에 '확인한 지 N일' 표시에 쓸 수 있게 boolean 대신 타임스탬프로 둔다.
+      // 값은 현재 {ts,by,reason}; 구형 ISO 문자열도 읽기 호환한다.
       if (o && typeof o === 'object') patch.ackedAlerts = o;
     }
   } catch (e) { /* 파싱 실패 무시 */ }
@@ -176,23 +179,10 @@ export function loadPersisted() {
       if (o && typeof o === 'object') patch.maint = o;
     }
   } catch (e) { /* 파싱 실패 무시 */ }
-  try {
-    const raw = localStorage.getItem(LS_NOTIFY);
-    if (raw) {
-      const o = JSON.parse(raw);
-      // 알려진 키만 받아들인다 — enabled 는 불린, url 은 문자염만(저장소 오염 방어).
-      if (o && typeof o === 'object') {
-        patch.notify = {
-          enabled: typeof o.enabled === 'boolean' ? o.enabled : false,
-          url: typeof o.url === 'string' ? o.url : '',
-        };
-      }
-    }
-  } catch (e) { /* 파싱 실패 무시 */ }
   return patch;
 }
 
-/** lang / companyColors / railOpen / theme / setg / ackedAlerts / maint / notes / notify 를 localStorage에 저장한다. */
+/** 민감하지 않은 콘솔 UI 상태만 localStorage에 저장한다. 알림 비밀은 서버 정본이다. */
 export function persist(state) {
   try { localStorage.setItem(LS_LANG, state.lang); } catch (e) { /* noop */ }
   try { localStorage.setItem(LS_COMPANY_COLORS, JSON.stringify(state.companyColors || {})); } catch (e) { /* noop */ }
@@ -205,18 +195,12 @@ export function persist(state) {
   try { localStorage.setItem(LS_ACKED, JSON.stringify(state.ackedAlerts || {})); } catch (e) { /* noop */ }
   try { localStorage.setItem(LS_MAINT, JSON.stringify(state.maint || {})); } catch (e) { /* noop */ }
   try { localStorage.setItem(LS_NOTES, JSON.stringify(state.notes || {})); } catch (e) { /* noop */ }
-  try {
-    const n = state.notify || {};
-    localStorage.setItem(LS_NOTIFY, JSON.stringify({
-      enabled: !!n.enabled, url: typeof n.url === 'string' ? n.url : '',
-    }));
-  } catch (e) { /* noop */ }
+  try { localStorage.removeItem(LS_NOTIFY); } catch (e) { /* noop */ }
   try {
     const g = state.setg || {};
     localStorage.setItem(LS_SETG, JSON.stringify({
       refresh: !!g.refresh, sound: !!g.sound, dense: !!g.dense,
       ackAutoDays: (g.ackAutoDays === 7 || g.ackAutoDays === 30) ? g.ackAutoDays : 0,
-      escHours: (g.escHours === 4 || g.escHours === 24) ? g.escHours : 0,
     }));
   } catch (e) { /* noop */ }
 }

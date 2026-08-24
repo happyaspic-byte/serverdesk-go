@@ -8,6 +8,13 @@
 //  - 색은 CSS 변수·공용 클래스로만. 인라인 hex 사용 금지.
 
 import { initialState, createStore, loadPersisted, persist } from './store.js';
+import {
+  collectionState,
+  confirmationIssues,
+  currentOperator,
+  formatConsoleTime,
+} from './util/ui_state.js';
+import { createDurableSharedOutbox, createSharedSyncCoordinator } from './util/shared_sync.js';
 
 // ---------------------------------------------------------------------------
 // 화면 레지스트리 (§1 표 · 레일 순서)
@@ -45,9 +52,11 @@ function show(el, on) { if (el) el.hidden = !on; }
 const shell = {
   crumbRoot: null, crumbSep: null, crumbLeaf: null,
   searchWrap: null, searchInput: null, searchResults: null,
-  clock: null, bellDot: null, banner: null, toast: null,
+  searchStatus: null,
+  clock: null, bellDot: null, banner: null, bannerMeta: null, bannerRetry: null, toast: null,
   screenRoot: null, sourceBadge: null,
   rail: null, railToggle: null, railToggleLabel: null, skipLink: null, langToggle: null, bell: null,
+  confirmHost: null,
 };
 function cacheShell() {
   shell.rail = $('[data-rail]');
@@ -70,9 +79,12 @@ function cacheShell() {
   shell.searchWrap = $('[data-search-wrap]');
   shell.searchInput = $('[data-search-input]');
   shell.searchResults = $('[data-search-results]');
+  shell.searchStatus = $('[data-search-status]');
   shell.clock = $('[data-clock]');
   shell.bellDot = $('[data-bell-dot]');
   shell.banner = $('[data-banner]');
+  shell.bannerMeta = $('[data-banner-meta]');
+  shell.bannerRetry = $('[data-action="retryPull"]');
   // 배너 닫기(×) — 아이콘 전용 버튼이라 renderBanner 가 언어 추적 aria-label 을 준다(#552).
   shell.bannerX = shell.banner ? shell.banner.querySelector('[data-action="dismissBanner"]') : null;
   shell.toast = $('[data-toast]');
@@ -81,6 +93,7 @@ function cacheShell() {
   shell.skipLink = $('.skip-link');
   shell.langToggle = $('[data-action="toggleLang"]');
   shell.bell = $('[data-action="goIncidents"]');
+  shell.confirmHost = $('[data-confirm-host]');
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +433,10 @@ async function swapView(key) {
     // 재시도 가능한 명시적 placeholder를 보여준다.
     mountedMod = placeholderModule(key);
     mountedMod.init(mountedRoot, ctx);
+    setState({ uiError: L(
+      'Could not initialize ' + titleOf(key) + '. Retry is available.',
+      titleOf(key) + ' 화면을 초기화하지 못했습니다. 재시도할 수 있습니다.'
+    ) });
   }
   renderActive(getState());
   markEnterCards(mountedRoot);   // 화면 진입 카드 스태거: 스왑 시점 1회만 부여(재렌더 시 미호출 — 재생 방지)
@@ -450,12 +467,185 @@ function markEnterCards(root) {
 
 function renderActive(st) {
   if (!mountedMod || typeof mountedMod.render !== 'function') return;
-  try { mountedMod.render(st, ctx); } catch (e) { console.error('[serverdesk] render 실패: ' + mountedKey, e); }
+  try {
+    mountedMod.render(st, ctx);
+  } catch (e) {
+    console.error('[serverdesk] render 실패: ' + mountedKey, e);
+    const message = L(
+      'Could not render ' + titleOf(mountedKey) + '. Retry is available.',
+      titleOf(mountedKey) + ' 화면을 표시하지 못했습니다. 재시도할 수 있습니다.'
+    );
+    if (getState().uiError !== message) queueMicrotask(() => setState({ uiError: message }));
+  }
 }
 
 // ---------------------------------------------------------------------------
 // ctx (화면 모듈에 전달, §5.1)
 // ---------------------------------------------------------------------------
+let confirmOpen = false;
+
+/**
+ * 위험 작업 공용 확인 대화상자. 화면 모듈은 브라우저 confirm 대신 이 API를 사용해
+ * 대상/영향/운영자와 작업 사유를 실행 전에 확인한다. 사유의 영속화 여부는 각 API 계약에
+ * 달려 있으며 이 UI 자체는 감사 로그 저장을 주장하지 않는다. 반환값은 취소 시 null이다.
+ */
+function requestOperatorConfirmation(options) {
+  const o = options || {};
+  if (!shell.confirmHost || confirmOpen) return Promise.resolve(null);
+  confirmOpen = true;
+  const operator = o.operator || currentOperator();
+  const previousFocus = document.activeElement;
+  const app = $('.app');
+  const appWasInert = !!(app && app.inert);
+  if (app) app.inert = true;
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-overlay modal-overlay';
+    const dialog = document.createElement('section');
+    dialog.className = 'confirm-dialog';
+    dialog.setAttribute('role', o.danger ? 'alertdialog' : 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const titleId = 'confirm-title-' + Date.now();
+    const descId = titleId + '-desc';
+    dialog.setAttribute('aria-labelledby', titleId);
+    dialog.setAttribute('aria-describedby', descId);
+
+    const title = document.createElement('h2');
+    title.id = titleId;
+    title.className = 'confirm-title';
+    title.textContent = o.title || L('Confirm action', '작업 확인');
+    const description = document.createElement('p');
+    description.id = descId;
+    description.className = 'confirm-impact';
+    description.textContent = o.impact || o.message || '';
+    const operatorLine = document.createElement('p');
+    operatorLine.className = 'confirm-operator';
+    operatorLine.textContent = L('Operator: ', '운영자: ') + operator;
+    dialog.append(title, description, operatorLine);
+
+    let reason = null;
+    if (o.requireReason !== false) {
+      const wrap = document.createElement('div');
+      wrap.className = 'confirm-field';
+      const id = titleId + '-reason';
+      const errorId = id + '-error';
+      const label = document.createElement('label');
+      label.htmlFor = id;
+      label.textContent = L('Reason (required)', '사유 (필수)');
+      reason = document.createElement('textarea');
+      reason.id = id;
+      reason.rows = 3;
+      reason.required = true;
+      reason.maxLength = 500;
+      reason.setAttribute('aria-describedby', errorId);
+      const error = document.createElement('span');
+      error.id = errorId;
+      error.className = 'confirm-error';
+      error.hidden = true;
+      error.textContent = L('Enter a reason.', '사유를 입력하세요.');
+      reason.addEventListener('input', () => {
+        reason.removeAttribute('aria-invalid');
+        error.hidden = true;
+      });
+      wrap.append(label, reason, error);
+      dialog.appendChild(wrap);
+    }
+
+    let phrase = null;
+    if (o.typedPhrase) {
+      const wrap = document.createElement('div');
+      wrap.className = 'confirm-field';
+      const id = titleId + '-phrase';
+      const helpId = id + '-help';
+      const errorId = id + '-error';
+      const label = document.createElement('label');
+      label.htmlFor = id;
+      label.textContent = L('Type ', '다음을 입력: ') + o.typedPhrase;
+      phrase = document.createElement('input');
+      phrase.id = id;
+      phrase.type = 'text';
+      phrase.required = true;
+      phrase.autocomplete = 'off';
+      phrase.setAttribute('aria-describedby', helpId + ' ' + errorId);
+      const help = document.createElement('span');
+      help.id = helpId;
+      help.className = 'confirm-help u-mono';
+      help.textContent = o.typedPhrase;
+      const error = document.createElement('span');
+      error.id = errorId;
+      error.className = 'confirm-error';
+      error.hidden = true;
+      error.textContent = L('The confirmation text does not match.', '확인 문구가 일치하지 않습니다.');
+      phrase.addEventListener('input', () => {
+        phrase.removeAttribute('aria-invalid');
+        error.hidden = true;
+      });
+      wrap.append(label, phrase, help, error);
+      dialog.appendChild(wrap);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'confirm-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn--ghost';
+    cancel.textContent = o.cancelLabel || L('Cancel', '취소');
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = o.danger ? 'btn btn--danger' : 'btn btn--primary';
+    confirm.textContent = o.confirmLabel || L('Confirm', '확인');
+    actions.append(cancel, confirm);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+    shell.confirmHost.replaceChildren(overlay);
+
+    const finish = (value) => {
+      overlay.removeEventListener('keydown', onKeydown);
+      overlay.remove();
+      if (app) app.inert = appWasInert;
+      confirmOpen = false;
+      try { if (previousFocus && previousFocus.focus) previousFocus.focus(); } catch (_) { /* noop */ }
+      resolve(value);
+    };
+    const validate = () => {
+      const issues = confirmationIssues(
+        { reason: reason && reason.value, phrase: phrase && phrase.value },
+        { requireReason: o.requireReason, typedPhrase: o.typedPhrase }
+      );
+      const invalid = issues.map((key) => key === 'reason' ? reason : phrase).filter(Boolean);
+      invalid.forEach((field) => {
+        field.setAttribute('aria-invalid', 'true');
+        const ids = String(field.getAttribute('aria-describedby') || '').split(/\s+/);
+        const error = ids.map((id) => document.getElementById(id)).find((node) => node && node.classList.contains('confirm-error'));
+        if (error) error.hidden = false;
+      });
+      if (invalid.length) {
+        invalid[0].focus();
+        return false;
+      }
+      return true;
+    };
+    const onKeydown = (event) => {
+      if (event.key === 'Escape') { event.preventDefault(); finish(null); return; }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled])'));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    overlay.addEventListener('keydown', onKeydown);
+    cancel.addEventListener('click', () => finish(null));
+    confirm.addEventListener('click', () => {
+      if (!validate()) return;
+      finish({ confirmed: true, operator, reason: reason ? reason.value.trim() : '' });
+    });
+    queueMicrotask(() => (reason || phrase || cancel).focus());
+  });
+}
+
 const ctx = {
   store,
   get model() { return model; },
@@ -467,6 +657,8 @@ const ctx = {
   goDetail,
   goBack,
   showToast,
+  confirmAction: requestOperatorConfirmation,
+  get operator() { return currentOperator(); },
   screens: SCREENS,
 };
 
@@ -480,7 +672,47 @@ let prevSetg = null;
 let prevAck = null;
 let prevMaint = null;
 let prevNotes = null;
-let prevNotify = null;
+let applyingRemoteState = false;
+const sharedSyncFailures = new Set();
+let sharedSync = null;
+
+function updateSharedSyncFailure(kind, phase, ok) {
+  const key = kind + '-' + phase;
+  if (ok) sharedSyncFailures.delete(key); else sharedSyncFailures.add(key);
+  const failed = Array.from(sharedSyncFailures).sort();
+  const message = failed.length
+    ? L('Shared operator state is not synchronized (' + failed.join(', ') + '). Pending writes are retained; Retry sends them before reading the server.',
+      '공유 운영 상태가 동기화되지 않았습니다(' + failed.join(', ') + '). 보류된 쓰기는 유지되며 재시도 시 서버 읽기보다 먼저 전송됩니다.')
+    : null;
+  if (getState().syncError !== message) setState({ syncError: message });
+}
+
+function initSharedSync() {
+  if (!data) return;
+  const definitions = {};
+  if (typeof data.pushAck === 'function' && typeof data.pullAck === 'function') {
+    definitions.ack = { push: (delta) => data.pushAck(delta, 2500), pull: () => data.pullAck(2000) };
+  }
+  if (typeof data.pushMaint === 'function' && typeof data.pullMaint === 'function') {
+    definitions.maintenance = { push: (delta) => data.pushMaint(delta, 2500), pull: () => data.pullMaint(2000) };
+  }
+  if (typeof data.pushNotes === 'function' && typeof data.pullNotes === 'function') {
+    definitions.notes = { push: (delta) => data.pushNotes(delta, 2500), pull: () => data.pullNotes(2000) };
+  }
+  const stateKeys = { ack: 'ackedAlerts', maintenance: 'maint', notes: 'notes' };
+  sharedSync = createSharedSyncCoordinator(definitions, {
+    outbox: createDurableSharedOutbox(),
+    applyRemote(kind, remote) {
+      const stateKey = stateKeys[kind];
+      if (!stateKey) return;
+      applyingRemoteState = true;
+      try { setState({ [stateKey]: remote }); } finally { applyingRemoteState = false; }
+    },
+    onWriteStatus(kind, status) { updateSharedSyncFailure(kind, 'write', status.ok); },
+    onReadStatus(kind, status) { updateSharedSyncFailure(kind, 'read', status.ok); },
+    onOutboxStatus(status) { updateSharedSyncFailure('outbox', 'storage', status.ok); },
+  });
+}
 
 function renderShell(st) {
   const m = getModel(st);
@@ -568,15 +800,25 @@ function renderShell(st) {
 
   // 레일 하단: 실시간 수집 상태 + fleet 가용성
   if (shell.sourceBadge) {
-    shell.sourceBadge.dataset.source = 'live';
-    shell.sourceBadge.classList.add('is-live');
+    const status = collectionState(st);
+    shell.sourceBadge.dataset.source = status.key;
+    shell.sourceBadge.classList.toggle('is-live', status.key === 'live');
+    shell.sourceBadge.classList.toggle('is-stale', status.key === 'stale' || status.key === 'connecting');
+    shell.sourceBadge.classList.toggle('is-offline', status.key === 'offline');
     const dot = shell.sourceBadge.querySelector('.u-dot');
     if (dot) {
-      dot.classList.add('is-pos', 'pulse');
-      dot.classList.remove('is-warn');
+      dot.classList.remove('is-pos', 'is-warn', 'is-neg', 'pulse');
+      dot.classList.add('is-' + status.tone);
+      if (status.key === 'live') dot.classList.add('pulse');
     }
-    setField('sourceLabel', 'LIVE');
+    setField('sourceLabel', status.label);
+    const statusText = status.label + (status.lastSuccess
+      ? L(' · last success ', ' · 마지막 성공 ') + formatConsoleTime(status.lastSuccess)
+      : L(' · no successful collection', ' · 성공한 수집 없음'));
+    shell.sourceBadge.setAttribute('aria-label', statusText);
+    shell.sourceBadge.title = statusText;
   }
+  if (shell.screenRoot) shell.screenRoot.setAttribute('aria-busy', st.pollPending ? 'true' : 'false');
   setField('fleetAvail', (m && m.kpi && m.kpi.avail) || '—');
 
   // 알림 종
@@ -614,28 +856,25 @@ function renderShell(st) {
 
   // 영속 — setg(자동새로고침·사운드·고밀도)도 변경 감지 대상에 포함한다.
   // 이전엔 lang/colors/theme 만 봐서 스위치를 켜도 저장이 트리거되지 않았다.
-  if (langChanged || prevColors !== st.companyColors || prevTheme !== st.theme || prevSetg !== st.setg || prevAck !== st.ackedAlerts || prevMaint !== st.maint || prevNotes !== st.notes || prevNotify !== st.notify) {
+  if (langChanged || prevColors !== st.companyColors || prevTheme !== st.theme || prevSetg !== st.setg || prevAck !== st.ackedAlerts || prevMaint !== st.maint || prevNotes !== st.notes) {
     persist(st);
     prevColors = st.companyColors;
     prevTheme = st.theme;
     prevSetg = st.setg;
-    prevNotify = st.notify;
-    // 확인 상태가 바뀌면 서버에도 밀어 넣는다(다중 운영자 공유).
-    // 최초 1회(prevAck===null)는 boot 의 합집합 동기화가 이미 처리하므로 건너뛴다.
-    // 실패해도 무시한다 — localStorage 에는 이미 저장됐고, 서버는 옵션이다.
-    if (prevAck !== null && prevAck !== st.ackedAlerts && data && typeof data.pushAck === 'function') {
-      // 전체 맵이 아니라 '무엇이 바뀌었는지'만 보낸다 — 동시 운영자 덮어쓰기 방지(실측 버그).
-      data.pushAck(data.ackDelta(prevAck, st.ackedAlerts || {}), 2500);
+    // 확인 상태 변경은 kind별 FIFO에 넣는다. 실패한 head는 제거하지 않으며 Retry/15초
+    // 동기화가 먼저 재전송한다. 같은 kind PUT을 병렬 발사해 set→del 순서가 뒤집히지 않는다.
+    if (!applyingRemoteState && prevAck !== null && prevAck !== st.ackedAlerts && sharedSync && data && typeof data.ackDelta === 'function') {
+      sharedSync.enqueue('ack', data.ackDelta(prevAck, st.ackedAlerts || {}));
     }
     prevAck = st.ackedAlerts;
-    // 점검 창도 같은 경로로 공유한다(델타·락 병합은 serve.py /maint 가 ack 와 같이 처리).
-    if (prevMaint !== null && prevMaint !== st.maint && data && typeof data.pushMaint === 'function') {
-      data.pushMaint(data.ackDelta(prevMaint, st.maint || {}), 2500);
+    // 점검 창도 같은 경로로 공유한다(서버 /maint가 ACK와 같은 델타 계약으로 병합한다).
+    if (!applyingRemoteState && prevMaint !== null && prevMaint !== st.maint && sharedSync && data && typeof data.ackDelta === 'function') {
+      sharedSync.enqueue('maintenance', data.ackDelta(prevMaint, st.maint || {}));
     }
     prevMaint = st.maint;
     // 장비 메모도 같은 경로로 공유한다.
-    if (prevNotes !== null && prevNotes !== st.notes && data && typeof data.pushNotes === 'function') {
-      data.pushNotes(data.ackDelta(prevNotes, st.notes || {}), 2500);
+    if (!applyingRemoteState && prevNotes !== null && prevNotes !== st.notes && sharedSync && data && typeof data.ackDelta === 'function') {
+      sharedSync.enqueue('notes', data.ackDelta(prevNotes, st.notes || {}));
     }
     prevNotes = st.notes;
   }
@@ -671,7 +910,16 @@ function renderBell(st, m) {
   }
   shell.bellDot.classList.remove('is-neg', 'is-warn', 'is-info');
   if (sev) shell.bellDot.classList.add('is-' + sev);
-  shell.bellDot.hidden = !sev;
+  const count = list.length || (st.fleet || []).filter((d) => d.status === 'down' || d.status === 'deg').length;
+  const countText = count > 99 ? '99+' : String(count || '');
+  shell.bellDot.textContent = sev === 'neg' ? '!' + countText : sev === 'warn' ? '⚠' + countText : 'i' + countText;
+  shell.bellDot.hidden = !sev || !count;
+  if (shell.bell) {
+    const level = sev === 'neg' ? L('critical', '심각') : sev === 'warn' ? L('warning', '경고') : L('information', '정보');
+    shell.bell.setAttribute('aria-label', count
+      ? L('Alerts: ', '알림: ') + level + ' · ' + count
+      : L('Alerts: none', '알림 없음'));
+  }
 }
 
 let bannerDismissedAt = 0;
@@ -684,13 +932,18 @@ function renderBanner(st) {
   // 닫기(×) 아이콘 전용 버튼의 접근 이름 — 언어 전환 추적은 renderShell 의 searchInput 과 같은
   // 패턴으로, 배너 표시 여부와 무관하게 매 렌더 갱신한다(#552, 모달 닫기의 L('Close','닫기') 관례).
   if (shell.bannerX) shell.bannerX.setAttribute('aria-label', L('Close', '닫기'));
-  const on = st.source === 'live' && st.stale && st.lastPoll > bannerDismissedAt;
+  const failureMark = Math.max(Number(st.lastAttempt) || 0, Number(st.lastPoll) || 0);
+  const on = !!st.uiError || !!st.syncError || (st.source === 'live' && (st.liveError || st.stale) && failureMark > bannerDismissedAt);
   if (!on) { shell.banner.hidden = true; bannerWasOn = false; return; }
   let text;
   const staleNames = (Array.isArray(st.fleet) ? st.fleet : [])
     .filter((d) => d && d.meta && d.meta.stale)
     .map((d) => (d.meta && (d.meta.label || d.meta.name)) || d.host || d.id);
-  if (staleNames.length) {
+  if (st.uiError) {
+    text = String(st.uiError);
+  } else if (st.syncError) {
+    text = String(st.syncError);
+  } else if (staleNames.length) {
     const names = staleNames.slice(0, 3).join(', ') + (staleNames.length > 3 ? L(' and ', ' 외 ') + (staleNames.length - 3) + L(' more', '대') : '');
     text = L(
       'Collection failing — ' + names + ' (check address/credentials/avcli)',
@@ -708,6 +961,12 @@ function renderBanner(st) {
   if (!bannerWasOn) announce(text);
   bannerWasOn = true;
   setField('bannerText', text);
+  if (shell.bannerMeta) {
+    shell.bannerMeta.textContent = st.lastPoll
+      ? L('Last successful collection: ', '마지막 성공 수집: ') + formatConsoleTime(st.lastPoll)
+      : L('No successful collection yet', '아직 성공한 수집이 없습니다');
+  }
+  if (shell.bannerRetry) shell.bannerRetry.textContent = L('Retry', '재시도');
   shell.banner.hidden = false;
 }
 
@@ -726,6 +985,12 @@ function applySearchActive() {
     n.classList.toggle('is-active', active);
     n.setAttribute('aria-selected', active ? 'true' : 'false');
   });
+  const active = searchNavigated ? searchNodes[searchActive] : null;
+  if (shell.searchInput) {
+    if (active && active.id) shell.searchInput.setAttribute('aria-activedescendant', active.id);
+    else shell.searchInput.removeAttribute('aria-activedescendant');
+  }
+  if (active && typeof active.scrollIntoView === 'function') active.scrollIntoView({ block: 'nearest' });
 }
 
 function searchItems(st, m) {
@@ -761,22 +1026,6 @@ function searchItems(st, m) {
   });
 
   // 2. 빠른 액션 (Quick actions)
-  const unackedAlerts = [];
-  if (m && Array.isArray(m.alerts)) {
-    m.alerts.forEach((a) => {
-      const k = a.ackKey || (a.hostId + ':' + (a.name || a.msg || ''));
-      if (k && !(st.ackedAlerts && st.ackedAlerts[k])) unackedAlerts.push(k);
-    });
-  } else if (st.fleet) {
-    st.fleet.forEach((d) => {
-      ((d.meta && d.meta.alerts) || []).forEach((a) => {
-        const k = d.id + ':' + (a.name || a.desc || '');
-        if (!(st.ackedAlerts && st.ackedAlerts[k])) unackedAlerts.push(k);
-      });
-    });
-  }
-  const ackKeysStr = unackedAlerts.join('\u0002');
-
   const actions = [
     {
       action: 'toggleLang',
@@ -784,16 +1033,6 @@ function searchItems(st, m) {
       meta: L('Quick action', '빠른 액션'),
       syn: ['언어', '언어전환', '한글', '영어', 'lang', 'language', 'korean', 'english', 'togglelang'],
       tone: 'info',
-    },
-    {
-      action: 'ackAllVisible',
-      ackKeys: ackKeysStr,
-      label: unackedAlerts.length > 0
-        ? L('Acknowledge all alerts (' + unackedAlerts.length + ')', '전체 경보 확인 (' + unackedAlerts.length + '건)')
-        : L('Acknowledge all alerts', '전체 경보 확인'),
-      meta: L('Quick action', '빠른 액션'),
-      syn: ['확인', '전체확인', '일괄확인', '전체 확인', '경보 확인', 'ack', 'ackall', 'acknowledge', 'clear alerts'],
-      tone: 'pos',
     },
     {
       action: 'toggleRail',
@@ -885,17 +1124,18 @@ function renderSearch(st, m) {
       d.textContent = L('No results', '결과 없음');
       shell.searchResults.appendChild(d);
     }
-    searchNodes = items.map((it) => {
+    searchNodes = items.map((it, index) => {
       const n = document.getElementById('tpl-search-item').content.firstElementChild.cloneNode(true);
       if (it.kind === 'nav') {
         n.dataset.searchView = it.view;
       } else if (it.kind === 'action') {
         n.dataset.searchAction = it.action;
-        if (it.ackKeys) n.dataset.ackKeys = it.ackKeys;
       } else {
         n.dataset.searchGo = it.id;
       }
       n.setAttribute('role', 'option');
+      n.id = 'search-option-' + index;
+      n.tabIndex = -1;
       n.setAttribute('aria-selected', 'false');
       const dot = n.querySelector('.u-dot');
       if (dot) {
@@ -919,6 +1159,11 @@ function renderSearch(st, m) {
   shell.searchResults.hidden = !open;
   if (shell.searchWrap) shell.searchWrap.classList.toggle('is-open', open);
   if (shell.searchInput) shell.searchInput.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (shell.searchStatus) {
+    shell.searchStatus.textContent = !open ? '' : items.length
+      ? L(items.length + ' results', items.length + '개 결과')
+      : L('No results', '결과 없음');
+  }
   applySearchActive();
 }
 
@@ -967,7 +1212,7 @@ function executeSearchItem(target) {
   }
 }
 
-function handleAction(action, el) {
+async function handleAction(action, el) {
   switch (action) {
     case 'toggleLang':
       setState(s => ({ lang: s.lang === 'ko' ? 'en' : 'ko' }));
@@ -981,7 +1226,22 @@ function handleAction(action, el) {
     case 'goBack': goBack(); break;
     case 'goto': goView(el && (el.dataset.view || el.dataset.goto)); break;
     case 'goDetail': goDetail(el && (el.dataset.id || el.dataset.detailId)); break;
-    case 'dismissBanner': bannerDismissedAt = Date.now(); renderBanner(getState()); break;
+    case 'dismissBanner':
+      bannerDismissedAt = Date.now();
+      if (getState().uiError || getState().syncError) setState({ uiError: null, syncError: null });
+      else renderBanner(getState());
+      break;
+    case 'retryPull': {
+      const st = getState();
+      setState({ uiError: null, pollPending: !st.lastPoll });
+      if (mountedKey) moduleCache.delete(mountedKey);
+      wantKey = null;
+      swapView(st.view);
+      // 공유 상태는 로컬 보류 쓰기를 먼저 FIFO 순서로 재전송한 다음 서버 정본을 읽는다.
+      if (sharedSync) await sharedSync.retryAll();
+      if (typeof pullNow === 'function') pullNow();
+      break;
+    }
     case 'togglePause': setState(s => ({ logPaused: !s.logPaused })); break;
     case 'clearSearch': setState({ search: '' }); break;
     case 'toast': showToast((el && el.dataset.toastMsg) || ''); break;
@@ -995,21 +1255,41 @@ function handleAction(action, el) {
       }
       break;
     }
-    // 경보 확인/해제 — 원본은 지우지 않고 확인 표시만 토글한다(폴러는 해제 API 가 없다).
-    // 값은 확인 시각(ISO) — 나중에 '확인한 지 N일' 표기에 쓸 수 있게 boolean 대신 타임스탬프.
+    // 경보 확인/해제 — 원본은 지우지 않고 확인 표시만 토글한다.
+    // 값은 서버가 보존하는 {ts,by,reason}; 구형 ISO 문자열은 읽기 호환한다.
     // 점검 창 설정/해제 — data-maint-id + data-maint-hours(0이면 해제).
     case 'maintSet': {
       const id = el && el.dataset.maintId;
       if (!id) break;
       const hours = Number(el.dataset.maintHours || 0);
+      const current = getState();
+      const device = (current.fleet || []).find((d) => String(d.id) === String(id));
+      const deviceName = device ? (device.host || device.id) : id;
+      const activeCount = device && device.meta && Array.isArray(device.meta.alerts) ? device.meta.alerts.length : 0;
+      const approved = await requestOperatorConfirmation({
+        title: hours > 0 ? L('Set maintenance window', '점검 창 설정') : L('Clear maintenance window', '점검 창 해제'),
+        impact: hours > 0
+          ? L(
+            deviceName + ' alerts will be suppressed for ' + hours + ' hours. Currently active: ' + activeCount + '.',
+            deviceName + ' 장비의 경보가 ' + hours + '시간 동안 억제됩니다. 현재 활성 경보: ' + activeCount + '건.'
+          )
+          : L(
+            deviceName + ' alerts will immediately return to normal monitoring.',
+            deviceName + ' 장비의 경보가 즉시 일반 모니터링으로 복귀합니다.'
+          ),
+        confirmLabel: hours > 0 ? L('Set window', '점검 창 설정') : L('Clear window', '점검 창 해제'),
+        danger: false,
+        requireReason: true,
+      });
+      if (!approved) break;
       const prevMaintEntry = getState().maint && getState().maint[id];
       setState((st) => {
         const next = Object.assign({}, st.maint);
         if (hours > 0) {
           next[id] = {
             until: new Date(Date.now() + hours * 3600 * 1000).toISOString(),
-            note: el.dataset.maintNote || '',
-            by: 'console',
+            note: approved.reason,
+            by: approved.operator,
             ts: new Date().toISOString(),
           };
         } else {
@@ -1039,9 +1319,20 @@ function handleAction(action, el) {
     case 'ackAlert': {
       const k = el && el.dataset.ackKey;
       if (!k) break;
+      const removing = !!(getState().ackedAlerts && getState().ackedAlerts[k]);
+      const approved = await requestOperatorConfirmation({
+        title: removing ? L('Remove acknowledgement', '경보 확인 해제') : L('Acknowledge alert', '경보 확인'),
+        impact: removing
+          ? L('The acknowledgement marker for this alert will be removed. The source alert is unchanged.', '이 경보의 확인 표시를 해제합니다. 원본 경보는 변경되지 않습니다.')
+          : L('This alert will be marked acknowledged. Monitoring and the source alert are unchanged.', '이 경보를 확인됨으로 표시합니다. 모니터링과 원본 경보는 변경되지 않습니다.'),
+        confirmLabel: removing ? L('Remove marker', '확인 해제') : L('Acknowledge', '확인 처리'),
+        requireReason: true,
+      });
+      if (!approved) break;
       setState((s) => {
         const next = Object.assign({}, s.ackedAlerts);
-        if (next[k]) delete next[k]; else next[k] = new Date().toISOString();
+        if (next[k]) delete next[k];
+        else next[k] = { ts: new Date().toISOString(), by: approved.operator, reason: approved.reason };
         return { ackedAlerts: next };
       });
       showToast(getState().ackedAlerts[k]
@@ -1053,11 +1344,21 @@ function handleAction(action, el) {
     case 'ackAllVisible': {
       const keys = String((el && el.dataset.ackKeys) || '').split('\u0002').filter(Boolean);
       if (!keys.length) break;
+      const approved = await requestOperatorConfirmation({
+        title: L('Acknowledge filtered alerts', '필터된 경보 일괄 확인'),
+        impact: L(
+          keys.length + ' alerts will be marked acknowledged. Monitoring and source alerts are not changed.',
+          keys.length + '건을 확인됨으로 표시합니다. 모니터링과 원본 경보는 변경되지 않습니다.'
+        ),
+        confirmLabel: L('Acknowledge ' + keys.length, keys.length + '건 확인'),
+        requireReason: true,
+      });
+      if (!approved) break;
       const prevAcked = Object.assign({}, getState().ackedAlerts || {});
       setState((s) => {
         const next = Object.assign({}, s.ackedAlerts);
         const now = new Date().toISOString();
-        keys.forEach((k) => { next[k] = now; });
+        keys.forEach((k) => { next[k] = { ts: now, by: approved.operator, reason: approved.reason }; });
         return { ackedAlerts: next };
       });
       showToast(
@@ -1083,6 +1384,16 @@ function handleAction(action, el) {
     case 'ackClearAll': {
       const keys = String((el && el.dataset.ackKeys) || '').split('\u0002').filter(Boolean);
       if (!keys.length) break;
+      const approved = await requestOperatorConfirmation({
+        title: L('Remove acknowledgements', '경보 확인 일괄 해제'),
+        impact: L(
+          keys.length + ' acknowledgement markers will be removed. Source alerts remain unchanged.',
+          keys.length + '건의 확인 표시를 해제합니다. 원본 경보는 변경되지 않습니다.'
+        ),
+        confirmLabel: L('Remove ' + keys.length, keys.length + '건 해제'),
+        requireReason: true,
+      });
+      if (!approved) break;
       setState((s) => {
         const next = Object.assign({}, s.ackedAlerts);
         keys.forEach((k) => { delete next[k]; });
@@ -1204,15 +1515,12 @@ window.addEventListener('popstate', applyHash);
 // ---------------------------------------------------------------------------
 // KST 시계 (1초 자체 갱신 — store 리빌드 유발 금지)
 // ---------------------------------------------------------------------------
-function kstNow() {
-  // UTC+9 고정. 언어 무관 'YYYY-MM-DD HH:MM:SS'
-  const d = new Date(Date.now() + 9 * 3600 * 1000);
-  const p = n => String(n).padStart(2, '0');
-  return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) +
-    ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds());
-}
 function startClock() {
-  const paint = () => { if (shell.clock) shell.clock.textContent = kstNow(); };
+  const paint = () => {
+    if (!shell.clock) return;
+    shell.clock.textContent = formatConsoleTime(Date.now());
+    shell.clock.dateTime = new Date().toISOString();
+  };
   paint();
   setInterval(paint, 1000);
 }
@@ -1233,41 +1541,6 @@ function computeStale(st) {
  * 무시할 수준의 비용(수십 장비 × 수십 경보)이라 tick/pull 완료마다 부른다.
  */
 /** 만료된 점검 창 청소 — 로컬 정리가 곧바로 화면 복귀를 만들고, 감시자가 del 델타를 서버에 보낸다. */
-/**
- * 에스컬레이션 — critical 이 setg.escHours(4/24시간) 넘게 미확인이면 웹훅 재통보.
- * 중복 발송 방지는 이중이다: 로컬 Set(틱마다 PUT 하지 않게) + 서버 /escal add-if-absent
- * (콘솔이 여러 개 열리든 한 쪽만 added 를 받는다). 클레임 실패(서버 다운)는 Set 에서
- * 되돌려 다음 틱에 재시도하고, 웹훅 발송 실패는 재시도하지 않는다(이미 클레임됨).
- * 타 콘솔이 선점한 키(added 에 안 든 것)도 Set 에서 뺀다 — 서버 클레임은 TTL(6h)로
- * 만료돼 재클레임 가능한데 Set 에 남기면 이 페이지 수명 동안 선점이 묘력화된다(#329).
- */
-const _escalClaimed = new Set();
-function applyEscalation() {
-  if (!model || typeof model.escalDue !== 'function' || !data) return;
-  const st = getState();
-  if (!(st.setg && (st.setg.escHours === 4 || st.setg.escHours === 24))) return;
-  const url = (st.notify && st.notify.enabled && st.notify.url) || '';
-  if (!url) return;
-  if (typeof data.claimEscal !== 'function' || typeof data.sendWebhook !== 'function') return;
-  const due = model.escalDue(st).filter((d) => !_escalClaimed.has(d.key));
-  if (!due.length) return;
-  due.forEach((d) => _escalClaimed.add(d.key));     // 비동기 사이 중복 시도 방지
-  data.claimEscal(due.map((d) => d.key), 2500).then((added) => {
-    if (!added) { due.forEach((d) => _escalClaimed.delete(d.key)); return; }  // 서버 다운 — 재시도
-    // added 에 안 든 키(타 콘솔 선점)는 Set 에서 지워 후속 틱에 재시도한다 — TTL 만료 뒤
-    // 재클레임이 이 경로로 살아난다. 재PUT 은 add-if-absent 라 유효 클레임 기간 중엔 added 가
-    // 비어 멱등하고, 만료 뒤엔 먼저 도착한 한 콘솔만 added 를 받아 웹훅도 1회다(중복 발송 없음).
-    due.forEach((d) => { if (added.indexOf(d.key) < 0) _escalClaimed.delete(d.key); });
-    due.filter((d) => added.indexOf(d.key) >= 0).forEach((d) => {
-      const h = st.setg.escHours;
-      const msg = (getState().lang === 'en')
-        ? '🚨 [serverdesk] Critical unacknowledged ' + h + 'h+ — ' + d.host + ': ' + d.desc + ' (since ' + d.time + ')'
-        : '🚨 [serverdesk] critical 미확인 ' + h + '시간 초과 — ' + d.host + ': ' + d.desc + ' (발생 ' + d.time + ')';
-      data.sendWebhook(url, msg, 3000);
-    });
-  }).catch(() => {});
-}
-
 function sweepMaint() {
   if (!model || typeof model.expiredMaint !== 'function') return;
   const ids = model.expiredMaint(getState());
@@ -1286,7 +1559,13 @@ function applyAutoAck() {
   setState((s) => {
     const next = Object.assign({}, s.ackedAlerts);
     const iso = new Date().toISOString();
-    due.forEach((k) => { if (!next[k]) next[k] = iso; });
+    due.forEach((k) => {
+      if (!next[k]) next[k] = {
+        ts: iso,
+        by: 'serverdesk:auto-ack',
+        reason: 'Automatic acknowledgement after configured stale-alert retention period',
+      };
+    });
     return { ackedAlerts: next };
   });
 }
@@ -1325,11 +1604,33 @@ function startTick() {
     setState(patch);
     applyAutoAck();
     sweepMaint();
-    applyEscalation();
     applyAlertSound();
   }, 1200);
 }
 
+let lastSharedRefresh = 0;
+let sharedRefreshTimer = null;
+async function refreshSharedState(force) {
+  if (!sharedSync) return null;
+  if (!force && Date.now() - lastSharedRefresh < 15000) return null;
+  lastSharedRefresh = Date.now();
+  return sharedSync.refresh();
+}
+
+function startSharedRefresh() {
+  clearInterval(sharedRefreshTimer);
+  sharedRefreshTimer = setInterval(() => {
+    if (!document.hidden && sharedSync) sharedSync.retryAll();
+  }, 15000);
+  // Fleet collection and shared operator state have independent failure domains.
+  // Returning to a visible tab refreshes ACK/maintenance/notes even while fleet
+  // collection is failing or in backoff.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && sharedSync) sharedSync.retryAll();
+  });
+}
+
+let pullNow = null;
 function startPull() {
   // model/data.js 계약: pullPatch(state) → statePatch. (pull(url,timeoutMs)는 저수준 API라 쓰지 않는다)
   const pullPatch = data && typeof data.pullPatch === 'function' ? data.pullPatch : null;
@@ -1363,7 +1664,7 @@ function startPull() {
     } catch (e) {
       fails += 1;
       const message = (e && e.message) ? e.message : 'collector request failed';
-      setState({ source: 'live', liveError: message, stale: true });
+      setState({ source: 'live', liveError: message, stale: true, lastAttempt: Date.now(), pollPending: false });
     }
     if (pulled) {
       // 후처리는 pull 성공 확정 뒤 try 밖에서 실행한다.
@@ -1374,9 +1675,6 @@ function startPull() {
         // 와 무관하게 pull 완료 때도 만료 창을 지워 묵음이 until 이후로 지속되는 것을 막는다.
         // 재통보·사운드보다 먼저 청소해 막 만료된 창 장비의 경보가 그 사이클에 바로 반영되게 한다.
         sweepMaint();
-        // 에스컬레이션도 자동확인과 같은 생존 조건을 갖는다 — tick 게이트(setg.refresh)
-        // 와 무관하게 pull 완료 때도 재통보를 검사한다(자동새로고침 OFF 에서 중단되는 결함).
-        applyEscalation();
         applyAlertSound();
       } catch (e) {
         console.warn('[serverdesk] pull 후처리 실패', e);
@@ -1390,6 +1688,13 @@ function startPull() {
     // — 둘 다 재예약하면 폴링 루프가 영구 이중화된다(#324).
     if (gen !== generation) return;
     timer = setTimeout(run, wait);
+  };
+
+  pullNow = () => {
+    if (!isTabActive) return;
+    clearTimeout(timer);
+    generation += 1;
+    run();
   };
 
   // 탭 비활성화/복귀 스마트 폴링 바인딩
@@ -1415,65 +1720,14 @@ function startPull() {
 async function boot() {
   cacheShell();
   await loadShared();
-
-
-  // 세 원격 동기화는 서로 의존하지 않으므로 병렬로 시작한다. 각 작업은 자체 오류를
-  // 삼켜 폐쇄망 폴백을 유지하고, 가장 느린 엔드포인트 하나만 첫 렌더를 지연시킨다(#154).
-  const syncAck = async () => {
-    // 경보 확인 상태 — 서버(serve.py /ack)가 정본, localStorage 는 오프라인 폴백.
-    // 다중 운영자 환경에서 A 가 확인한 경보를 B 도 확인된 것으로 봐야 한다.
-    if (!(data && typeof data.pullAck === 'function')) return;
-    try {
-      const remote = await data.pullAck(2000);
-      if (remote) {
-        // 서버 ↔ 로컬 합집합 — 오프라인 중 로컬에서 확인한 건이 서버 복귀 시 사라지면 안 된다.
-        const merged = Object.assign({}, getState().ackedAlerts || {}, remote);
-        setState({ ackedAlerts: merged });
-        if (Object.keys(merged).length !== Object.keys(remote).length) {
-          // 로컬에만 있던 건을 서버로 올린다 — 델타라 다른 운영자의 확인을 덮지 않는다.
-          data.pushAck(data.ackDelta(remote, merged), 2500);
-        }
-      }
-    } catch (e) {
-      console.warn('[serverdesk] ack 동기화 생략', e);
-    }
-  };
-
-  const syncMaint = async () => {
-    // 점검 창 상태 — ack 와 같은 계약(/maint 가 정본, localStorage 는 오프라인 폴백).
-    if (!(data && typeof data.pullMaint === 'function')) return;
-    try {
-      const remoteM = await data.pullMaint(2000);
-      if (remoteM) {
-        const mergedM = Object.assign({}, getState().maint || {}, remoteM);
-        setState({ maint: mergedM });
-        if (Object.keys(mergedM).length !== Object.keys(remoteM).length) {
-          data.pushMaint(data.ackDelta(remoteM, mergedM), 2500);
-        }
-      }
-    } catch (e) {
-      console.warn('[serverdesk] maint 동기화 생략', e);
-    }
-  };
-
-  const syncNotes = async () => {
-    // 장비 메모 — ack/maint 와 같은 계약(/notes 가 정본).
-    if (!(data && typeof data.pullNotes === 'function')) return;
-    try {
-      const remoteN = await data.pullNotes(2000);
-      if (remoteN) {
-        const mergedN = Object.assign({}, getState().notes || {}, remoteN);
-        setState({ notes: mergedN });
-        if (Object.keys(mergedN).length !== Object.keys(remoteN).length) {
-          data.pushNotes(data.ackDelta(remoteN, mergedN), 2500);
-        }
-      }
-    } catch (e) {
-      console.warn('[serverdesk] notes 동기화 생략', e);
-    }
-  };
-
-  await Promise.all([syncAck(), syncMaint(), syncNotes()]);
+  // ACK/maintenance/notes are independent server-authoritative maps. Empty maps are
+  // valid responses and replace stale browser fallback state. Endpoint failures are
+  // tracked separately so one successful read cannot hide another failed read.
+  initSharedSync();
+  // A restored durable outbox is always drained before any authoritative read,
+  // so reload cannot erase an ACK/maintenance/note mutation that previously
+  // failed to reach the server.
+  if (sharedSync) await sharedSync.retryAll();
 
   // 해시 → 초기 view (존재하지 않는 detail id는 overview로)
   const route = resolveRoute(parseHash(), getState());
@@ -1488,6 +1742,7 @@ async function boot() {
   startClock();
   startTick();
   startPull();
+  startSharedRefresh();
 
   // 브라우저 자동재생 정책 — AudioContext 는 사용자 제스처 전까지 suspended 라
   // 첫 클릭/키 입력 때 재개를 걸어 둔다(알림 사운드, setg.sound).

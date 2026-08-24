@@ -40,7 +40,7 @@ export {
 } from './compute/format.js';
 
 export {
-  tsNorm, tsKey, agoSec, agoText, shortTime,
+  tsNorm, ackTimeNorm, ackTimestampKey, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
 } from './compute/time.js';
 
@@ -80,7 +80,7 @@ import {
   fmtAvailN, fmtUptimeD,
 } from './compute/format.js';
 import {
-  tsNorm, tsKey, agoSec, agoText, shortTime,
+  tsNorm, ackTimestampKey, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
 } from './compute/time.js';
 import { sortRows } from './compute/node.js';
@@ -100,7 +100,7 @@ export default {
   clamp, cmpKo, langOf, makeL,
   statusTone, statusLabel, statusAnim, pctTone,
   typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint,
-  fmtAvailN, fmtUptimeD, tsNorm, tsKey, agoSec, agoText, shortTime,
+  fmtAvailN, fmtUptimeD, tsNorm, ackTimestampKey, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
   sevInfo, SEV_RANK, histOf, sortRows,
   COMPANY_PALETTE, TYPES, FT_TYPES, isFT, isNoTel,

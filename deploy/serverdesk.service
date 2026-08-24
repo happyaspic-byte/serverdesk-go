@@ -10,8 +10,11 @@ User=serverdesk
 Group=serverdesk
 WorkingDirectory=/var/lib/serverdesk
 Environment=GOMEMLIMIT=400MiB
-# This file is for non-secret runtime settings only. Device secrets belong in
-# systemd credentials and are referenced as secret://NAME from config.local.json.
+# Writable, service-owned provider used by the Manage UI and CLI enrollment.
+# Files are mode 0600 under the already-private state directory.
+Environment=SERVERDESK_CREDENTIALS_STORE=/var/lib/serverdesk/credentials
+# This file is for non-secret runtime settings only. Device secret values belong
+# in the managed store/optional systemd source and config keeps secret://NAME.
 EnvironmentFile=-/etc/serverdesk/serverdesk.env
 ExecStart=/opt/serverdesk/serverdesk -c /var/lib/serverdesk/config.local.json -auth /var/lib/serverdesk/auth.json
 Restart=on-failure
@@ -26,6 +29,8 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 PrivateTmp=yes
 PrivateDevices=yes
+# Keep the host /proc view visible so runtime argv-exposure checks attest the
+# same host-wide hidepid policy enforced by the installer for Stratus AVCLI.
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/serverdesk

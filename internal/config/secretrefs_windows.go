@@ -134,3 +134,36 @@ func writeCredentialFile(dir, name, value string) error {
 	}
 	return nil
 }
+
+func listCredentialNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		filename := entry.Name()
+		if entry.Type().IsRegular() && strings.HasSuffix(strings.ToLower(filename), ".dpapi") {
+			name := filename[:len(filename)-len(".dpapi")]
+			if validSecretName(name) {
+				names = append(names, name)
+			}
+		}
+	}
+	return names, nil
+}
+
+func removeCredentialFile(dir, name string) error {
+	path, err := credentialPath(dir, name)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("credential cleanup target must be a regular non-reparse file")
+	}
+	return os.Remove(path)
+}

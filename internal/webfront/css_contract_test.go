@@ -183,3 +183,20 @@ func TestCSSRequiredDesignTokensContract(t *testing.T) {
 		}
 	}
 }
+
+func TestCSSCommercialAccessibilitySurfaces(t *testing.T) {
+	data, err := os.ReadFile(findStylesCSSPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(data)
+	for _, required := range []string{
+		"--ink-fill:#9A4A28", "--warn:#7A5200", ".confirm-dialog", ".hd-banner-meta",
+		".rail-live.is-stale", ".rail-live.is-offline",
+		"@media (min-width:1025px) and (max-width:1279px)", "@media (pointer:coarse)",
+	} {
+		if !strings.Contains(css, required) {
+			t.Errorf("commercial accessibility CSS contract missing %q", required)
+		}
+	}
+}

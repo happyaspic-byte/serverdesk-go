@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -21,6 +23,10 @@ const (
 // 기본은 no-op — 폴패키지는 로깅 정책을 강제하지 않는다.
 var Warnf = func(format string, args ...any) {}
 
+// syncConfigParent is a fault-injection seam for proving the post-rename
+// committed-with-durability-error path. Production uses syncParentDirectory.
+var syncConfigParent = syncParentDirectory
+
 // ErrConfigChanged reports that a compare-and-replace observed a newer document.
 var ErrConfigChanged = errors.New("config changed concurrently")
 
@@ -32,36 +38,145 @@ var ErrConfigChanged = errors.New("config changed concurrently")
 //   - 문서를 map[string]json.RawMessage 오버레이로 들고 다녀 `_comment` 같은
 //     미지의 키가 재작성 후에도 그대로 살아난다.
 //   - 전체 RMW 는 하나의 뮤텍스로 직렬화한다.
-//   - tmp 와 .bak 모두 생성 시점부터 0600(O_CREAT 모드 지정 — chmod 후행의
-//     노출 창 제거), 직전본은 .bak 로 남긴다(수동 롤백 경로).
-//   - tmp 기록 후 rename 으로 원자 교체한다.
+//   - 예측 불가능한 same-directory temp를 생성 시점부터 0600으로 만들고 fsync한
+//     뒤 플랫폼별 atomic replace를 사용한다. 고정 `.tmp` 이름은 사용하지 않는다.
+//   - 직전본은 `.bak`에 같은 안전 경계로 남기며 symlink/non-regular 대상은 절대
+//     따라가지 않는다.
 type Store struct {
-	mu   sync.Mutex
-	path string
+	mu            sync.Mutex
+	path          string
+	credentialDir string
 }
 
 // NewStore 는 path 의 config JSON 파일을 대상으로 하는 Store 를 만든다.
-func NewStore(path string) *Store { return &Store{path: path} }
+func NewStore(path string) *Store {
+	return &Store{path: path, credentialDir: managedCredentialDirectory(path)}
+}
+
+// NewStoreWithCredentialDirectory is primarily for explicit deployments and
+// tests. The directory is daemon-writable and must not be systemd's read-only
+// CREDENTIALS_DIRECTORY.
+func NewStoreWithCredentialDirectory(path, credentialDir string) *Store {
+	credentialDir = strings.TrimSpace(credentialDir)
+	if credentialDir != "" {
+		credentialDir = filepath.Clean(credentialDir)
+	}
+	return &Store{path: path, credentialDir: credentialDir}
+}
 
 // Path 는 대상 파일 경로를 반환한다.
 func (s *Store) Path() string { return s.path }
 
-// writeFile0600 은 O_CREAT 모드 0600 으로 생성해 쓰고 fsync 한다.
-// rename 으로 최종 반영되므로 최종 본문 파일도 항상 0600 이 된다.
-func writeFile0600(dst string, data []byte) error {
-	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+// CredentialDirectory returns the service-owned credential store paired with
+// this config file. It never derives from CREDENTIALS_DIRECTORY.
+func (s *Store) CredentialDirectory() string { return s.credentialDir }
+
+const configStoreMaxSize = 16 << 20
+
+func readRegularConfig(path string) ([]byte, os.FileInfo, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, errors.New("config must be a regular non-symlink file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		_ = file.Close()
+		return nil, nil, errors.New("config changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, configStoreMaxSize+1))
+	closeErr := file.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+	if closeErr != nil {
+		return nil, nil, closeErr
+	}
+	if len(data) > configStoreMaxSize {
+		return nil, nil, errors.New("config exceeds 16 MiB")
+	}
+	return data, info, nil
+}
+
+// writeAtomicFile0600 uses an unpredictable same-directory temporary, verifies
+// that neither the destination nor temp is a symlink/non-regular object, fsyncs
+// it, and atomically replaces the destination (including on Windows).
+// committed is true once replacement occurred even if the parent fsync failed.
+func writeAtomicFile0600(dst string, data []byte) (committed bool, err error) {
+	dir := filepath.Dir(dst)
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return false, err
+	}
+	if !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
+		return false, errors.New("config directory must be a real directory")
+	}
+	if info, inspectErr := os.Lstat(dst); inspectErr == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return false, errors.New("replacement target must be a regular non-symlink file")
+		}
+	} else if !errors.Is(inspectErr, os.ErrNotExist) {
+		return false, inspectErr
+	}
+	f, err := os.CreateTemp(dir, "."+filepath.Base(dst)+"-*")
+	if err != nil {
+		return false, err
+	}
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		return false, err
 	}
 	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
+		return false, err
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
+		return false, err
 	}
-	return f.Close()
+	tmpInfo, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	if err := f.Close(); err != nil {
+		return false, err
+	}
+	pathInfo, err := os.Lstat(tmp)
+	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(tmpInfo, pathInfo) {
+		return false, errors.New("config temporary file changed before replace")
+	}
+	if err := replaceConfigFile(tmp, dst); err != nil {
+		return false, err
+	}
+	ok = true
+	if err := syncConfigParent(dir); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func writeFile0600(dst string, data []byte) error {
+	committed, err := writeAtomicFile0600(dst, data)
+	if committed && err != nil {
+		Warnf("파일 교체는 완료됐지만 디렉터리 동기화에 실패했습니다: %v", err)
+		return nil
+	}
+	return err
 }
 
 // rmw 는 잠금 하에 원본을 읽어 mutate 를 적용하고 원자 교체한다.
@@ -69,7 +184,7 @@ func (s *Store) rmw(mutate func(doc map[string]json.RawMessage) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	orig, err := os.ReadFile(s.path)
+	orig, _, err := readRegularConfig(s.path)
 	if err != nil {
 		return fmt.Errorf("config 저장 실패(읽기): %w", err)
 	}
@@ -77,14 +192,28 @@ func (s *Store) rmw(mutate func(doc map[string]json.RawMessage) error) error {
 	if err := json.Unmarshal(orig, &doc); err != nil {
 		return fmt.Errorf("config 저장 실패(JSON 파싱): %w", err)
 	}
+	rollbackDoc := make(map[string]json.RawMessage, len(doc))
+	for key, value := range doc {
+		rollbackDoc[key] = value
+	}
 	if err := mutate(doc); err != nil {
 		return err
 	}
 	// require-references 배포에서는 UI/API가 받은 평문 자격증명을 credential
 	// provider에 먼저 저장하고 JSON에는 secret:// 참조만 남긴다.
-	if err := protectRequiredRawDocument(doc); err != nil {
+	provisioned, err := protectRequiredRawDocumentAt(doc, s.credentialDir)
+	if err != nil {
+		removeManagedCredentialNames(s.credentialDir, provisioned.Names)
 		return fmt.Errorf("config 저장 실패(자격증명 보호): %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			// A serialization/fsync/rename failure must not leave an unreferenced
+			// password behind. Only names created in this RMW are removed.
+			removeManagedCredentialNames(s.credentialDir, provisioned.Names)
+		}
+	}()
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false) // 한글 등 비ASCII 보존 — Python 의 ensure_ascii=False 에 해당
@@ -93,15 +222,27 @@ func (s *Store) rmw(mutate func(doc map[string]json.RawMessage) error) error {
 		return fmt.Errorf("config 저장 실패(직렬화): %w", err)
 	}
 	// 백업 실패는 저장을 막지 않는다(poller.py 와 동일 판단) — 경고만 남긴다.
-	if err := writeFile0600(s.path+".bak", orig); err != nil {
+	if _, err := writeAtomicFile0600(s.path+".bak", orig); err != nil {
 		Warnf("config .bak 백업 실패: %v", err)
 	}
-	tmp := s.path + ".tmp"
-	if err := writeFile0600(tmp, buf.Bytes()); err != nil {
-		return fmt.Errorf("config 저장 실패(tmp 기록): %w", err)
+	replaced, err := writeAtomicFile0600(s.path, buf.Bytes())
+	if replaced {
+		committed = true
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return fmt.Errorf("config 저장 실패(교체): %w", err)
+	if err != nil {
+		if replaced {
+			// The visible config already changed. Returning an error would leave
+			// runtime state on the old generation, and deleting the new managed
+			// secret would create a dangling secret:// reference. Continue as a
+			// committed update, retain both credential generations for crash
+			// fallback, and surface the durability fault through the host logger.
+			Warnf("config 교체는 완료됐지만 디렉터리 동기화에 실패했습니다; 이전 credential 세대를 보존합니다: %v", err)
+			return nil
+		}
+		return fmt.Errorf("config 저장 실패(원자 교체): %w", err)
+	}
+	if err := cleanupManagedCredentialStore(s.credentialDir, doc, rollbackDoc); err != nil {
+		Warnf("managed credential 정리 실패: %v", err)
 	}
 	return nil
 }
@@ -110,7 +251,7 @@ func (s *Store) rmw(mutate func(doc map[string]json.RawMessage) error) error {
 func (s *Store) ReadDoc() (map[string]json.RawMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	orig, err := os.ReadFile(s.path)
+	orig, _, err := readRegularConfig(s.path)
 	if err != nil {
 		return nil, fmt.Errorf("config 읽기 실패: %w", err)
 	}
@@ -266,14 +407,26 @@ func (s *Store) AddEntry(section string, entry map[string]any) error {
 		return errors.New("config 추가 실패: entry 에 key(string)가 필요합니다")
 	}
 	return s.rmw(func(doc map[string]json.RawMessage) error {
+		if section != SectionClusters && section != SectionEdgeDevices {
+			return fmt.Errorf("config 추가 실패: 지원하지 않는 section %q", section)
+		}
+		// Device keys are fleet-wide identities. Check both arrays while holding the
+		// RMW mutex so concurrent cluster/edge additions cannot create an ambiguous
+		// cross-type collision after their API pre-checks both observed "missing".
+		for _, candidate := range []string{SectionClusters, SectionEdgeDevices} {
+			existing, err := sectionArray(doc, candidate)
+			if err != nil {
+				return err
+			}
+			for _, e := range existing {
+				if entryKey(e) == key {
+					return fmt.Errorf("config 에 이미 존재: %s", key)
+				}
+			}
+		}
 		arr, err := sectionArray(doc, section)
 		if err != nil {
 			return err
-		}
-		for _, e := range arr {
-			if entryKey(e) == key {
-				return fmt.Errorf("config 에 이미 존재: %s", key)
-			}
 		}
 		b, err := json.Marshal(entry)
 		if err != nil {

@@ -45,12 +45,28 @@ jobs:
           test -z "$unformatted" || { echo "$unformatted"; exit 1; }
           go vet ./...
           test "$(go list -m all | wc -l)" -eq 1
-          go test -race -covermode=atomic -coverprofile=coverage.out ./...
+          go test -shuffle=on -race -covermode=atomic -coverprofile=coverage.out ./...
           coverage=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
           echo "Go statement coverage: ${coverage}%"
           awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 80) exit 1 }'
-          node --test web/tests/
+          node --test web/tests/*.test.mjs
           sh deploy/packaging/validate-deployment.sh
+      - name: Parse PowerShell deployment scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem deploy/packaging/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Error ("{0}: {1}" -f $_.Name, ($errors -join '; '))
+            }
+          }
+          if ($failed) { exit 1 }
       - name: Verify workflow and secret hygiene
         shell: bash
         run: |
@@ -101,13 +117,22 @@ jobs:
           version=${GITHUB_REF_NAME#v}
           mkdir -p stage dist
           go build -trimpath -buildvcs=true -ldflags "-s -w -X main.version=${version}" -o "stage/${{ matrix.binary }}" ./cmd/serverdesk
-          cp config.example.json README.md NOTICE SECURITY.md stage/
+          cp config.example.json README.md NOTICE SECURITY.md THIRD_PARTY_NOTICES.md stage/
           cp -R deploy docs stage/
+          # Fail instead of silently laundering a public source tree that already
+          # contains vendor material. Only the provisioning README may exist.
+          if [ -L docs/mibs ] || [ ! -d docs/mibs ] || \
+             [ -n "$(find docs/mibs -mindepth 1 ! -path docs/mibs/README.md -print -quit)" ] || \
+             [ -L docs/mibs/README.md ] || [ ! -f docs/mibs/README.md ]; then
+            echo 'docs/mibs must contain only a regular README.md; vendor MIBs are forbidden' >&2
+            exit 1
+          fi
           mkdir -p stage/licenses
-          cp web/fonts/LICENSE-*.txt stage/licenses/
+          cp web/fonts/LICENSE-*.txt web/LICENSE-Reicon.txt stage/licenses/
           if [ "${{ matrix.goos }}" = windows ]; then
             cp deploy/packaging/install-windows.ps1 deploy/packaging/update.ps1 \
-              deploy/packaging/uninstall.ps1 deploy/packaging/setup.bat stage/
+              deploy/packaging/uninstall.ps1 deploy/packaging/windows-deployment-common.ps1 \
+              deploy/packaging/setup.bat stage/
           fi
           sh deploy/packaging/validate-release-payload.sh "${{ matrix.goos }}" stage
           source_date_epoch=$(git show -s --format=%ct HEAD)

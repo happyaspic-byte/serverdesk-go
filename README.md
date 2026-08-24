@@ -1,10 +1,15 @@
 # serverdesk-go
 
-Stratus FT 인프라(everRun / ztC Edge / ztC Endurance)와 엣지 장비(NAS·PLC·프린터·Proxmox·일반 서버)를 한 화면에서 감시하는 단일 바이너리 모니터링 콘솔. Python 스택(everrun-poller + server-monitoring)을 하나의 Go 바이너리로 통합한 후속 프로젝트다.
+Stratus everRun / ztC Edge와 엣지 장비(NAS·PLC·프린터·Proxmox·일반 서버)를 한 화면에서 감시하는 읽기 전용 단일 바이너리 모니터링 콘솔. Python 스택(everrun-poller + server-monitoring)을 하나의 Go 바이너리로 통합한 후속 프로젝트다.
+
+> **지원 범위:** 현재 릴리스는 everRun/ztC Edge 모니터링용이다. ztC Endurance 화면 모델은
+> 설계·표시 호환용 프리뷰이며, Endurance SNMPv3/OPC UA/IPMI 수집은 아직 구현·실장비 인증되지
+> 않았다. 재부팅·종료·failover 같은 장비 관리 액션도 제공하지 않는다.
 
 - 백엔드: Go(stdlib-only) — 폴리(avcli/SNMP/SSH), SNMP 트랩 수신, 실측 가용성 트래커, 이벤트 로그
 - 프런트: Vanilla JS ES modules + CSS (빌드 단계 없음, embed.FS로 바이너리에 내장)
-- 외부 의존성 없음 — Go 툴체인만 있으면 된다
+- Go 코드 의존성: 표준 라이브러리만 사용한다. 단, 운영 수집에는 고객이 적법하게 제공한
+  Stratus AVCLI/JRE/MIB와 호스트의 OpenSSH 도구가 필요하며 공개 소스·릴리스에는 이를 포함하지 않는다.
 
 ## 빌드
 
@@ -33,7 +38,8 @@ cp config.example.json config.local.json   # secret:// 참조만 입력, chmod 6
   파일 기반 인증 정보가 바뀌면 다음 보호 요청에서 즉시 다시 읽고 기존 세션을 모두 폐기한다.
 - 장비 자격증명: 운영 설정은 `secret_policy=require-references`를 사용한다. 기존 평문 설정은
   `-migrate-secrets <directory>`로 참조형 설정과 보호된 credential 파일로 변환한다. Linux systemd
-  Credentials와 Windows machine-scoped DPAPI 절차는 [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md)에 있다.
+  Credentials, UI용 writable managed store, Windows machine-scoped DPAPI 절차는
+  [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md)에 있다.
 - 평문 HTTP는 루프백 주소에서만 기동한다. 외부 접속은 다음 중 하나로 보호한다.
   - 직접 HTTPS: `tls_cert_file`과 `tls_key_file`을 함께 설정하거나 `-tls-cert`/`-tls-key`를 사용한다.
   - 동일 호스트 TLS 역프록시: Serverdesk는 루프백에 유지하고, 프록시가 `X-Forwarded-Proto`와 실제
@@ -75,19 +81,24 @@ mode `0600`으로 관리된다. 장비 비밀은 config에 `secret://NAME` 참�
 
 ## Windows 고객 설치
 
+> **상용 배포 NO-GO:** 현재 Windows 패키지는 Scheduled Task를 `SYSTEM`으로 실행한다. 프로그램과
+> 상태 경로를 `Program Files`/`ProgramData`로 분리하고 LocalService 또는 전용 최소권한 계정으로
+> 전환한 뒤 실제 Windows Server에서 설치·업데이트·롤백·제거·DPAPI를 검증하기 전에는 판매 제품의
+> Windows 배포를 승인하지 않는다. 상세 조건은 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)에 있다.
+
 최초 설치는 입력 없이 설치별 관리자 자격증명을 생성해 `C:\serverdesk\initial-login.txt`에
 기록한다. 설치 디렉터리는 SYSTEM과 Administrators만 접근할 수 있다. 자격증명을 안전하게
 기록한 뒤 이 파일을 삭제하거나 비밀번호를 교체한다. 재설치는 기존 `auth.json`을 보존한다.
-번들 avcli는 `cmd.exe`나 배치 래퍼 없이 포함된 `java.exe`를 직접 실행한다.
+고객이 별도로 프로비저닝한 AVCLI는 `cmd.exe`나 배치 래퍼 없이 승인된 `java.exe`를 직접 실행한다.
+AVCLI/JRE/MIB는 저작권·라이선스 경계를 지키기 위해 공개 패키지에 번들하지 않는다.
 장비 credential은 `-migrate-secrets C:\serverdesk\credentials`로 machine-scoped DPAPI blob으로
 변환하고, config에는 `secret://NAME` 참조만 유지한다.
 
 ## 주요 기능
 
 - 토폴로지(회사→공장→장비 계층도, 팬/줌/핏), 플릿 개요, 클러스터/노드/용량/인시던트 화면
-- ztC Endurance 단일 2U 섀시 모델 — CM-A/B 물리 식별자와 Active/Standby 역할 분리, IP 플랜 11개,
-  서브시스템 이중화(Compute Active/Standby·Smart Exchange, Storage/I/O/PSU Active/Active)
-- 읽기 전용 BMC/IPMI·SNMP·OPC UA 수집 기준: [`docs/ENDURANCE-COLLECTION.md`](docs/ENDURANCE-COLLECTION.md)
+- ztC Endurance 단일 2U 섀시 표시 모델 프리뷰 — 실제 수집 지원이 아니며 신규 장비 등록 대상에서
+  제외된다. 향후 구현 기준은 [`docs/ENDURANCE-COLLECTION.md`](docs/ENDURANCE-COLLECTION.md)에 있다.
 - 경보 임계값(warn/crit %) 설정 화면 편집 — `PUT /api/admin/thresholds`, 즉시 라이브 반영
 - 설정 백업/복구 — `GET /api/admin/config/export`(자격증명 마스킹) / `POST /api/admin/config/import`
   (빈 자격증명은 기존 값 유지, 장비·수집 변경은 재시작 후 적용)
@@ -95,6 +106,8 @@ mode `0600`으로 관리된다. 장비 비밀은 config에 `secret://NAME` 참�
 - 공개 `/api/health`는 최소 상태만 반환하고, 인증된 `/api/admin/health`는 캐시·수집 티어·
   Edge worker·이벤트 저장 상태를 제공한다. `events.jsonl`은 최근 이력으로 자동 압축된다.
 - 대시보드 경보 Quick Ack — 서버 공유 상태(/ack)로 동기화
+- 서버 상주 critical 웹훅 — 브라우저가 닫혀 있어도 초기/복구/미확인 escalation을 재시작 안전 큐로 전송.
+  보호 저장·allowlist·retry/dead-letter/health 계약은 [`docs/NOTIFICATIONS.md`](docs/NOTIFICATIONS.md)에 있다.
 
 ## 개발
 
@@ -109,6 +122,9 @@ go vet ./... && go test ./...
 ## 라이선스 / 제작
 
 Roobicom (루비컴) — https://roobicom.co.kr. 이 저장소는 proprietary이며 공개 사용 허가는
-[`NOTICE`](NOTICE)를 따른다. 릴리스 검증 절차는 [`docs/RELEASE.md`](docs/RELEASE.md)에 있다.
+[`NOTICE`](NOTICE)를 따른다. 제3자 구성요소 고지는 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md),
+릴리스 검증 절차는 [`docs/RELEASE.md`](docs/RELEASE.md)에 있다.
 현재 production-readiness 점수와 남은 현장 검증 항목은
-[`docs/PRODUCTION-READINESS.md`](docs/PRODUCTION-READINESS.md)에 기록한다.
+[`docs/PRODUCTION-READINESS.md`](docs/PRODUCTION-READINESS.md)에 기록한다. 제품별 지원 범위는
+[`docs/SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md), 출시 현장 시험은
+[`docs/COMMERCIAL-UAT.md`](docs/COMMERCIAL-UAT.md)를 따른다.

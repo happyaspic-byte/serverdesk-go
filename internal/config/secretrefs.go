@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,12 +73,51 @@ func validateSecretPolicy(policy string) error {
 }
 
 func credentialDirectory() string {
-	// systemd sets CREDENTIALS_DIRECTORY to a private, read-only tmpfs for LoadCredential.
-	// Prefer it over the source/fallback directory when both are present.
-	if dir := strings.TrimSpace(os.Getenv("CREDENTIALS_DIRECTORY")); dir != "" {
-		return dir
+	// This helper is used only for writes. CREDENTIALS_DIRECTORY is systemd's
+	// private read-only LoadCredential mount and SERVERDESK_CREDENTIALS_DIRECTORY
+	// is a legacy read source; neither is ever a managed write destination.
+	return strings.TrimSpace(os.Getenv("SERVERDESK_CREDENTIALS_STORE"))
+}
+
+// managedCredentialDirectory is the daemon-writable, service-owned credential
+// store used for secrets entered through the authenticated management UI. It is
+// intentionally separate from systemd's CREDENTIALS_DIRECTORY, which is a
+// read-only tmpfs populated by LoadCredential. Without an explicit override the
+// store lives beside config.local.json (for packaged installs this is
+// /var/lib/serverdesk/credentials on Linux and C:\serverdesk\credentials on
+// Windows).
+func managedCredentialDirectory(configPath string) string {
+	if dir := strings.TrimSpace(os.Getenv("SERVERDESK_CREDENTIALS_STORE")); dir != "" {
+		return filepath.Clean(dir)
 	}
-	return strings.TrimSpace(os.Getenv("SERVERDESK_CREDENTIALS_DIRECTORY"))
+	if strings.TrimSpace(configPath) == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(filepath.Clean(configPath)), "credentials")
+}
+
+func credentialReadDirectories(managedDir string) []string {
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		dir = filepath.Clean(dir)
+		if !seen[dir] {
+			seen[dir] = true
+			dirs = append(dirs, dir)
+		}
+	}
+	// A reference written by the service must resolve from the same service-owned
+	// store after restart. Explicit SERVERDESK_* comes next, while systemd's
+	// ephemeral LoadCredential directory remains a read-only compatibility source.
+	add(managedDir)
+	add(os.Getenv("SERVERDESK_CREDENTIALS_STORE"))
+	add(os.Getenv("SERVERDESK_CREDENTIALS_DIRECTORY"))
+	add(os.Getenv("CREDENTIALS_DIRECTORY"))
+	return dirs
 }
 
 func validSecretName(name string) bool {
@@ -91,6 +132,89 @@ func validSecretName(name string) bool {
 	return true
 }
 
+func isManagedSecretName(name string) bool {
+	if !strings.HasPrefix(name, "serverdesk.managed.") {
+		return false
+	}
+	dot := strings.LastIndexByte(name, '.')
+	if dot < 0 || len(name)-dot-1 != 16 {
+		return false
+	}
+	_, err := hex.DecodeString(name[dot+1:])
+	return err == nil
+}
+
+func collectSecretReferences(value any, out map[string]bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, child := range typed {
+			collectSecretReferences(child, out)
+		}
+	case []any:
+		for _, child := range typed {
+			collectSecretReferences(child, out)
+		}
+	case string:
+		if name, referenced, err := secretReferenceName(typed); err == nil && referenced {
+			out[name] = true
+		}
+	}
+}
+
+func documentSecretReferences(doc map[string]json.RawMessage) map[string]bool {
+	out := map[string]bool{}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return out
+	}
+	var generic any
+	if json.Unmarshal(encoded, &generic) == nil {
+		collectSecretReferences(generic, out)
+	}
+	return out
+}
+
+func removeManagedCredentialNames(dir string, names []string) {
+	if strings.TrimSpace(dir) == "" {
+		return
+	}
+	for _, name := range names {
+		if isManagedSecretName(name) {
+			_ = removeCredentialFile(dir, name)
+		}
+	}
+}
+
+// cleanupManagedCredentialStore keeps both the current document and its
+// immediately previous (.bak) generation resolvable. Older service-generated
+// versions are removed only after the new config has been fsynced and renamed.
+// Externally provisioned names are never considered for deletion.
+func cleanupManagedCredentialStore(dir string, current, rollback map[string]json.RawMessage) error {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	keep := documentSecretReferences(current)
+	for name := range documentSecretReferences(rollback) {
+		keep[name] = true
+	}
+	names, err := listCredentialNames(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, name := range names {
+		if !isManagedSecretName(name) || keep[name] {
+			continue
+		}
+		if err := removeCredentialFile(dir, name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 func secretReferenceName(value string) (string, bool, error) {
 	if !strings.HasPrefix(value, secretReferencePrefix) {
 		return "", false, nil
@@ -102,7 +226,7 @@ func secretReferenceName(value string) (string, bool, error) {
 	return name, true, nil
 }
 
-func resolveSecretValue(value, policy, field string) (string, error) {
+func resolveSecretValueFrom(value, policy, field, managedDir string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
@@ -116,23 +240,32 @@ func resolveSecretValue(value, policy, field string) (string, error) {
 		}
 		return value, nil
 	}
-	dir := credentialDirectory()
-	if dir == "" {
-		return "", fmt.Errorf("%s uses %s%s but no CREDENTIALS_DIRECTORY or SERVERDESK_CREDENTIALS_DIRECTORY is set", field, secretReferencePrefix, name)
+	dirs := credentialReadDirectories(managedDir)
+	if len(dirs) == 0 {
+		return "", fmt.Errorf("%s uses %s%s but no CREDENTIALS_DIRECTORY-compatible source is configured (set writable SERVERDESK_CREDENTIALS_STORE, legacy SERVERDESK_CREDENTIALS_DIRECTORY, or systemd CREDENTIALS_DIRECTORY)", field, secretReferencePrefix, name)
 	}
-	secret, err := readCredentialFile(dir, name)
-	if err != nil {
-		return "", fmt.Errorf("%s (%s%s): %w", field, secretReferencePrefix, name, err)
+	var lastErr error
+	for _, dir := range dirs {
+		secret, err := readCredentialFile(dir, name)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if secret == "" {
+			return "", fmt.Errorf("%s (%s%s): credential is empty", field, secretReferencePrefix, name)
+		}
+		return secret, nil
 	}
-	if secret == "" {
-		return "", fmt.Errorf("%s (%s%s): credential is empty", field, secretReferencePrefix, name)
-	}
-	return secret, nil
+	return "", fmt.Errorf("%s (%s%s): %w", field, secretReferencePrefix, name, lastErr)
 }
 
-func resolveConfigSecrets(c *Config) error {
+func resolveSecretValue(value, policy, field string) (string, error) {
+	return resolveSecretValueFrom(value, policy, field, "")
+}
+
+func resolveConfigSecrets(c *Config, managedDir string) error {
 	resolve := func(dst *string, field string) error {
-		value, err := resolveSecretValue(*dst, c.SecretPolicy, field)
+		value, err := resolveSecretValueFrom(*dst, c.SecretPolicy, field, managedDir)
 		if err != nil {
 			return err
 		}
@@ -140,6 +273,9 @@ func resolveConfigSecrets(c *Config) error {
 		return nil
 	}
 	if err := resolve(&c.SNMPCommunity, "snmp_community"); err != nil {
+		return err
+	}
+	if err := resolve(&c.Notifications.WebhookURL, "notifications.webhook_url"); err != nil {
 		return err
 	}
 	if c.Trap.Community != nil {
@@ -192,6 +328,12 @@ func resolveConfigSecrets(c *Config) error {
 // hot-added at runtime. Plaintext values are intentionally left unchanged here;
 // Store.AddEntry separately converts them to references before persistence.
 func ResolveEdgeDeviceSecretReferences(device *EdgeDevice) error {
+	return ResolveEdgeDeviceSecretReferencesFrom(device, "")
+}
+
+// ResolveEdgeDeviceSecretReferencesFrom resolves explicit references for a
+// hot-added device against the same managed store used by Store.AddEntry.
+func ResolveEdgeDeviceSecretReferencesFrom(device *EdgeDevice, managedDir string) error {
 	if device == nil {
 		return errors.New("edge device is nil")
 	}
@@ -205,7 +347,7 @@ func ResolveEdgeDeviceSecretReferences(device *EdgeDevice) error {
 		{&device.Password, prefix + ".password"},
 		{&device.BmcPassword, prefix + ".bmc_password"},
 	} {
-		value, err := resolveSecretValue(*target.value, SecretPolicyAllowPlaintext, target.name)
+		value, err := resolveSecretValueFrom(*target.value, SecretPolicyAllowPlaintext, target.name, managedDir)
 		if err != nil {
 			return err
 		}
@@ -214,12 +356,20 @@ func ResolveEdgeDeviceSecretReferences(device *EdgeDevice) error {
 	return nil
 }
 
+// ResolveNotificationWebhookReference resolves an explicitly supplied
+// secret:// webhook value for a live settings update. Plaintext remains in
+// memory only; Store persists it as a versioned managed reference.
+func ResolveNotificationWebhookReference(value, managedDir string) (string, error) {
+	return resolveSecretValueFrom(value, SecretPolicyAllowPlaintext, "notifications.webhook_url", managedDir)
+}
+
 var protectedSecretKeys = map[string]bool{
 	"password": true, "passwd": true, "root_password": true,
 	"admin_password": true, "node_root_password": true, "web_password": true,
 	"bmc_password": true, "community": true, "snmp_community": true,
 	"trap_community": true, "secret": true, "token": true,
 	"api_key": true, "private_key": true,
+	"webhook_url": true,
 }
 
 func pathIdentity(value any, index int) string {
@@ -233,10 +383,10 @@ func pathIdentity(value any, index int) string {
 	return fmt.Sprintf("item-%d", index)
 }
 
-func secretNameForPath(path []string) string {
+func secretNameForPath(path []string) (string, error) {
 	joined := strings.Join(path, ".")
 	var b strings.Builder
-	b.WriteString("serverdesk.")
+	b.WriteString("serverdesk.managed.")
 	lastDot := false
 	for _, r := range strings.ToLower(joined) {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' {
@@ -247,11 +397,16 @@ func secretNameForPath(path []string) string {
 			lastDot = true
 		}
 	}
-	name := strings.Trim(b.String(), ".")
-	if len(name) > 128 {
-		name = name[:128]
+	base := strings.Trim(b.String(), ".")
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate credential version: %w", err)
 	}
-	return name
+	suffix := "." + hex.EncodeToString(random[:])
+	if len(base)+len(suffix) > 128 {
+		base = base[:128-len(suffix)]
+	}
+	return base + suffix, nil
 }
 
 func protectDocumentSecrets(value any, path []string, secretDir string, result *MigrationResult) error {
@@ -278,9 +433,15 @@ func protectDocumentSecrets(value any, path []string, secretDir string, result *
 				} else if referenced {
 					continue
 				}
-				name := secretNameForPath(childPath)
+				name, err := secretNameForPath(childPath)
+				if err != nil {
+					return err
+				}
 				if strings.TrimSpace(secretDir) == "" {
-					return fmt.Errorf("%s contains plaintext but no CREDENTIALS_DIRECTORY or SERVERDESK_CREDENTIALS_DIRECTORY is set", strings.Join(childPath, "."))
+					return fmt.Errorf("%s contains plaintext but no writable SERVERDESK_CREDENTIALS_STORE is set", strings.Join(childPath, "."))
+				}
+				if err := ensureCredentialDirectory(secretDir); err != nil {
+					return fmt.Errorf("prepare managed credential store: %w", err)
 				}
 				if err := writeCredentialFile(secretDir, name, plain); err != nil {
 					return fmt.Errorf("write credential %s: %w", name, err)
@@ -306,6 +467,12 @@ func protectDocumentSecrets(value any, path []string, secretDir string, result *
 }
 
 func protectRequiredRawDocument(doc map[string]json.RawMessage) error {
+	_, err := protectRequiredRawDocumentAt(doc, credentialDirectory())
+	return err
+}
+
+func protectRequiredRawDocumentAt(doc map[string]json.RawMessage, managedDir string) (MigrationResult, error) {
+	var result MigrationResult
 	var policy string
 	if raw, ok := doc["secret_policy"]; ok {
 		_ = json.Unmarshal(raw, &policy)
@@ -314,35 +481,34 @@ func protectRequiredRawDocument(doc map[string]json.RawMessage) error {
 		policy = SecretPolicyRequireReferences
 	}
 	if err := validateSecretPolicy(policy); err != nil {
-		return err
+		return result, err
 	}
 	if policy != SecretPolicyRequireReferences {
-		return nil
+		return result, nil
 	}
 	encoded, err := json.Marshal(doc)
 	if err != nil {
-		return err
+		return result, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.UseNumber()
 	var generic map[string]any
 	if err := decoder.Decode(&generic); err != nil {
-		return err
+		return result, err
 	}
-	var result MigrationResult
-	if err := protectDocumentSecrets(generic, nil, credentialDirectory(), &result); err != nil {
-		return err
+	if err := protectDocumentSecrets(generic, nil, managedDir, &result); err != nil {
+		return result, err
 	}
 	if result.Count == 0 {
-		return nil
+		return result, nil
 	}
 	protected, err := json.Marshal(generic)
 	if err != nil {
-		return err
+		return result, err
 	}
 	var replacement map[string]json.RawMessage
 	if err := json.Unmarshal(protected, &replacement); err != nil {
-		return err
+		return result, err
 	}
 	for key := range doc {
 		delete(doc, key)
@@ -350,7 +516,7 @@ func protectRequiredRawDocument(doc map[string]json.RawMessage) error {
 	for key, value := range replacement {
 		doc[key] = value
 	}
-	return nil
+	return result, nil
 }
 
 // MigratePlaintextSecrets atomically replaces plaintext secret fields with secret:// references.
@@ -466,7 +632,7 @@ func MigratePlaintextSecrets(configPath, secretDir string) (MigrationResult, err
 	if err != nil || !os.SameFile(tmpInfo, pathInfo) || !pathInfo.Mode().IsRegular() {
 		return result, errors.New("migrated config temporary file changed before replace")
 	}
-	if err := os.Rename(tmp, cleanPath); err != nil {
+	if err := replaceConfigFile(tmp, cleanPath); err != nil {
 		return result, fmt.Errorf("replace migrated config: %w", err)
 	}
 	committed = true

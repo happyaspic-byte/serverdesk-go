@@ -191,6 +191,8 @@
 .sc-mng-type.is-sel .sc-mng-type-ico,
 .sc-mng-type-ico.is-sel{ background:var(--accent-deep); border-color:var(--accent-deep); color:var(--accent-ink); }
 .sc-mng-type-lab{ font-size:var(--fs-12); font-weight:var(--fw-bold); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sc-mng-type-plan{ font-size:10px; color:var(--muted); line-height:1.2; white-space:normal; }
+.sc-mng-type:disabled{ cursor:not-allowed; opacity:.68; border-style:dashed; }
 
 .sc-mng-typechip{
   display:inline-flex; align-items:center; gap:var(--sp-2); padding:5px var(--sp-3) 5px 5px;
@@ -215,6 +217,10 @@
 }
 
 .sc-mng-vmrow{ display:grid; grid-template-columns:1fr 1fr auto; gap:var(--sp-2); margin-bottom:6px; }
+.sc-mng-delete-impact{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px 14px;
+  margin:0; padding:12px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface-2); }
+.sc-mng-delete-impact dt{ color:var(--muted); font-size:var(--fs-12); }
+.sc-mng-delete-impact dd{ margin:0; color:var(--ink); font-size:var(--fs-12); font-weight:var(--fw-semi); text-align:right; }
 .sc-mng-vmadd{ margin-top:2px; }
 
 /* ── ④ 확인 요약 ─────────────────────────────────────────────────────── */

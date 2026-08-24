@@ -5,7 +5,7 @@
 
 import { isFT, isNoTel, deriveStatus, deriveSync } from '../data.js';
 import { _meta, _arr, _strHash, DASH, makeL, SEV_RANK, STALE_ALERT_DAYS, sevInfo } from './base.js';
-import { tsNorm, tsKey, agoSec, agoText, shortTime, _nowStamp, _todayStr } from './time.js';
+import { tsNorm, ackTimeNorm, tsKey, agoSec, agoText, shortTime, _nowStamp, _todayStr } from './time.js';
 
 /* ===========================================================================
  * 6. 경보/트랩 수집 (Vigil buildModel.ts liveAlerts/liveTraps)
@@ -116,8 +116,8 @@ function collectAlerts(fleet, L) {
         // #365: ack 키의 시각 재료는 표시용 time 과 분리한다 — time 결측이면 세션 로컬
         // onset 대신 고정값(ACK_TIME_MISSING)이라 리로드·다중 콘솔 간에도 키가 같다.
         ackTime: synState
-          ? (tsNorm(m.downSince) || tsNorm(m.issueSince) || ACK_TIME_MISSING)
-          : (tNorm || ACK_TIME_MISSING),
+          ? ackTimeNorm(m.downSince || m.issueSince)
+          : ackTimeNorm(a.time),
         // 검증용 임시 픽스처 호스트는 플래그만 세운다(#31) — decorate(::testFixture)를 거쳐
         // 화면 카드 목록·CSV 가 걸러내고, 카운트·판정 파생(realAlerts)도 같은 플래그로 뺀다(#265).
         testFixture: TEST_FIXTURE_RE.test(s.id),
@@ -139,7 +139,7 @@ function collectAlerts(fleet, L) {
         time: tsNorm(m.downSince) || onset(s.id, 'down'),
         // #398: ack 키 재료 — 폴리 안정 원천(downSince)이 있으면 그것을 써 다음 번 다운과
         // 사건이 구분되고, 없으면 고정값으로 낸다(세션 onset 폴핵은 리로드 시 확인 소실).
-        ackTime: tsNorm(m.downSince) || ACK_TIME_MISSING,
+        ackTime: ackTimeNorm(m.downSince),
         testFixture: TEST_FIXTURE_RE.test(s.id),
       });
     } else if (s.status === 'deg' && !al.length) {
@@ -149,7 +149,7 @@ function collectAlerts(fleet, L) {
         desc: 'Device degraded — redundancy lost or a node is not normal',
         time: tsNorm(m.issueSince) || onset(s.id, 'deg'),
         // #398: down 분기와 같은 계약 — issueSince 우선, 없으면 고정값.
-        ackTime: tsNorm(m.issueSince) || ACK_TIME_MISSING,
+        ackTime: ackTimeNorm(m.issueSince),
         testFixture: TEST_FIXTURE_RE.test(s.id),
       });
     }

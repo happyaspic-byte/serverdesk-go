@@ -1,82 +1,96 @@
-# Device credential storage
+# Device and webhook credential storage
 
-Serverdesk never needs device passwords in the repository or in `config.local.json`.
-Production configurations set `"secret_policy": "require-references"` and use
-`secret://NAME` values. The process resolves those names only in memory.
+Production configurations use `"secret_policy": "require-references"`. Device passwords,
+communities, and notification webhook URLs are persisted only as `secret://NAME` references and
+resolved in process memory.
 
-## One-time migration
+## Managed writable store
 
-Stop Serverdesk, back up the state volume, and run:
+The packaged Linux unit sets:
 
-```bash
-sudo /opt/serverdesk/serverdesk \
-  -c /var/lib/serverdesk/config.local.json \
-  -migrate-secrets /etc/serverdesk/credentials
+```text
+SERVERDESK_CREDENTIALS_STORE=/var/lib/serverdesk/credentials
 ```
 
-The command:
+The installer creates that directory as `serverdesk:serverdesk` mode `0700`; credential files are
+mode `0600`. This lets the authenticated management UI enroll devices without persisting plaintext
+secrets in JSON. Values are protected by OS permissions rather than application encryption, so use
+full-disk encryption where that threat is in scope.
 
-1. creates credential files without group/other permissions;
-2. refuses to overwrite a credential with a different value;
-3. replaces live password/community fields with `secret://NAME` references;
-4. sets `secret_policy` to `require-references`; and
-5. preserves the original configuration as `config.local.json.pre-secrets.bak`.
+Windows uses the protected runtime directory's `credentials` child. Values are machine-scoped DPAPI
+blobs and the installer ACL permits only SYSTEM and Administrators. Copying a `.dpapi` file to
+another host does not make it decryptable there.
 
-Migration rejects symlink/non-regular config and backup paths, oversized or malformed JSON,
-unsafe credential values, and predictable temporary-file collisions. The atomic replacement
-preserves the original owner and mode and fsyncs both file and parent directory.
+## Directory contract
 
-It is idempotent. Store the backup offline and delete it from the server after verification,
-because the backup intentionally contains the pre-migration plaintext.
+Serverdesk separates the writable managed store from read-only credential providers:
 
-## Linux and systemd credentials
+| Variable | Purpose | Written by daemon | Resolution priority |
+| --- | --- | --- | --- |
+| `SERVERDESK_CREDENTIALS_STORE` | service-owned managed store for authenticated UI/API enrollment | yes | 1 |
+| `SERVERDESK_CREDENTIALS_DIRECTORY` | legacy credential source and migration compatibility | no | 2 |
+| `CREDENTIALS_DIRECTORY` | systemd `LoadCredential=` private runtime mount | never | 3 |
 
-The packaged unit can read the protected source directory through
-`SERVERDESK_CREDENTIALS_DIRECTORY`. For stronger runtime isolation, map every name printed by
-the migration command with a systemd drop-in:
+If `SERVERDESK_CREDENTIALS_STORE` is unset, the managed store is the `credentials` directory beside
+`config.local.json`. The daemon never creates or modifies files in either read-only source. Do not
+reuse a credential name across sources.
+
+## Authenticated management enrollment
+
+With `require-references`, an operator may submit a plaintext credential over the authenticated,
+same-origin HTTPS management API. The configuration store:
+
+1. creates a random, versioned `serverdesk.managed.*` name;
+2. writes the value to the protected managed store;
+3. fsyncs the credential and configuration temporary files;
+4. atomically replaces the config with a `secret://...` reference; and
+5. removes obsolete service-generated generations only after a durable config commit.
+
+If provisioning, serialization, fsync, or replacement fails before commit, newly created unreferenced
+generations are removed. If the visible rename succeeds but directory sync reports an error,
+Serverdesk keeps both old and new credential generations and continues with the visible config so
+runtime and disk do not diverge. Cleanup never deletes externally supplied names. Notification
+webhook paths follow the same path and are never returned by the settings API.
+
+## One-time plaintext migration
+
+Stop Serverdesk, back up the state volume, and run migration as the service identity:
+
+```bash
+sudo systemctl stop serverdesk
+sudo install -d -o serverdesk -g serverdesk -m 0700 /var/lib/serverdesk/credentials
+sudo -u serverdesk /opt/serverdesk/serverdesk \
+  -c /var/lib/serverdesk/config.local.json \
+  -migrate-secrets /var/lib/serverdesk/credentials
+```
+
+The command converts live secret fields to references, enables `require-references`, and preserves
+the original as `config.local.json.pre-secrets.bak`. That backup contains the old plaintext: move it
+offline and remove it from the host after validation. Migration rejects symlink/non-regular,
+oversized, malformed, or unsafe input and conflicting existing credentials.
+
+## Optional systemd read-only credentials
+
+Externally provisioned credentials may remain root-owned and be exposed read-only with a drop-in:
 
 ```ini
 [Service]
-LoadCredential=serverdesk.clusters.ft-a.admin_password:/etc/serverdesk/credentials/serverdesk.clusters.ft-a.admin_password
+LoadCredential=vendor.ft-a.admin_password:/etc/serverdesk/credentials/vendor.ft-a.admin_password
 ```
 
-Repeat `LoadCredential=` for each printed `CREDENTIAL=...` line, then run:
+Use `LoadCredentialEncrypted=` and `systemd-creds encrypt` where supported, then run
+`systemctl daemon-reload` and restart Serverdesk. UI-created or rotated credentials always go to
+`SERVERDESK_CREDENTIALS_STORE`.
+
+To create a managed value without placing it in argv or JSON, stop the service and send the value on
+standard input with a trailing newline:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl restart serverdesk
-```
-
-To enroll or rotate one credential without ever placing its value in argv or JSON, stop the
-service and send the value on standard input (a trailing newline is required):
-
-```bash
-sudo /opt/serverdesk/serverdesk \
+sudo -u serverdesk /opt/serverdesk/serverdesk \
   -set-device-secret serverdesk.pve-a.password-v2 \
-  -credentials-dir /etc/serverdesk/credentials
+  -credentials-dir /var/lib/serverdesk/credentials
 ```
 
-Add the printed `secret://...` reference to the device form/config and add the corresponding
-`LoadCredential=` line before restarting. The command is create-only and refuses to replace a
-different existing value; rotation therefore always gets a new versioned name.
-
-When systemd supplies `CREDENTIALS_DIRECTORY`, Serverdesk prefers its private read-only runtime
-directory over the source directory. Use `LoadCredentialEncrypted=` and `systemd-creds encrypt`
-where the host supports encrypted systemd credentials.
-
-## Windows DPAPI
-
-On Windows, the same migration command stores each credential as a machine-scoped DPAPI blob
-(`NAME.dpapi`). Only processes running on that Windows installation with sufficient local access
-can ask DPAPI to decrypt it. The installer ACL restricts the credential directory to SYSTEM and
-Administrators. Copying a `.dpapi` file to another host does not make it decryptable there.
-
-Set `SERVERDESK_CREDENTIALS_DIRECTORY` for the scheduled task/service to the directory passed to
-`-migrate-secrets`. Do not convert the DPAPI files back into environment-variable passwords.
-
-## Rotation and rollback
-
-To rotate a device credential, stop the service, create a new credential name, update the
-corresponding `secret://NAME` reference atomically, and restart. Keeping the old name until the
-new configuration passes `-once` provides a quick rollback. Never edit the systemd runtime
-`CREDENTIALS_DIRECTORY`; change its source and restart the unit instead.
+The operation is create-only. Rotation uses a new versioned name; retain the prior generation until
+the new configuration passes validation. Back up the config and managed credential directory
+together—a `secret://` reference cannot recover its missing value.

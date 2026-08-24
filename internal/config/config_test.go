@@ -84,7 +84,7 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("trap.community = %v", c.Trap.Community)
 	}
 	if c.Trap.Bind != "0.0.0.0" || c.Trap.Persist != "traps.jsonl" ||
-		c.Trap.Ring != 500 || c.Trap.ViewMax != 50 || c.Trap.MibDir != "docs/mibs" {
+		c.Trap.Ring != 500 || c.Trap.ViewMax != 50 || c.Trap.MibDir != "mibs" {
 		t.Errorf("trap defaults wrong: %+v", c.Trap)
 	}
 	if c.Path != "testdata/config.json" {
@@ -294,10 +294,16 @@ func TestCheckPerms(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := CheckPerms(p); err == nil {
-		t.Error("0644 should warn")
+		t.Error("0644 should fail")
 	}
-	if err := CheckPerms(filepath.Join(dir, "missing.json")); err != nil {
-		t.Errorf("missing file: %v (poller.py 는 OSError 를 삼킨다)", err)
+	if err := os.Chmod(p, 0o620); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPerms(p); err == nil {
+		t.Error("0620 group-writable config should fail")
+	}
+	if err := CheckPerms(filepath.Join(dir, "missing.json")); err == nil {
+		t.Error("missing config should fail closed")
 	}
 }
 
@@ -312,12 +318,29 @@ proc /proc proc rw,nosuid,nodev,noexec,relatime,hidepid=2 0 0
 	if got := parseProcMounts(subset); got != "subset=pid" {
 		t.Errorf("subset=pid → %q", got)
 	}
+	const subsetFirst = "proc /proc proc rw,subset=pid,nosuid,hidepid=2,nodev 0 0\n"
+	if got := parseProcMounts(subsetFirst); got != "2" {
+		t.Errorf("subset before hidepid must prefer hidepid: got %q", got)
+	}
 	const plain = "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
 	if got := parseProcMounts(plain); got != "" {
 		t.Errorf("no hidepid → %q, want empty", got)
 	}
 	if got := parseProcMounts(""); got != "" {
 		t.Errorf("empty → %q", got)
+	}
+}
+
+func TestProtectedProcModeRejectsSubsetOnly(t *testing.T) {
+	for _, mode := range []string{"1", "2", "4", "noaccess", "invisible", "ptraceable"} {
+		if !protectedProcMode(mode) {
+			t.Errorf("hidepid mode %q should protect cmdline", mode)
+		}
+	}
+	for _, mode := range []string{"", "0", "subset=pid"} {
+		if protectedProcMode(mode) {
+			t.Errorf("proc mode %q must not be treated as argv protection", mode)
+		}
 	}
 }
 

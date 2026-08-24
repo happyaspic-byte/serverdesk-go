@@ -133,8 +133,11 @@ func BuildClusterViews(st *ClusterState, now time.Time) (map[string]any, topolog
 	health := avcli.SummarizeClusterHealth(snap.unit, snap.nodes, snap.vms,
 		snap.sgroups, snap.alerts, snap.license)
 
-	fastAge := st.Age("fast")
-	slowAge := st.Age("slow")
+	// Collection ages must describe the same locked snapshot as the device data.
+	// Reading ClusterState again here could observe Mark("fast") after snapshot()
+	// and falsely make a pre-success view look notification-ready.
+	fastAge := snapshotTierAge(snap, "fast", nowF)
+	slowAge := snapshotTierAge(snap, "slow", nowF)
 	// fast 티어가 주기의 3배 넘게 갱신되지 않으면 stale.
 	fastIV := float64(st.Cfg.Intervals.Fast)
 	stale := fastAge == nil || *fastAge > fastIV*3
@@ -199,7 +202,7 @@ func BuildClusterViews(st *ClusterState, now time.Time) (map[string]any, topolog
 		"collection": map[string]any{
 			"fast_age_secs":   fastAge,
 			"slow_age_secs":   slowAge,
-			"static_age_secs": st.Age("static"),
+			"static_age_secs": snapshotTierAge(snap, "static", nowF),
 			"errors":          errs,
 			"last_success":    lastOK,
 		},
@@ -220,6 +223,15 @@ func BuildClusterViews(st *ClusterState, now time.Time) (map[string]any, topolog
 		NICNetworkMap:   TypedNICNetworkMap(nicMap),
 	}
 	return view, typed
+}
+
+func snapshotTierAge(s snapshot, tier string, now float64) *float64 {
+	ts, ok := s.tierTS[tier]
+	if !ok {
+		return nil
+	}
+	age := round1(now - ts)
+	return &age
 }
 
 // --- 타입 뷰 변환기(topology 패키지 입력용) ----------------------------------

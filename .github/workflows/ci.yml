@@ -58,7 +58,7 @@ jobs:
             exit 1
           fi
       - name: Run Go tests with race detector and coverage
-        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+        run: go test -shuffle=on -race -covermode=atomic -coverprofile=coverage.out ./...
       - name: Enforce 80 percent Go statement coverage
         shell: bash
         run: |
@@ -66,12 +66,29 @@ jobs:
           echo "Go statement coverage: ${coverage}%"
           awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 80) exit 1 }'
       - name: Run JavaScript model tests
-        run: node --test web/tests/
+        run: node --test web/tests/*.test.mjs
       - name: Build Linux and Windows binaries
         shell: bash
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/serverdesk-linux ./cmd/serverdesk
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o /tmp/serverdesk-windows.exe ./cmd/serverdesk
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -exec=/bin/true ./...
+      - name: Parse PowerShell deployment scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem deploy/packaging/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Error ("{0}: {1}" -f $_.Name, ($errors -join '; '))
+            }
+          }
+          if ($failed) { exit 1 }
       - name: Validate deployment assets
         run: sh deploy/packaging/validate-deployment.sh
 

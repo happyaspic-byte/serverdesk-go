@@ -7,10 +7,146 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"net"
 	"runtime"
+	"strconv"
 	"strings"
 )
+
+const (
+	// Configuration values are bounded before they are ever converted to
+	// time.Duration or used to allocate in-memory rings. These are deliberately
+	// generous operational limits, not recommended values.
+	maxPollIntervalSeconds = 31 * 24 * 60 * 60
+	maxTimeoutSeconds      = 60 * 60
+	maxCacheRefreshSeconds = 60 * 60
+	maxHistoryPoints       = 10000
+	maxTrapRing            = 100000
+	maxTrapView            = 10000
+)
+
+func validateRange(name string, value, minimum, maximum int) error {
+	if value < minimum || value > maximum {
+		return fmt.Errorf("%s must be between %d and %d (got %d)", name, minimum, maximum, value)
+	}
+	return nil
+}
+
+func validateIntervals(prefix string, iv Intervals) error {
+	for _, item := range []struct {
+		name  string
+		value int
+	}{
+		{"fast", iv.Fast}, {"slow", iv.Slow}, {"static", iv.Static},
+		{"os", iv.OS}, {"snmp", iv.SNMP},
+	} {
+		if err := validateRange(prefix+item.name, item.value, 1, maxPollIntervalSeconds); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateListenAddress(listen string) error {
+	_, portText, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return fmt.Errorf("listen must be a host:port address (got %q)", listen)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return fmt.Errorf("listen port must be numeric (got %q)", portText)
+	}
+	return validateRange("listen port", port, 1, 65535)
+}
+
+func validateScalarConfig(c *Config) error {
+	if err := validateListenAddress(c.Listen); err != nil {
+		return err
+	}
+	for _, item := range []struct {
+		name  string
+		value int
+		max   int
+	}{
+		{"avcli_timeout", c.AvcliTimeout, maxTimeoutSeconds},
+		{"ssh_timeout", c.SSHTimeout, maxTimeoutSeconds},
+		{"http_timeout", c.HTTPTimeout, maxTimeoutSeconds},
+		{"cache_refresh", c.CacheRefresh, maxCacheRefreshSeconds},
+		{"history_points", c.HistoryPoints, maxHistoryPoints},
+	} {
+		if err := validateRange(item.name, item.value, 1, item.max); err != nil {
+			return err
+		}
+	}
+	if err := validateIntervals("intervals.", c.Intervals); err != nil {
+		return err
+	}
+	if err := validateRange("trap.port", c.Trap.Port, 1, 65535); err != nil {
+		return err
+	}
+	if err := validateRange("trap.ring", c.Trap.Ring, 1, maxTrapRing); err != nil {
+		return err
+	}
+	if err := validateRange("trap.view_max", c.Trap.ViewMax, 1, maxTrapView); err != nil {
+		return err
+	}
+	if c.Trap.ViewMax > c.Trap.Ring {
+		return fmt.Errorf("trap.view_max must not exceed trap.ring (got %d > %d)", c.Trap.ViewMax, c.Trap.Ring)
+	}
+	return nil
+}
+
+func validateDeviceKeysAndOverrides(c *Config) error {
+	seen := make(map[string]string, len(c.Clusters)+len(c.EdgeDevices))
+	claim := func(key, location string) error {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return fmt.Errorf("%s.key is required", location)
+		}
+		if previous, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate device key %q in %s and %s", key, previous, location)
+		}
+		seen[key] = location
+		return nil
+	}
+	for i := range c.Clusters {
+		cluster := &c.Clusters[i]
+		location := fmt.Sprintf("clusters[%d]", i)
+		if err := claim(cluster.Key, location); err != nil {
+			return err
+		}
+		if strings.TrimSpace(cluster.MgmtIP) == "" {
+			return fmt.Errorf("%s.mgmt_ip is required", location)
+		}
+		if err := validateRange(location+".history_points", cluster.HistoryPoints, 1, maxHistoryPoints); err != nil {
+			return err
+		}
+		if err := validateRange(location+".ssh_timeout", cluster.SSHTimeout, 1, maxTimeoutSeconds); err != nil {
+			return err
+		}
+		if err := validateIntervals(location+".intervals.", cluster.Intervals); err != nil {
+			return err
+		}
+	}
+	for i := range c.EdgeDevices {
+		device := &c.EdgeDevices[i]
+		location := fmt.Sprintf("edge_devices[%d]", i)
+		if err := claim(device.Key, location); err != nil {
+			return err
+		}
+		if device.Kind == "plc" {
+			if device.FinsPort != 0 {
+				if err := validateRange(location+".fins_port", device.FinsPort, 1, 65535); err != nil {
+					return err
+				}
+			}
+			if device.FinsSrcNode < 0 || device.FinsSrcNode > 254 {
+				return fmt.Errorf("%s.fins_src_node must be between 0 and 254 (got %d)", location, device.FinsSrcNode)
+			}
+		}
+	}
+	return nil
+}
 
 func validateAvcliExecutable(goos, bin string) error {
 	if goos != "windows" {
@@ -198,29 +334,41 @@ type Thresholds struct {
 	Crit float64 `json:"crit"`
 }
 
+// NotificationConfig is the server-resident critical alert destination. The
+// webhook URL normally contains a bearer token and is therefore persisted as a
+// secret:// reference by Store, never returned by the settings API.
+type NotificationConfig struct {
+	Enabled          bool   `json:"enabled"`
+	WebhookURL       string `json:"webhook_url,omitempty"`
+	EscalationHours  int    `json:"escalation_hours"`   // 0(disabled), 4, or 24
+	RetryMax         int    `json:"retry_max"`          // delivery attempts per event
+	RetryBaseSeconds int    `json:"retry_base_seconds"` // exponential backoff base
+}
+
 type Config struct {
-	SecretPolicy       string          `json:"secret_policy"` // require-references | allow-plaintext (마이그레이션 전용)
-	Listen             string          `json:"listen"`
-	TLSCertFile        string          `json:"tls_cert_file,omitempty"`       // 직접 HTTPS 리스너 인증서(PEM)
-	TLSKeyFile         string          `json:"tls_key_file,omitempty"`        // 직접 HTTPS 리스너 개인키(PEM)
-	AllowInsecureHTTP  bool            `json:"allow_insecure_http,omitempty"` // 비루프백 평문 호환 모드(break-glass, 운영 비권장)
-	LogLevel           string          `json:"log_level"`
-	AvcliBin           string          `json:"avcli_bin"`
-	AvcliArgs          []string        `json:"avcli_args"`
-	AvcliTimeout       int             `json:"avcli_timeout"`  // 초, 기본 90 — avcli 1콜 실측 15~40초의 상한
-	HistoryPoints      int             `json:"history_points"` // 기본 120
-	CacheRefresh       int             `json:"cache_refresh"`  // 초, 기본 5
-	RuntimeDir         string          `json:"runtime_dir"`
-	SSHTimeout         int             `json:"ssh_timeout"` // 초, 기본 20
-	SNMPEnabled        bool            `json:"snmp_enabled"`
-	SNMPCommunity      string          `json:"snmp_community,omitempty"`
-	Intervals          Intervals       `json:"intervals"`
-	Thresholds         Thresholds      `json:"thresholds"`           // warn/crit 사용률 임계값 %, 기본 78/90
-	Trap               TrapConfig      `json:"-"`                    // 스키마는 평면 trap_* 키(및 관용적으로 중첩 trap 객체) — Load 가 수동 해석
-	CORSAllowedOrigins []string        `json:"cors_allowed_origins"` // 비어 있으면 ACAO 미부여(드라이브바이 인벤토리 유출 방지)
-	HTTPTimeout        int             `json:"http_timeout"`         // 초, 기본 30 — 유휴/slowloris 차단
-	Clusters           []ClusterConfig `json:"clusters"`
-	EdgeDevices        []EdgeDevice    `json:"edge_devices"`
+	SecretPolicy       string             `json:"secret_policy"` // require-references | allow-plaintext (마이그레이션 전용)
+	Listen             string             `json:"listen"`
+	TLSCertFile        string             `json:"tls_cert_file,omitempty"`       // 직접 HTTPS 리스너 인증서(PEM)
+	TLSKeyFile         string             `json:"tls_key_file,omitempty"`        // 직접 HTTPS 리스너 개인키(PEM)
+	AllowInsecureHTTP  bool               `json:"allow_insecure_http,omitempty"` // 비루프백 평문 호환 모드(break-glass, 운영 비권장)
+	LogLevel           string             `json:"log_level"`
+	AvcliBin           string             `json:"avcli_bin"`
+	AvcliArgs          []string           `json:"avcli_args"`
+	AvcliTimeout       int                `json:"avcli_timeout"`  // 초, 기본 90 — avcli 1콜 실측 15~40초의 상한
+	HistoryPoints      int                `json:"history_points"` // 기본 120
+	CacheRefresh       int                `json:"cache_refresh"`  // 초, 기본 5
+	RuntimeDir         string             `json:"runtime_dir"`
+	SSHTimeout         int                `json:"ssh_timeout"` // 초, 기본 20
+	SNMPEnabled        bool               `json:"snmp_enabled"`
+	SNMPCommunity      string             `json:"snmp_community,omitempty"`
+	Intervals          Intervals          `json:"intervals"`
+	Thresholds         Thresholds         `json:"thresholds"`           // warn/crit 사용률 임계값 %, 기본 78/90
+	Notifications      NotificationConfig `json:"notifications"`        // 서버 상주 critical 웹훅
+	Trap               TrapConfig         `json:"-"`                    // 스키마는 평면 trap_* 키(및 관용적으로 중첩 trap 객체) — Load 가 수동 해석
+	CORSAllowedOrigins []string           `json:"cors_allowed_origins"` // 비어 있으면 ACAO 미부여(드라이브바이 인벤토리 유출 방지)
+	HTTPTimeout        int                `json:"http_timeout"`         // 초, 기본 30 — 유휴/slowloris 차단
+	Clusters           []ClusterConfig    `json:"clusters"`
+	EdgeDevices        []EdgeDevice       `json:"edge_devices"`
 
 	// Path 는 로드한 파일 경로다. Store 를 같은 파일에 대고 열 때 쓴다.
 	Path string `json:"-"`
@@ -290,6 +438,10 @@ func mergeIntervals(base Intervals, raw json.RawMessage) Intervals {
 // Parse 는 config JSON 바이트를 해석하고 기본값 채우기·클러스터 상속·
 // 자격증명 마스킹 등록까지 수행한다. 수집 대상이 없는 빈 배포도 허용한다.
 func Parse(data []byte) (*Config, error) {
+	return parseWithCredentialDirectory(data, "")
+}
+
+func parseWithCredentialDirectory(data []byte, managedDir string) (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("config JSON 파싱 실패: %w", err)
@@ -341,6 +493,33 @@ func Parse(data []byte) (*Config, error) {
 	if _, ok := top["http_timeout"]; !ok {
 		c.HTTPTimeout = 30
 	}
+	var notificationRaw map[string]json.RawMessage
+	if raw, ok := top["notifications"]; ok {
+		if err := json.Unmarshal(raw, &notificationRaw); err != nil {
+			return nil, fmt.Errorf("notifications must be an object: %w", err)
+		}
+		if notificationRaw == nil {
+			return nil, errors.New("notifications must be an object")
+		}
+	}
+	if _, ok := notificationRaw["retry_max"]; !ok {
+		c.Notifications.RetryMax = 5
+	}
+	if _, ok := notificationRaw["retry_base_seconds"]; !ok {
+		c.Notifications.RetryBaseSeconds = 5
+	}
+	if c.Notifications.EscalationHours != 0 && c.Notifications.EscalationHours != 4 && c.Notifications.EscalationHours != 24 {
+		return nil, errors.New("notifications.escalation_hours must be 0, 4, or 24")
+	}
+	if err := validateRange("notifications.retry_max", c.Notifications.RetryMax, 1, 20); err != nil {
+		return nil, err
+	}
+	if err := validateRange("notifications.retry_base_seconds", c.Notifications.RetryBaseSeconds, 1, 300); err != nil {
+		return nil, err
+	}
+	if c.Notifications.Enabled && strings.TrimSpace(c.Notifications.WebhookURL) == "" {
+		return nil, errors.New("notifications.webhook_url is required when notifications are enabled")
+	}
 	if _, ok := top["cors_allowed_origins"]; !ok {
 		c.CORSAllowedOrigins = []string{}
 	}
@@ -358,7 +537,7 @@ func Parse(data []byte) (*Config, error) {
 	// --- trap: 기본값 ← 평면 trap_* 키 ← 중첩 trap 객체 순으로 병합 ---
 	c.Trap = TrapConfig{
 		Enabled: true, Bind: "0.0.0.0", Port: 10162,
-		Persist: "traps.jsonl", Ring: 500, ViewMax: 50, MibDir: "docs/mibs",
+		Persist: "traps.jsonl", Ring: 500, ViewMax: 50, MibDir: "mibs",
 	}
 	var flat trapOverlay
 	if raw, ok := top["trap_enabled"]; ok {
@@ -416,15 +595,21 @@ func Parse(data []byte) (*Config, error) {
 			nested.apply(&c.Trap)
 		}
 	}
+	if err := validateScalarConfig(&c); err != nil {
+		return nil, fmt.Errorf("config error: %w", err)
+	}
 	if err := validateAvcliExecutable(runtime.GOOS, c.AvcliBin); err != nil {
 		return nil, err
 	}
 
-	// secret:// 참조는 검증과 worker 구성 전에 메모리에서만 실제 값으로 푼다.
-	// 원본 JSON과 Store RMW 문서에는 참조만 남으므로 API export/백업에도 평문이 없다.
-	if err := resolveConfigSecrets(&c); err != nil {
+	// Resolve explicit secret:// fields before applying inherited defaults. In
+	// particular, an omitted per-cluster SNMP community inherits the built-in
+	// "public" compatibility default; that generated value is not plaintext
+	// supplied by the configuration file and must not be rejected by the policy.
+	if err := resolveConfigSecrets(&c, managedDir); err != nil {
 		return nil, err
 	}
+	RegisterSecret(c.Notifications.WebhookURL)
 
 	// --- 클러스터 검증 + 최상위 값 상속(poller.py load_config 와 동일 규칙) ---
 	// FT 클러스터가 없는 빈 배포도 허용한다. 장비는 설치 후 UI에서 추가할 수 있다.
@@ -457,6 +642,16 @@ func Parse(data []byte) (*Config, error) {
 		}
 		cl.Intervals = iv
 
+	}
+	// Structural/numeric validation deliberately precedes secret resolution so a
+	// duplicate key or busy-loop interval is reported even when a credential
+	// provider is temporarily unavailable.
+	if err := validateDeviceKeysAndOverrides(&c); err != nil {
+		return nil, fmt.Errorf("config error: %w", err)
+	}
+
+	for i := range c.Clusters {
+		cl := &c.Clusters[i]
 		// 자격증명은 설정 파일에서만 읽는다(코드 하드코딩 금지). 전부 마스킹 대상.
 		RegisterSecret(cl.AdminPassword)
 		RegisterSecret(cl.NodeRootPassword)
@@ -481,11 +676,31 @@ func Parse(data []byte) (*Config, error) {
 
 // Load 는 path 의 JSON 파일을 읽어 Parse 하고, 파일 경로를 Config.Path 에 기록한다.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, _, err := readRegularConfig(path)
 	if err != nil {
 		return nil, fmt.Errorf("config 읽기 실패: %w", err)
 	}
-	c, err := Parse(data)
+	c, err := parseWithCredentialDirectory(data, managedCredentialDirectory(path))
+	if err != nil {
+		return nil, err
+	}
+	c.Path = path
+	return c, nil
+}
+
+// LoadSecure is the daemon startup boundary. In addition to bounded,
+// non-symlink reading it requires a private, single-link, owner-controlled
+// config file and directory on Unix. Development fixtures may use Load, but a
+// commercial service must never start from a locally replaceable config.
+func LoadSecure(path string) (*Config, error) {
+	data, info, err := readRegularConfig(path)
+	if err != nil {
+		return nil, fmt.Errorf("config 읽기 실패: %w", err)
+	}
+	if err := validateSecureConfigFile(path, info); err != nil {
+		return nil, err
+	}
+	c, err := parseWithCredentialDirectory(data, managedCredentialDirectory(path))
 	if err != nil {
 		return nil, err
 	}

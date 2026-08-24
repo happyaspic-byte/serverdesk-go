@@ -4,49 +4,56 @@ import (
 	"fmt"
 	"os"
 	"os/user"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 )
 
-// CheckPerms 는 비밀번호가 든 설정 파일이 group/other 에게 읽기·쓰기로 열여 있는지
-// 검사한다(poller.py check_config_perms: S_IROTH|S_IWOTH|S_IRGRP).
-// 느슨하면 nil 이 아닌 에러를 돌려주니 호출자가 warn 로그로 남기면 된다
-// (기동을 막지는 않는다 — poller.py 도 경고만 한다).
+// CheckPerms applies the same fail-closed startup permission contract used by
+// LoadSecure. Missing, linked, shared, or attacker-replaceable files are errors.
 func CheckPerms(path string) error {
-	// Windows 는 POSIX 권한 비트가 없어 Perm() 이 항상 느슨하게 보인다 — 점검 자체를 건너뛴다.
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	st, err := os.Stat(path)
+	st, err := os.Lstat(path)
 	if err != nil {
-		return nil
+		return fmt.Errorf("설정 파일 검사 실패: %w", err)
 	}
-	if st.Mode().Perm()&0o046 != 0 {
-		return fmt.Errorf("설정 파일 권한이 느슨합니다(chmod 600 권장): %s", path)
+	if !st.Mode().IsRegular() || st.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("설정 파일은 일반 비심볼릭 링크 파일이어야 합니다: %s", path)
 	}
-	return nil
+	return validateSecureConfigFile(path, st)
 }
 
-var hidepidRe = regexp.MustCompile(`\b(?:hidepid=(\w+)|subset=(\w+))`)
-
 // parseProcMounts 는 /proc/mounts 내용에서 /proc 의 hidepid/subset 마운트 옵션을
-// 읽는다. 없으면 "". poller.py 와 같이 첫 번째 /proc 엔트리만 본다.
+// 읽는다. hidepid는 옵션 순서와 무관하게 subset보다 우선한다. subset=pid는
+// top-level proc 파일만 줄일 뿐 다른 사용자의 cmdline을 숨기지 않아 진단값일 뿐이다.
 func parseProcMounts(content string) string {
 	for _, ln := range strings.Split(content, "\n") {
 		p := strings.Fields(ln)
 		if len(p) >= 4 && p[1] == "/proc" && p[2] == "proc" {
-			if m := hidepidRe.FindStringSubmatch(p[3]); m != nil {
-				if m[1] != "" {
-					return m[1]
+			var hidepid, subset string
+			for _, option := range strings.Split(p[3], ",") {
+				if value, ok := strings.CutPrefix(option, "hidepid="); ok && value != "" {
+					hidepid = value
 				}
-				return "subset=" + m[2]
+				if value, ok := strings.CutPrefix(option, "subset="); ok && value != "" {
+					subset = "subset=" + value
+				}
 			}
-			return ""
+			if hidepid != "" {
+				return hidepid
+			}
+			return subset
 		}
 	}
 	return ""
+}
+
+func protectedProcMode(mode string) bool {
+	switch mode {
+	case "1", "2", "4", "noaccess", "invisible", "ptraceable":
+		return true
+	default:
+		return false
+	}
 }
 
 func procHidepid() string {
@@ -114,7 +121,7 @@ func evalArgvExposure(hidepid string, protected bool, others []string, allow boo
 		shown = shown[:5]
 	}
 	msg := fmt.Sprintf("보안: avcli 호출 시 EAC admin 암호가 명령행에 노출되는데 /proc 에 "+
-		"hidepid=2(또는 subset=pid)가 없고 다른 로그인 계정이 존재합니다(%s). "+
+		"cmdline을 보호하는 hidepid가 없고 다른 로그인 계정이 존재합니다(%s). "+
 		"이 호스트의 임의 사용자가 `ps -eo args` 로 암호를 읽을 수 있습니다. "+
 		"hidepid=2 로 /proc 을 재마운트하고 폴러 전용 UID 를 쓰십시오.", strings.Join(shown, ", "))
 	if allow {
@@ -138,6 +145,6 @@ func CheckArgvExposure(allow bool) (warn string, err error) {
 		return "", nil
 	}
 	hp := procHidepid()
-	protected := hp == "2" || hp == "invisible" || hp == "ptraceable" || hp == "subset=pid"
+	protected := protectedProcMode(hp)
 	return evalArgvExposure(hp, protected, otherLocalUsers(), allow)
 }

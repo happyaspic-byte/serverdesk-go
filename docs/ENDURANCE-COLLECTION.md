@@ -1,5 +1,9 @@
 # ztC Endurance 정보 수집 가이드
 
+> **구현 상태: 계획/설계 문서.** 현재 Serverdesk 릴리스에는 이 문서의 Endurance
+> SNMPv3, OPC UA, IPMI/Redfish 수집기가 구현되어 있지 않으며 실장비 지원 인증도 완료되지
+> 않았다. 이 문서를 현재 제품 지원 선언이나 설치 절차로 사용하지 않는다.
+
 이 문서는 ztC Endurance의 시스템 상태와 각 Compute Module의 BMC 상태를 읽기 전용으로 수집하기 위한 운영 기준이다. 실제 주소, 계정, 비밀번호, 일련번호는 문서나 Git에 기록하지 않는다.
 
 ## 1. 주소와 계정의 역할

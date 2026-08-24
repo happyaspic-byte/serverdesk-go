@@ -24,7 +24,7 @@ export function L(en, ko) {
 export const COLOR = Object.freeze({
   pos: '#3A7A4E',
   posBright: '#5FA86F',
-  warn: '#B07400',
+  warn: '#7A5200',
   warnBright: '#D89A2B',
   neg: '#C0453E',
   info: '#B85C33',

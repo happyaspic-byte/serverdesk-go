@@ -94,6 +94,8 @@
   display:flex; align-items:center; justify-content:center;
 }
 .sc-inc-empty-title{ font-size:var(--fs-13); font-weight:700; color:var(--ink); }
+.sc-inc-empty-sub{ max-width:360px; font-size:var(--fs-12); line-height:1.5; }
+.sc-inc-empty-add{ margin-top:4px; }
 
 /* ---- 리스트: 하나의 표면 안에서 얇은 구분선으로 이어지는 행 계층 ---- */
 .sc-inc-list{ display:flex; flex-direction:column; gap:0; overflow:hidden; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md); }

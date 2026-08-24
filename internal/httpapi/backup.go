@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"serverdesk/internal/config"
 	"serverdesk/internal/poller"
@@ -233,11 +234,16 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 		s.send(w, r, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	uiState, err := s.Gate.ExportUIStateWithError()
+	if err != nil {
+		s.send(w, r, 500, map[string]any{"error": "콘솔 상태 읽기 실패: " + err.Error()})
+		return
+	}
 	out := map[string]any{
 		"schema":      backupSchema,
 		"exported_at": time.Now().UTC().Format(time.RFC3339),
 		"config":      redactSecrets(plain),
-		"ui":          s.Gate.ExportUIState(),
+		"ui":          uiState,
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="serverdesk-backup-`+time.Now().Format("20060102")+`.json"`)
 	s.send(w, r, 200, out)
@@ -254,9 +260,18 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 		s.send(w, r, 400, map[string]any{"error": "JSON 본문이 필요합니다(최대 1MB)"})
 		return
 	}
+	if !utf8.Valid(body) {
+		s.send(w, r, 400, map[string]any{"error": "JSON 본문은 유효한 UTF-8이어야 합니다"})
+		return
+	}
 	var doc map[string]any
 	if err := json.Unmarshal(body, &doc); err != nil {
 		s.send(w, r, 400, map[string]any{"error": "JSON 파싱 실패: " + err.Error()})
+		return
+	}
+	reason, err := operatorReason(doc)
+	if err != nil {
+		s.send(w, r, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	if doc["schema"] != backupSchema {
@@ -348,9 +363,20 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	previousWarn, previousCrit := poller.UsageThresholds()
 	var previousUI map[string]any
 	if uiApplied {
-		previousUI = s.Gate.ExportUIState()
+		previousUI, err = s.Gate.ExportUIStateWithError()
+		if err != nil {
+			s.send(w, r, 500, map[string]any{"error": "기존 콘솔 상태 읽기 실패: " + err.Error()})
+			return
+		}
+	}
+	audit, err := s.prepareMutationAudit("config.restore", "configuration", reason)
+	if err != nil {
+		logf("error", "audit", fmt.Sprintf("설정 복구 감사 준비 실패: %v", err))
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "감사 기록 저장 실패 — 설정을 복구하지 않았습니다"})
+		return
 	}
 	if err := s.Store.CompareAndReplaceDoc(oldDoc, newRaw); err != nil {
+		_ = s.recordMutationAudit(audit, "failed")
 		if errors.Is(err, config.ErrConfigChanged) {
 			s.send(w, r, http.StatusConflict, map[string]any{
 				"error": "검증 중 설정이 변경되었습니다. 최신 백업을 다시 가져오세요",
@@ -370,18 +396,40 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 		if err := s.Gate.ImportUIState(ui); err != nil {
 			configRollbackErr := s.Store.CompareAndReplaceDoc(newRaw, oldDoc)
 			uiRollbackErr := s.Gate.ImportUIState(previousUI)
-			poller.SetThresholds(previousWarn, previousCrit)
+			if configRollbackErr == nil {
+				poller.SetThresholds(previousWarn, previousCrit)
+			}
 			if configRollbackErr != nil || uiRollbackErr != nil {
 				s.send(w, r, 500, map[string]any{
 					"error": "콘솔 상태 저장 실패 후 롤백도 실패했습니다",
 				})
 				return
 			}
+			_ = s.recordMutationAudit(audit, "rolled_back")
 			s.send(w, r, 500, map[string]any{
 				"error": "콘솔 상태 저장 실패 — 설정과 콘솔 상태를 이전 값으로 롤백했습니다",
 			})
 			return
 		}
+	}
+	if err := s.recordMutationAudit(audit, "committed"); err != nil {
+		configRollbackErr := s.Store.CompareAndReplaceDoc(newRaw, oldDoc)
+		var uiRollbackErr error
+		if uiApplied {
+			uiRollbackErr = s.Gate.ImportUIState(previousUI)
+		}
+		if configRollbackErr == nil {
+			poller.SetThresholds(previousWarn, previousCrit)
+		}
+		if configRollbackErr == nil && uiRollbackErr == nil {
+			_ = s.recordMutationAudit(audit, "rolled_back")
+			logf("error", "audit", fmt.Sprintf("설정 복구 감사 완료 실패로 롤백: %v", err))
+			s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "감사 기록 저장 실패 — 설정 복구를 롤백했습니다"})
+			return
+		}
+		logf("error", "audit", fmt.Sprintf("설정 복구 감사 실패 후 롤백도 실패: audit=%v config=%v ui=%v", err, configRollbackErr, uiRollbackErr))
+		s.send(w, r, http.StatusInternalServerError, map[string]any{"error": "감사 기록과 설정 복구 롤백에 실패했습니다 — 즉시 폴러 로그와 설정을 확인하세요"})
+		return
 	}
 	msg := "복구했습니다"
 	if len(changed) > 0 {

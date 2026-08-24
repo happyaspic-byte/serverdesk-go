@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -48,24 +50,31 @@ func (sf *stateFile) lock() func() {
 	}
 }
 
-// read 는 상태 파일을 읽는다. 파일이 없거나 깨졌거나 최상위가 객체가 아니면 빈 맵 —
-// Python 의 try/except 전부 {} 폴백과 같다(읽기 경로는 절대 실패로 응답하지 않는다).
-func (sf *stateFile) read() map[string]any {
+// read treats only a genuinely absent state file as empty. Permission, I/O,
+// corruption, and schema errors must remain visible so a later delta cannot
+// silently replace operator acknowledgements with a partial new map.
+func (sf *stateFile) read() (map[string]any, error) {
 	unlock := sf.lock()
 	defer unlock()
 	return sf.readLocked()
 }
 
-func (sf *stateFile) readLocked() map[string]any {
+func (sf *stateFile) readLocked() (map[string]any, error) {
 	data, err := os.ReadFile(sf.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]any{}, nil
+	}
 	if err != nil {
-		return map[string]any{}
+		return nil, fmt.Errorf("read operator state: %w", err)
 	}
 	var obj map[string]any
-	if json.Unmarshal(data, &obj) != nil || obj == nil {
-		return map[string]any{}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, fmt.Errorf("decode operator state: %w", err)
 	}
-	return obj
+	if obj == nil {
+		return nil, errors.New("decode operator state: top level must be an object")
+	}
+	return obj, nil
 }
 
 // update 는 락 안에서 읽기-병합-원자적 쓰기(tmp + rename)를 한 번에 한다.
@@ -73,18 +82,45 @@ func (sf *stateFile) readLocked() map[string]any {
 func (sf *stateFile) update(fn func(cur map[string]any) map[string]any) (map[string]any, error) {
 	unlock := sf.lock()
 	defer unlock()
-	merged := fn(sf.readLocked())
+	cur, err := sf.readLocked()
+	if err != nil {
+		return nil, err
+	}
+	merged := fn(cur)
 	if merged == nil {
 		merged = map[string]any{}
 	}
-	tmp := sf.path + ".tmp"
-	if err := os.WriteFile(tmp, marshalJSON(merged), 0644); err != nil {
+	dir := filepath.Dir(sf.path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(sf.path)+"-*")
+	if err != nil {
 		return nil, err
 	}
-	if err := os.Rename(tmp, sf.path); err != nil { // 원자적 교체 — 부분 기록 방지
-		os.Remove(tmp)
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		_ = tmp.Close()
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	// ACK, maintenance and hand-off notes are authenticated operator data.
+	// Keep them private from creation time instead of relying on a later chmod.
+	if err := tmp.Chmod(0o600); err != nil {
 		return nil, err
 	}
+	if _, err := tmp.Write(marshalJSON(merged)); err != nil {
+		return nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := replaceOperatorStateFile(tmpPath, sf.path); err != nil { // 같은 디렉터리 교체 — 부분 기록 방지
+		return nil, err
+	}
+	committed = true
 	return merged, nil
 }
 
@@ -110,7 +146,12 @@ func (s *Server) notesEndpoint() deltaEndpoint {
 
 // handleStateGet은 GET /ack·/maint·/notes 공통이다. 상위 로그인 미들웨어가 접근을 인증한다.
 func (s *Server) handleStateGet(w http.ResponseWriter, sf *stateFile) {
-	writeJSON(w, http.StatusOK, sf.read())
+	state, err := sf.read()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
 }
 
 // handleDeltaPut 은 PUT /ack·/maint·/notes 공통 핸들러다 — **델타 병합**이 기본이다.
@@ -202,18 +243,41 @@ func (s *Server) handleDeltaPut(w http.ResponseWriter, r *http.Request, ep delta
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(merged), "merged": isDelta})
 }
 
-// cleanAck — 값은 확인 시각(ISO 문자열)만 받는다: 임의 구조를 그대로 저장하지 않는다.
-// 상한 초과 시 '가장 최근 확인'을 남긴다. 삽입 순서로 자르면 몇 년 묵은 죽은 키가 남고
-// 방금 누른 확인이 조용히 버려진다(순서가 거꾸로) — 운영자에겐 '확인이 안 먹는다'로 보인다.
-// 값이 ISO 시각이라 문자열 내림차순 = 시간 내림차순이다.
+// cleanAck accepts both the legacy ISO timestamp string and the structured
+// {ts,by,reason} form. Unknown shapes and entries without a timestamp are
+// discarded rather than persisted as attacker-controlled arbitrary objects.
+// Values remain JSON data; rendering clients must continue to use textContent.
 func cleanAck(d map[string]any, cap int) map[string]any {
 	out := make(map[string]any, len(d))
 	for k, v := range d {
 		// 키도 잘라야 한다 — 값만 묶고 키를 무제한으로 두면 바디 캡 안에서 거대 키가
 		// 그대로 저장돼 파일이 부푼다(실측 100KB 키 수용).
-		out[stateKey(k, 300)] = truncateRunes(pyStr(v), 40)
+		switch typed := v.(type) {
+		case string:
+			if ts := truncateRunes(typed, 40); ts != "" {
+				out[stateKey(k, 300)] = ts
+			}
+		case map[string]any:
+			ts, _ := typed["ts"].(string)
+			ts = truncateRunes(ts, 40)
+			if ts == "" {
+				continue
+			}
+			by, _ := typed["by"].(string)
+			reason, _ := typed["reason"].(string)
+			out[stateKey(k, 300)] = map[string]any{
+				"ts":     ts,
+				"by":     truncateRunes(by, 80),
+				"reason": truncateRunes(reason, 500),
+			}
+		}
 	}
-	return keepNewest(out, func(v any) string { return pyStr(v) }, cap)
+	return keepNewest(out, func(v any) string {
+		if structured, ok := v.(map[string]any); ok {
+			return pyStr(structured["ts"])
+		}
+		return pyStr(v)
+	}, cap)
 }
 
 // cleanMaint — 값은 {until, note, by, ts} 창 객체만 받는다. until 없는 항목은 창이
@@ -350,13 +414,27 @@ func pyStr(v any) string {
 // 에스컬레이션을 영구 무력화할 수 있다. 그래서 클레임은 서버 시각으로 스탬프하고
 // TTL 이 지나면 자연 만료(재클레임 가능)시킨다. 만료는 클레임 시각 기준의 슬라이딩
 // 윈도우다 — 타인의 PUT 접촉으로는 갱신되지 않아야 선점이 영구화되지 않는다.
-// ExportUIState 는 콘솔 공유 상태(백업용)다. 웹훅 URL 은 브라우저 localStorage 에만
-// 있어 서버 상태가 아니라 제외다.
-func (s *Server) ExportUIState() map[string]any {
-	return map[string]any{
-		"ack": s.ack.read(), "maint": s.maint.read(),
-		"notes": s.notes.read(), "escal": s.escal.read(),
+// ExportUIState 는 콘솔 공유 상태(백업용)다. 서버 알림 설정과 webhook secret은
+// config·managed credential store에서 별도로 백업하므로 이 결과에 포함되지 않는다.
+func (s *Server) ExportUIStateWithError() (map[string]any, error) {
+	out := make(map[string]any, 4)
+	for name, sf := range map[string]*stateFile{
+		"ack": s.ack, "maint": s.maint, "notes": s.notes, "escal": s.escal,
+	} {
+		state, err := sf.read()
+		if err != nil {
+			return nil, fmt.Errorf("%s state: %w", name, err)
+		}
+		out[name] = state
 	}
+	return out, nil
+}
+
+// ExportUIState is kept for callers that cannot surface an error. New
+// security-sensitive paths must use ExportUIStateWithError.
+func (s *Server) ExportUIState() map[string]any {
+	state, _ := s.ExportUIStateWithError()
+	return state
 }
 
 // ImportUIState 는 ExportUIState 의 4키만 받아 교체한다(알 수 없는 키 무시).
@@ -394,7 +472,11 @@ func escalClaimExpired(iso string, now time.Time) bool {
 // handleEscalGet — GET 도 만료 클레임은 걸러서 돌려준다: 운영자가 보는 상태와 PUT 판단이
 // 갈리면 안 된다. 파일은 쓰지 않고 응답만 거른다(청소는 다음 PUT 이 한다).
 func (s *Server) handleEscalGet(w http.ResponseWriter) {
-	cur := s.escal.read()
+	cur, err := s.escal.read()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	now := time.Now()
 	live := make(map[string]any, len(cur))
 	for k, v := range cur {

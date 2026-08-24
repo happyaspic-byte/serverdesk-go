@@ -1,0 +1,20 @@
+-- Synthetic test fixture created by Roobicom. It contains no vendor MIB text.
+TEST-EDGE-LIKE-MIB DEFINITIONS ::= BEGIN
+
+testVendorRoot OBJECT IDENTIFIER ::= { enterprises 458 }
+testEdgeRoot OBJECT IDENTIFIER ::= { testVendorRoot 116 }
+ztCEdgeTrapId OBJECT IDENTIFIER ::= { testEdgeRoot 2 }
+ztCEdgeTrapData OBJECT IDENTIFIER ::= { testEdgeRoot 3 }
+
+ztCEdgeTrapDescription OBJECT-TYPE
+    SYNTAX OCTET STRING
+    ACCESS read-only
+    STATUS mandatory
+    ::= { ztCEdgeTrapData 1 }
+
+ztCEdgeNodeUnreachableTrap TRAP-TYPE
+    ENTERPRISE ztCEdgeTrapId
+    VARIABLES { ztCEdgeTrapDescription }
+    ::= 3
+
+END

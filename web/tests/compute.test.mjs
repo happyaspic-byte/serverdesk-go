@@ -11,7 +11,7 @@ import compute, {
   statusTone, statusLabel, statusAnim, pctTone, pctToneAlloc,
   typeIconOf, typeInfo, usageOf, syncInfo, isMaint, nodeMaint,
   fmtAvailN, fmtDowntimeYr, fmtUptimeD,
-  tsNorm, tsKey, agoSec, agoText, shortTime,
+  tsNorm, ackTimeNorm, ackTimestampKey, tsKey, agoSec, agoText, shortTime,
   parseLicDate, fmtLicDate, ddayText, licTone,
   SEV_RANK, STALE_ALERT_DAYS, sevInfo, histOf,
   sortRows,
@@ -98,7 +98,12 @@ test('8. tsNorm, tsKey, agoSec, agoText: 타임스탬프 파싱 및 경과 시�
   assert.equal(agoSec(pastIso), 120);
   assert.equal(agoText(120, L, true), '2분 전');
   assert.equal(agoText(120, L, false), '2m ago');
-  assert.equal(tsNorm('2025-01-01T00:00:00Z'), '2025-01-01 00:00:00');
+  assert.equal(tsNorm('2025-01-01T00:00:00Z'), '2025-01-01 09:00:00 KST');
+  assert.equal(ackTimeNorm('2025-01-01T00:00:00Z'), '2025-01-01 00:00:00');
+  assert.equal(ackTimeNorm(''), 'no-time');
+  assert.equal(ackTimestampKey('2025-01-01T01:00:00Z'), Date.parse('2025-01-01T01:00:00Z'));
+  assert.equal(ackTimestampKey({ ts: '2025-01-01T01:00:00Z', by: 'operator', reason: 'verified' }), Date.parse('2025-01-01T01:00:00Z'));
+  assert.equal(ackTimestampKey({ by: 'operator' }), 0);
   assert.ok(tsKey('2025-01-01 00:00:00') > 0);
 });
 

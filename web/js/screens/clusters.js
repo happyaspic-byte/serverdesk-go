@@ -169,9 +169,8 @@ export default {
     };
     root.addEventListener('click', s.onClick);
 
-    // 카드(role=button tabindex=0)의 키보드 활성화 — Enter/Space 로 클릭과 동일 동작(상세 진입).
-    // 테이블 행(data-cl-row, role=button tabindex=0)도 동일 패턴 — nodes.js 와 같은
-    // "행 클릭→상세" 화면 간 키보드 UX 를 맞춘다. Space 는 preventDefault 로 페이지 스크롤을 막는다.
+    // 카드(role=button tabindex=0)의 키보드 활성화. 테이블은 셀 안 네이티브
+    // 상세 버튼이 키보드 동작을 담당하므로 행 자체에 button role을 부여하지 않는다.
     s.onKeydown = (e) => {
       if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
       const card = e.target.closest('[data-cl-card]');
@@ -179,11 +178,6 @@ export default {
         e.preventDefault();
         ctx.goDetail(card.dataset.id);
         return;
-      }
-      const row = e.target.closest('[data-cl-row]');
-      if (row && root.contains(row)) {
-        e.preventDefault();
-        ctx.goDetail(row.dataset.clRow);
       }
     };
     root.addEventListener('keydown', s.onKeydown);
@@ -485,14 +479,13 @@ export default {
       // 기억해 새 DOM 의 같은 행으로 포커스를 복원한다.
       const prevActive = (document.activeElement && s.tbody.contains(document.activeElement))
         ? document.activeElement : null;
-      const prevRowId = prevActive ? prevActive.getAttribute('data-cl-row') : null;
+      const prevRow = prevActive && prevActive.closest ? prevActive.closest('[data-cl-row]') : null;
+      const prevRowId = prevRow ? prevRow.getAttribute('data-cl-row') : null;
       dom.clear(s.tbody);
       s.rowMap.clear();
       list.forEach((row) => {
         const cellsRef = {};
-        // 행 클릭→상세 패턴은 nodes 테이블과 동일 — role/tabindex 도 맞춰 키보드 접근을 보장한다
-        // (keydown 위임이 Enter/Space 를 클릭과 동일 동작으로 처리).
-        const tr = dom.el('tr', { 'data-cl-row': row.id, role: 'button', tabindex: '0' });
+        const tr = dom.el('tr', { 'data-cl-row': row.id });
 
         // 상태
         const tdStatus = dom.el('td', {}, [
@@ -509,16 +502,21 @@ export default {
         const typeIco = dom.el('span', {
           class: 'sc-cl-type-ico', title: typeName, 'aria-label': typeName,
         }, [iconFn(row.typeIcon || 'link', { size: 16 })]);
+        const detailBtn = dom.el('button', {
+          class: 'sc-cl-row-link', type: 'button',
+          'aria-label': ctx.L('Open ', '상세 열기: ') + (row.label || row.host || '') + ' — ' + (row.statusLabel || ''),
+        }, [dom.el('span', { class: 'sc-cl-name', text: row.label })]);
         const tdName = dom.el('td', {}, [
           dom.el('div', { class: 'u-row u-gap-sm' }, [
             typeIco,
             dom.el('div', { class: 'u-col' }, [
-              dom.el('span', { class: 'sc-cl-name', text: row.label }),
+              detailBtn,
               dom.el('span', { class: 'u-mono u-muted sc-cl-host', text: row.host }),
             ]),
           ]),
         ]);
         cellsRef.name = tdName.querySelector('.sc-cl-name');
+        cellsRef.detailBtn = detailBtn;
         cellsRef.host = tdName.querySelector('.sc-cl-host');
         cellsRef.typeIco = typeIco;
 
@@ -588,7 +586,7 @@ export default {
       // 파괴 전 포커스됐던 행이 새 DOM 에도 있으면 포커스 복원.
       if (prevRowId) {
         const restoredRow = s.rowMap.get(prevRowId);
-        if (restoredRow) restoredRow.tr.focus();
+        if (restoredRow) restoredRow.detailBtn.focus();
       }
     }
 
@@ -599,7 +597,7 @@ export default {
       c.tr.classList.toggle('is-sel', !!row.sel);
       // 키보드/스크린리더용 — 행 활성화(Enter/Space) 시 이동할 대상과 현재 상태를 이름으로 제공
       // (nodes.js 테이블 행 패턴 미러링).
-      c.tr.setAttribute('aria-label', (row.label || row.host || '') + ' — ' + (row.statusLabel || ''));
+      c.detailBtn.setAttribute('aria-label', ctx.L('Open ', '상세 열기: ') + (row.label || row.host || '') + ' — ' + (row.statusLabel || ''));
       const typeName = typeAccessibleLabel(row);
       c.typeIco.setAttribute('title', typeName);
       c.typeIco.setAttribute('aria-label', typeName);

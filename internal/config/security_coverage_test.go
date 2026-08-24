@@ -20,17 +20,64 @@ func secureCredentialDir(t *testing.T) string {
 	return dir
 }
 
+func TestLoadSecureRejectsReplaceableStartupConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	doc := []byte(`{"secret_policy":"allow-plaintext","clusters":[]}`)
+	if err := os.WriteFile(path, doc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSecure(path); err != nil {
+		t.Fatalf("secure 0600 config rejected: %v", err)
+	}
+	if err := os.Chmod(path, 0o620); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSecure(path); err == nil {
+		t.Fatal("group-writable startup config accepted")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config-link.json")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSecure(link); err == nil {
+		t.Fatal("symlink startup config accepted")
+	}
+	hard := filepath.Join(dir, "config-hard.json")
+	if err := os.Link(path, hard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSecure(path); err == nil {
+		t.Fatal("hard-linked startup config accepted")
+	}
+	if err := os.Remove(hard); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	if _, err := LoadSecure(path); err == nil {
+		t.Fatal("group-writable startup directory accepted")
+	}
+}
+
 func TestCredentialProviderSecurityBranches(t *testing.T) {
 	primary := secureCredentialDir(t)
 	fallback := secureCredentialDir(t)
 	t.Setenv("CREDENTIALS_DIRECTORY", primary)
 	t.Setenv("SERVERDESK_CREDENTIALS_DIRECTORY", fallback)
-	if got := credentialDirectory(); got != primary {
-		t.Fatalf("systemd credential directory precedence = %q, want %q", got, primary)
+	t.Setenv("SERVERDESK_CREDENTIALS_STORE", "")
+	if got := credentialDirectory(); got != "" {
+		t.Fatalf("read-only credential source selected for writes: %q", got)
 	}
-	t.Setenv("CREDENTIALS_DIRECTORY", "")
-	if got := credentialDirectory(); got != fallback {
-		t.Fatalf("fallback credential directory = %q, want %q", got, fallback)
+	writable := secureCredentialDir(t)
+	t.Setenv("SERVERDESK_CREDENTIALS_STORE", writable)
+	if got := credentialDirectory(); got != writable {
+		t.Fatalf("managed credential write directory = %q, want %q", got, writable)
 	}
 
 	for _, name := range []string{"", ".hidden", strings.Repeat("x", 129), "../escape", "slash/name", "white space"} {
@@ -51,6 +98,8 @@ func TestCredentialProviderSecurityBranches(t *testing.T) {
 	if got, err := resolveSecretValue("legacy", SecretPolicyAllowPlaintext, "field"); err != nil || got != "legacy" {
 		t.Fatalf("migration plaintext = %q, %v", got, err)
 	}
+	t.Setenv("CREDENTIALS_DIRECTORY", "")
+	t.Setenv("SERVERDESK_CREDENTIALS_STORE", "")
 	t.Setenv("SERVERDESK_CREDENTIALS_DIRECTORY", "")
 	if _, err := resolveSecretValue("secret://missing", SecretPolicyRequireReferences, "field"); err == nil || !strings.Contains(err.Error(), "no CREDENTIALS_DIRECTORY") {
 		t.Fatalf("missing provider error = %v", err)
@@ -169,7 +218,7 @@ func TestProtectDocumentSecretsNestedAndFailureBranches(t *testing.T) {
 		t.Fatal("invalid existing reference accepted")
 	}
 	plain := map[string]any{"password": "plain"}
-	if err := protectDocumentSecrets(plain, nil, "", &MigrationResult{}); err == nil || !strings.Contains(err.Error(), "no CREDENTIALS_DIRECTORY") {
+	if err := protectDocumentSecrets(plain, nil, "", &MigrationResult{}); err == nil || !strings.Contains(err.Error(), "no writable SERVERDESK_CREDENTIALS_STORE") {
 		t.Fatalf("missing migration destination error = %v", err)
 	}
 }
@@ -192,8 +241,7 @@ func TestProtectRequiredRawDocumentPoliciesAndErrors(t *testing.T) {
 	}
 
 	dir := secureCredentialDir(t)
-	t.Setenv("CREDENTIALS_DIRECTORY", "")
-	t.Setenv("SERVERDESK_CREDENTIALS_DIRECTORY", dir)
+	t.Setenv("SERVERDESK_CREDENTIALS_STORE", dir)
 	required := map[string]json.RawMessage{
 		"secret_policy": json.RawMessage(`"require-references"`),
 		"edge_devices":  json.RawMessage(`[{"key":"pve","password":"plain"}]`),

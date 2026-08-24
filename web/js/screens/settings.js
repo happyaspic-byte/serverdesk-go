@@ -8,12 +8,14 @@
 //       제품 정보(개발사 Roobicom 연락처 — 웹사이트·이메일·전화, 정적 값 + 라벨만 i18n).
 //
 // 규칙 준수:
-//  - js/screens/* 를 import하지 않는다(전혀 import 없음 — ctx로 전달받는 model/util만 사용).
+//  - js/screens/* 를 import하지 않는다. DOM-free 공용 상태/복구 helper만 직접 사용한다.
 //  - DOM은 init()에서 1회 생성, render()는 값만 patch(placeholder/입력값 재대입으로 트랜지션·타이핑 방해 금지).
 //  - 로컬 클릭 위임 1개(root, 'click') + 컬러피커/입력 갱신을 위한 'input' 위임 1개(색상 input은 change가 아닌
 //    input 이벤트로만 변경을 알리므로 클릭 위임 하나로는 커버되지 않아 부득이 두 번째 위임을 둔다 — §5.2 취지 내 예외).
 //  - 색은 CSS 변수(var(--pos) 등)만 사용. 단, 회사 색상 스와치/팔레트 버튼의 배경색은 사용자가 고르는
 //    데이터 값 자체(팔레트는 compute.js COMPANY_PALETTE, 커스텀은 컬러피커 결과)라 인라인 style이 불가피하다.
+
+import { formatConsoleTime, restoreImpact } from '../util/ui_state.js';
 
 const THRESHOLDS = [
   { key: 'warn', tone: 'warn', pct: 78, labelEn: 'Warning (amber)', labelKo: '경고 (주황)' },
@@ -239,6 +241,9 @@ function buildDom(ctx) {
   hookMsg.setAttribute('aria-live', 'polite');
   hookMsg.hidden = true;
   hookBody.appendChild(hookMsg);
+  const hookRuntime = el('div', 'sc-set-hook-runtime u-muted');
+  hookRuntime.setAttribute('data-set-hook-runtime', '');
+  hookBody.appendChild(hookRuntime);
   hookCard.appendChild(hookBody);
   /* hookCard 배치는 하단 열 균형 블록에서 1회 (이중 append 제거) */
 
@@ -270,20 +275,22 @@ function buildDom(ctx) {
   const thWarnIn = document.createElement('input');
   thWarnIn.className = 'field-input sc-set-th-in';
   thWarnIn.type = 'number'; thWarnIn.min = '1'; thWarnIn.max = '99'; thWarnIn.step = '1';
+  thWarnIn.id = 'sc-set-th-warn'; thWarnIn.required = true; thWarnIn.setAttribute('aria-describedby', 'sc-set-th-msg');
   thWarnIn.setAttribute('data-set-th-warn', '');
   const thCritIn = document.createElement('input');
   thCritIn.className = 'field-input sc-set-th-in';
   thCritIn.type = 'number'; thCritIn.min = '2'; thCritIn.max = '100'; thCritIn.step = '1';
+  thCritIn.id = 'sc-set-th-crit'; thCritIn.required = true; thCritIn.setAttribute('aria-describedby', 'sc-set-th-msg');
   thCritIn.setAttribute('data-set-th-crit', '');
-  const thWarnLb = el('span', 'sc-set-th-inlab');
-  const thCritLb = el('span', 'sc-set-th-inlab');
+  const thWarnLb = el('label', 'sc-set-th-inlab'); thWarnLb.htmlFor = thWarnIn.id;
+  const thCritLb = el('label', 'sc-set-th-inlab'); thCritLb.htmlFor = thCritIn.id;
   const thSave = el('button', 'btn btn--primary btn--sm');
   thSave.type = 'button';
   thSave.setAttribute('data-set-th-save', '');
   const thReset = el('button', 'btn btn--outline btn--sm');
   thReset.type = 'button';
   thReset.setAttribute('data-set-th-reset', '');
-  const thMsg = el('span', 'sc-set-th-msg');
+  const thMsg = el('span', 'sc-set-th-msg'); thMsg.id = 'sc-set-th-msg'; thMsg.setAttribute('role', 'status'); thMsg.setAttribute('aria-live', 'polite');
   thForm.appendChild(thWarnLb); thForm.appendChild(thWarnIn);
   thForm.appendChild(thCritLb); thForm.appendChild(thCritIn);
   thForm.appendChild(thSave); thForm.appendChild(thReset); thForm.appendChild(thMsg);
@@ -366,7 +373,8 @@ function buildDom(ctx) {
   setgBody.appendChild(ackRow);
 
   // 에스컬레이션 행 — critical 미확인 방치 시 웹훅 재통보(해제/4시간/24시간).
-  // 웹훅 URL 은 아래 Critical 웹훅 카드의 것을 쓴다(두 군데 설정 금지). 발송은 app.js::applyEscalation.
+  // 웹훅 URL 은 아래 Critical 웹훅 카드의 것을 쓴다(두 군데 설정 금지).
+  // 재통보 실행은 브라우저가 아니라 서버 notifier 런타임의 책임이다.
   const escRow = el('div', 'toggle-row sc-set-lang-row');
   const escBody = el('div', 'toggle-body');
   const escName = el('div', 'toggle-name');
@@ -490,7 +498,7 @@ function buildDom(ctx) {
     escName, escMeta, btnEsc0, btnEsc4, btnEsc24,
     coCard, coTitle: coH.title, coSub: coH.sub, coHint, coList,
     hookTitle: hookH.title, hookName, hookMeta, hookStatus,
-    hookInput, hookSave, hookTest, hookClear, hookMsg,
+    hookInput, hookSave, hookTest, hookClear, hookMsg, hookRuntime,
     thTitle: thH.title, thSub: thH.sub, thRefs,
     thWarnIn, thCritIn, thWarnLb, thCritLb, thSave, thReset, thMsg,
     setgTitle: setgH.title, setgRefs,
@@ -594,12 +602,11 @@ function resetCompanyColor(ctx, name) {
 function updateHookButtons(ctx) {
   if (!S) return;
   const dom = S.dom;
-  const st = ctx.store.getState();
   const val = (dom.hookInput.value || '').trim();
   const busy = !!S.busy;
-  const on = !!(st.notify && st.notify.enabled);
-  dom.hookSave.disabled = busy || !val;
-  dom.hookTest.disabled = busy || (!val && !on);
+  const cfg = S.notifyConfig || {};
+  dom.hookSave.disabled = busy || (!val && !cfg.configured);
+  dom.hookTest.disabled = busy || (!val && !cfg.configured);
   dom.hookClear.disabled = busy;
 }
 
@@ -623,27 +630,120 @@ function isHttpUrl(val) {
   } catch (e) { return false; }
 }
 
-function saveHook(ctx, clear) {
+async function loadNotifications(ctx) {
+  if (!S) return;
+  try {
+    const res = await fetchTimeout('/api/admin/notifications', { cache: 'no-store' }, 5000);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+    if (!S) return;
+    S.notifyConfig = Object.assign({}, S.notifyConfig, sanitizeNotificationConfig(body), { loaded: true, error: '' });
+  } catch (e) {
+    if (!S) return;
+    S.notifyConfig = Object.assign({}, S.notifyConfig, { loaded: true, error: String((e && e.message) || e) });
+    showHookMsg(ctx, false, L(ctx, 'Could not load server notification settings: ', '서버 알림 설정을 불러오지 못했습니다: ') + S.notifyConfig.error);
+  }
+  if (S) render(ctx.store.getState(), ctx);
+}
+
+/** Whitelist the non-secret notification contract; never retain an echoed URL. */
+export function sanitizeNotificationConfig(value) {
+  const src = value && typeof value === 'object' ? value : {};
+  const out = {};
+  if (typeof src.enabled === 'boolean') out.enabled = src.enabled;
+  if (typeof src.configured === 'boolean') out.configured = src.configured;
+  for (const key of ['escalation_hours', 'retry_max', 'retry_base_seconds']) {
+    if (Number.isFinite(Number(src[key]))) out[key] = Number(src[key]);
+  }
+  const cleanRuntime = (runtime) => {
+    const rt = runtime && typeof runtime === 'object' && !Array.isArray(runtime) ? runtime : {};
+    const safe = {};
+    for (const key of ['healthy', 'source_ready', 'pending', 'dead_letter', 'dead_letters', 'last_error', 'last_success', 'last_success_at']) {
+      if (Object.prototype.hasOwnProperty.call(rt, key)) safe[key] = rt[key];
+    }
+    return safe;
+  };
+  if (src.runtime && typeof src.runtime === 'object' && !Array.isArray(src.runtime)) out.runtime = cleanRuntime(src.runtime);
+  if (src.status && typeof src.status === 'object' && !Array.isArray(src.status)) out.status = cleanRuntime(src.status);
+  return out;
+}
+
+/** Convert server notifier health to a truthful, non-secret presentation. */
+export function notificationDisplay(config) {
+  const cfg = config || {};
+  const rt = (cfg.runtime && typeof cfg.runtime === 'object') ? cfg.runtime
+    : ((cfg.status && typeof cfg.status === 'object') ? cfg.status : {});
+  const pending = Math.max(0, Number(rt.pending) || 0);
+  const dead = Math.max(0, Number(rt.dead_letter) || Number(rt.dead_letters) || 0);
+  const hasError = dead > 0 || !!rt.last_error;
+  if (!cfg.loaded) return { tone: 'mut', key: 'loading', pending, dead, lastSuccess: '' };
+  if (cfg.error) return { tone: 'neg', key: 'unavailable', pending, dead, lastSuccess: '' };
+  const lastSuccess = rt.last_success || rt.last_success_at || '';
+  if (!cfg.configured) return { tone: 'mut', key: 'unconfigured', pending, dead, lastSuccess: '' };
+  if (!cfg.enabled) return { tone: 'mut', key: 'disabled', pending, dead, lastSuccess };
+  if (hasError) return { tone: 'neg', key: 'degraded', pending, dead, lastSuccess };
+  if (rt.source_ready === false || rt.healthy !== true) return { tone: 'warn', key: 'starting', pending, dead, lastSuccess };
+  return { tone: 'pos', key: 'active', pending, dead, lastSuccess };
+}
+
+/** Return both sides of an optimistic policy change so failure can restore server truth. */
+export function escalationTransition(config, hours) {
+  const previous = Object.assign({}, config || {});
+  return { previous, optimistic: Object.assign({}, previous, { escalation_hours: hours }) };
+}
+
+async function saveHook(ctx, clear, policyOnly, rollbackConfig) {
   if (!S || S.busy) return;
-  const val = clear ? '' : (S.dom.hookInput.value || '').trim();
-  if (!clear && !val) return;
-  if (!clear && !isHttpUrl(val)) {
+  const val = (clear || policyOnly) ? '' : (S.dom.hookInput.value || '').trim();
+  const cfg = S.notifyConfig || {};
+  if (!clear && !policyOnly && !val && !cfg.configured) return;
+  if (val && !isHttpUrl(val)) {
     showHookMsg(ctx, false, L(ctx, 'Enter a valid http(s) webhook URL', '유효한 http(s) 웹훅 URL을 입력하세요'));
+    S.dom.hookInput.setAttribute('aria-invalid', 'true');
+    S.dom.hookInput.focus();
     return;
   }
   S.busy = clear ? 'clear' : 'save';
   render(ctx.store.getState(), ctx);
-  // 서버 저장 경로는 없다 — serve.py 는 /notify·/notify/test 중계만 제공할 뿐
-  // 폴러 /api/notify 는 404(실측)라 POST 마다 '서버 응답 실패'로 떨어졌다(#273, 사장 호출).
-  // localStorage(store.js LS_NOTIFY)가 정본이므로 로컬 영속만 하고 문구도 그렇게 말한다.
-  ctx.store.setState({ notify: { enabled: !!val, url: val } });
-  if (!clear) S.dom.hookInput.value = '';
+  try {
+    const payload = {
+      enabled: clear ? false : (policyOnly ? !!cfg.enabled : true),
+      escalation_hours: Number(cfg.escalation_hours) || 0,
+      retry_max: Number.isFinite(Number(cfg.retry_max)) ? Number(cfg.retry_max) : 3,
+      retry_base_seconds: Number.isFinite(Number(cfg.retry_base_seconds)) ? Number(cfg.retry_base_seconds) : 2,
+    };
+    if (val) payload.webhook_url = val;
+    const res = await fetchTimeout('/api/admin/notifications', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }, 6000);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+    if (!S) return;
+    const safeBody = sanitizeNotificationConfig(body);
+    S.notifyConfig = Object.assign({}, cfg, safeBody, {
+      loaded: true,
+      enabled: payload.enabled,
+      configured: safeBody.configured == null ? (!!cfg.configured || !!val) : !!safeBody.configured,
+      escalation_hours: payload.escalation_hours,
+      error: '',
+    });
+    const msg = clear
+      ? L(ctx, 'Server notifications disabled', '서버 알림을 비활성화했습니다')
+      : L(ctx, 'Saved on the server — notifications continue when this browser is closed', '서버에 저장했습니다 — 브라우저를 닫아도 알림이 계속 동작합니다');
+    showHookMsg(ctx, true, msg);
+    try { ctx.showToast(msg); } catch (e) { /* noop */ }
+  } catch (e) {
+    if (S) {
+      if (rollbackConfig) S.notifyConfig = rollbackConfig;
+      showHookMsg(ctx, false, String((e && e.message) || e));
+    }
+  }
+  if (!S) return;
+  // A webhook URL is a bearer secret. Once a network PUT has been attempted, remove
+  // it from the DOM on both success and failure; a retry requires deliberate re-entry.
+  S.dom.hookInput.value = '';
+  S.dom.hookInput.removeAttribute('aria-invalid');
   S.busy = '';
-  const msg = clear
-    ? L(ctx, 'Cleared', '해제되었습니다')
-    : L(ctx, 'Saved in this browser', '이 브라우저에 저장했습니다');
-  showHookMsg(ctx, true, msg);
-  try { ctx.showToast(msg); } catch (e) { /* noop */ }
   render(ctx.store.getState(), ctx);
 }
 
@@ -659,18 +759,43 @@ async function importConfig(ctx, file) {
     S.dom.bkMsg.className = 'sc-set-th-msg is-neg';
     return;
   }
-  if (!window.confirm(L(ctx,
-    'Overwrite current configuration with this file? (blank credentials keep current values)',
-    '현재 설정을 이 파일 내용으로 덮어씁니다. 계속할까요? (빈 자격증명은 기존 값 유지)'))) {
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (e) {
+    S.dom.bkMsg.textContent = L(ctx, 'Invalid JSON file', '올바르지 않은 JSON 파일입니다');
+    S.dom.bkMsg.className = 'sc-set-th-msg is-neg';
+    return;
+  }
+  const impact = restoreImpact(doc, (ctx.store.getState().fleet || []).length);
+  if (!ctx.confirmAction) {
+    S.dom.bkMsg.textContent = L(ctx, 'Confirmation dialog is unavailable; restore was not started.', '확인 대화상자를 사용할 수 없어 복구를 시작하지 않았습니다.');
+    S.dom.bkMsg.className = 'sc-set-th-msg is-neg';
+    return;
+  }
+  const approved = await ctx.confirmAction({
+    title: L(ctx, 'Restore configuration', '설정 복구'),
+    impact: L(ctx,
+      'Current devices: ' + impact.currentDevices + '. Incoming device entries: ' + impact.incomingDevices + '. UI preferences: ' + (impact.restoresUIState ? 'included' : 'not included') + '. Blank credentials keep current secrets; collection changes can require restart.',
+      '현재 장비: ' + impact.currentDevices + '대. 파일의 장비 항목: ' + impact.incomingDevices + '대. UI 환경설정: ' + (impact.restoresUIState ? '포함' : '미포함') + '. 빈 자격증명은 기존 비밀을 유지하며 수집 변경에는 재시작이 필요할 수 있습니다.'),
+    typedPhrase: 'RESTORE',
+    confirmLabel: L(ctx, 'Restore configuration', '설정 복구'),
+    requireReason: true,
+    danger: true,
+  });
+  if (!approved) {
     return;
   }
   S.busy = 'bk';
   render(ctx.store.getState(), ctx);
   try {
+    // The server validates and durably records this reason with the restore
+    // audit event. Always overwrite an untrusted reason embedded in the file.
+    const payload = Object.assign({}, doc, { reason: String(approved.reason || '').trim() });
     const r = await fetch('/api/admin/config/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: text,
+      body: JSON.stringify(payload),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
@@ -693,8 +818,13 @@ async function saveThresholds(ctx, reset) {
   if (!(warn > 0 && warn < crit && crit <= 100)) {
     S.dom.thMsg.textContent = L(ctx, 'Need 0 < warning < critical ≤ 100', '0 < 경고 < 심각 ≤ 100 이어야 합니다');
     S.dom.thMsg.className = 'sc-set-th-msg is-neg';
+    const first = !(warn > 0 && warn < 100) ? S.dom.thWarnIn : S.dom.thCritIn;
+    first.setAttribute('aria-invalid', 'true');
+    first.focus();
     return;
   }
+  S.dom.thWarnIn.removeAttribute('aria-invalid');
+  S.dom.thCritIn.removeAttribute('aria-invalid');
   S.busy = 'th';
   render(ctx.store.getState(), ctx);
   try {
@@ -718,36 +848,30 @@ async function saveThresholds(ctx, reset) {
 
 async function testHook(ctx) {
   if (!S || S.busy) return;
-  const st = ctx.store.getState();
-  const val = (S.dom.hookInput.value || '').trim() || (st.notify && st.notify.url) || '';
-  if (!val) return;
+  const val = (S.dom.hookInput.value || '').trim();
+  if (!val && !(S.notifyConfig && S.notifyConfig.configured)) return;
+  if (val && !isHttpUrl(val)) {
+    showHookMsg(ctx, false, L(ctx, 'Enter a valid http(s) webhook URL', '유효한 http(s) 웹훅 URL을 입력하세요'));
+    S.dom.hookInput.setAttribute('aria-invalid', 'true');
+    S.dom.hookInput.focus();
+    return;
+  }
   S.busy = 'test';
   render(ctx.store.getState(), ctx);
   try {
-    // serve.py /notify/test 가 Slack(text)·Discord(content) 양식으로 중계한다(실측:
-    // 폴러 /api/notify 는 404, 브라우저 직발은 Slack CORS 에 걸린다 — 릴리가 정답).
-    // 타임아웃은 중계(serve.py timeout=5)·실발송(app.js 3000)보다 길어야 한다 — 짧으면
-    // 느린 웹훅이 실제 성공인데 테스트만 abort 로 실패한다(#320).
-    const res = await fetchTimeout('/notify/test', {
+    const res = await fetchTimeout('/api/admin/notifications/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url: val,
-        text: L(ctx, 'serverdesk webhook test — if you see this, the relay works',
-          'serverdesk 웹훅 테스트 — 이 메시지가 보이면 중계가 정상입니다'),
-      }),
+      body: JSON.stringify(val ? { webhook_url: val } : {}),
     }, 6000);
     const j = res ? await res.json().catch(() => null) : null;
     if (res && res.ok && j && j.ok) {
-      showHookMsg(ctx, true, L(ctx, 'Sent · webhook HTTP ' + j.status, '테스트 발송됨 · 웹훅 HTTP ' + j.status));
+      showHookMsg(ctx, true, L(ctx, 'Test notification sent by the server', '서버에서 테스트 알림을 발송했습니다'));
     } else {
-      // 비-2xx 웹훅 실패도 릴리는 HTTP 200 + {ok:false, status:<실제 코드>} 로 본낸다
-      // (serve.py). 성공 분기와 같이 j.status 를 우선 표기하고, 없을 때만 릴리의
-      // res.status 로 폴핵한다 — 안 그러면 '발송 실패 · HTTP 200' 모순 표기(#472).
+      // 서버 notifier는 전송 대상의 상태를 응답 `status`에 담을 수 있다. 없을 때만
+      // 관리 API 자체의 HTTP 상태를 사용한다.
       const code = res ? ' · HTTP ' + ((j && j.status) || res.status) : '';
-      // 실패 사유 키 — 서버(serve.py _send_json_error)는 모든 실패 경로에서 {'error': message} 를
-      // 본낸다. j.message 만 읽던 탓에 'notify target host not allowed' 같은 사유가 영구 미표시였다
-      // (#437) — error 우선, message 는 폴핵.
+      // 관리 API 실패는 `error`를 우선 사용하고, 호환 서버의 `message`를 보조로 읽는다.
       const why = (j && (j.error || j.message)) || '';
       showHookMsg(ctx, false, L(ctx, 'Send failed' + code, '발송 실패' + code) + (why ? ' — ' + why : ''));
     }
@@ -792,7 +916,11 @@ function onClick(ev, ctx) {
   if ((hit = t.closest('[data-set-eschours]'))) {
     const v = Number(hit.getAttribute('data-set-eschours'));
     const hours = (v === 4 || v === 24) ? v : 0;
-    ctx.store.setState((st) => ({ setg: Object.assign({}, st.setg, { escHours: hours }) }));
+    if (S && !S.busy) {
+      const transition = escalationTransition(S.notifyConfig, hours);
+      S.notifyConfig = transition.optimistic;
+      saveHook(ctx, false, true, transition.previous);
+    }
     return;
   }
   if ((hit = t.closest('[data-set-ackauto]'))) {
@@ -863,7 +991,12 @@ function onInput(ev, ctx) {
     return;
   }
   if (t.matches && t.matches('[data-set-hook-input]')) {
+    t.removeAttribute('aria-invalid');
     updateHookButtons(ctx);
+    return;
+  }
+  if (t.matches && (t.matches('[data-set-th-warn]') || t.matches('[data-set-th-crit]'))) {
+    t.removeAttribute('aria-invalid');
   }
 }
 
@@ -882,6 +1015,10 @@ function init(root, ctx) {
     coRows: Object.create(null),  // 키가 서버 데이터(회사명) — __proto__ 엣지 방지로 null-프로토타입
     expanded: Object.create(null), // S: 회사별 팔레트 펼침 상태(온디맨드) — 동일 사유
     hookMsgTimer: null,
+    notifyConfig: {
+      loaded: false, enabled: false, configured: false, escalation_hours: 0,
+      retry_max: 3, retry_base_seconds: 2, status: null, error: '',
+    },
   };
   S.onClick = (ev) => onClick(ev, ctx);
   S.onInput = (ev) => onInput(ev, ctx);
@@ -889,6 +1026,7 @@ function init(root, ctx) {
   root.addEventListener('click', S.onClick);
   root.addEventListener('input', S.onInput);
   root.addEventListener('keydown', S.onKeydown);
+  loadNotifications(ctx);
 }
 
 function render(state, ctx) {
@@ -949,10 +1087,13 @@ function render(state, ctx) {
   dom.btnEsc0.textContent = L(ctx, 'Off', '해제');
   dom.btnEsc4.textContent = L(ctx, '4h', '4시간');
   dom.btnEsc24.textContent = L(ctx, '24h', '24시간');
-  const esh = state.setg && (state.setg.escHours === 4 || state.setg.escHours === 24) ? state.setg.escHours : 0;
+  const notifyCfg = S.notifyConfig || {};
+  const loadedEsc = Number(notifyCfg.escalation_hours);
+  const esh = loadedEsc === 4 || loadedEsc === 24 ? loadedEsc : 0;
   [[dom.btnEsc0, 0], [dom.btnEsc4, 4], [dom.btnEsc24, 24]].forEach(([b, v]) => {
     b.classList.toggle('is-active', esh === v);
     b.setAttribute('aria-pressed', esh === v ? 'true' : 'false');
+    b.disabled = !!S.busy || !notifyCfg.loaded;
   });
 
   // 회사 색상
@@ -963,16 +1104,29 @@ function render(state, ctx) {
   dom.hookName.textContent = L(ctx, 'Critical webhook', 'Critical 웹훅');
   dom.hookMeta.textContent = L(
     ctx,
-    'everRun E-Alert is off, so Vigil-style critical alerts post to this webhook. Slack and Discord URLs work.',
-    'everRun E-Alert가 꺼져 있어, critical 발생 시 이 웹훅으로 통보합니다. Slack · Discord URL 지원합니다.'
+    'Server-resident delivery continues when this browser is closed. The stored webhook secret is never returned to the browser.',
+    '서버 상주 발송이므로 브라우저를 닫아도 계속 동작합니다. 저장된 웹훅 비밀은 브라우저로 다시 노출되지 않습니다.'
   );
-  const on = !!(state.notify && state.notify.enabled);
-  dom.hookStatus.className = 'u-badge' + (on ? ' is-pos' : '');
-  dom.hookStatus.textContent = on ? L(ctx, 'Configured', '설정됨') : L(ctx, 'Not set', '미설정');
-  dom.hookInput.placeholder = on
+  const on = !!notifyCfg.enabled;
+  const configured = !!notifyCfg.configured;
+  const notifyView = notificationDisplay(notifyCfg);
+  const notifyLabels = {
+    loading: L(ctx, 'Loading…', '불러오는 중…'), unavailable: L(ctx, 'Unavailable', '사용 불가'),
+    unconfigured: L(ctx, 'Not configured', '미설정'), disabled: L(ctx, 'Configured · disabled', '설정됨 · 비활성'),
+    degraded: L(ctx, 'Degraded', '오류'), starting: L(ctx, 'Starting', '준비 중'), active: L(ctx, 'Active', '활성'),
+  };
+  dom.hookStatus.className = 'u-badge' + (notifyView.tone === 'mut' ? '' : ' is-' + notifyView.tone);
+  dom.hookStatus.textContent = notifyLabels[notifyView.key];
+  const runtimeParts = [
+    L(ctx, 'Pending ', '대기 ') + notifyView.pending,
+    L(ctx, 'Dead-letter ', '실패 보관 ') + notifyView.dead,
+  ];
+  if (notifyView.lastSuccess) runtimeParts.push(L(ctx, 'Last success ', '마지막 성공 ') + formatConsoleTime(notifyView.lastSuccess));
+  dom.hookRuntime.textContent = runtimeParts.join(' · ');
+  dom.hookInput.placeholder = configured
     ? L(ctx, 'Enter a new URL to replace', '새 URL 입력 시 교체')
     : 'https://discord.com/api/webhooks/…';
-  dom.hookSave.textContent = S.busy === 'save' ? '…' : L(ctx, 'Save', '저장');
+  dom.hookSave.textContent = S.busy === 'save' ? '…' : L(ctx, 'Save & enable', '저장 후 활성화');
   if (S.busy === 'test') {
     dom.hookTest.innerHTML = '';
     const dot = el('span', 'u-dot is-warn pulse');
@@ -985,7 +1139,7 @@ function render(state, ctx) {
     dom.hookTest.textContent = L(ctx, 'Send test', '테스트 발송');
     dom.hookTest.removeAttribute('aria-busy');
   }
-  dom.hookClear.textContent = S.busy === 'clear' ? '…' : L(ctx, 'Clear', '해제');
+  dom.hookClear.textContent = S.busy === 'clear' ? '…' : L(ctx, 'Disable', '비활성화');
   dom.hookClear.hidden = !on;
   updateHookButtons(ctx);
 

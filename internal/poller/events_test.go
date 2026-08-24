@@ -138,6 +138,100 @@ func TestEventLogBoundsEscapedJSONLine(t *testing.T) {
 	}
 }
 
+func TestEventLogAuditRecordIsStructuredAndSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	log := NewEventLog(path, 20)
+	stamp := time.Date(2026, 8, 24, 1, 2, 3, 456, time.UTC)
+	prepared := AuditRecord{
+		ID: "audit-123", Action: "device.delete", Target: "edge-1",
+		Reason: "장비 계약 종료", Operator: "admin", Phase: "prepared", Timestamp: stamp,
+	}
+	if err := log.RecordAudit(prepared); err != nil {
+		t.Fatalf("record prepared audit: %v", err)
+	}
+	committed := prepared
+	committed.Phase = "committed"
+	committed.Timestamp = stamp.Add(time.Second)
+	if err := log.RecordAudit(committed); err != nil {
+		t.Fatalf("record committed audit: %v", err)
+	}
+
+	reloaded := NewEventLog(path, 20)
+	items := reloaded.List(2)
+	if len(items) != 2 {
+		t.Fatalf("reloaded audit records = %d, want 2", len(items))
+	}
+	latest := items[0].(map[string]any)
+	for key, want := range map[string]string{
+		"audit_id": "audit-123", "action": "device.delete", "target": "edge-1",
+		"reason": "장비 계약 종료", "operator": "admin", "phase": "committed",
+		"ts": stamp.Add(time.Second).Format(time.RFC3339Nano),
+	} {
+		if latest[key] != want {
+			t.Errorf("%s = %#v, want %q", key, latest[key], want)
+		}
+	}
+	if latest["kind"] != "audit" || latest["desc"] != "장비 계약 종료" {
+		t.Fatalf("audit event projection = %#v", latest)
+	}
+	if reloaded.Status()["healthy"] != true {
+		t.Fatalf("reloaded event status = %#v", reloaded.Status())
+	}
+}
+
+func TestEventLogAuditRejectsInvalidReasonAndPersistenceFailure(t *testing.T) {
+	log := NewEventLog(filepath.Join(t.TempDir(), "events.jsonl"), 20)
+	base := AuditRecord{
+		ID: "audit-1", Action: "config.restore", Target: "configuration",
+		Operator: "admin", Phase: "prepared", Reason: strings.Repeat("가", maxAuditReasonRunes+1),
+	}
+	if err := log.RecordAudit(base); err == nil {
+		t.Fatal("oversized audit reason was accepted")
+	}
+	if log.Len() != 0 {
+		t.Fatalf("rejected audit entered ring: %d", log.Len())
+	}
+
+	bad := NewEventLog(filepath.Join(t.TempDir(), "missing", "events.jsonl"), 20)
+	base.Reason = "정상 사유"
+	if err := bad.RecordAudit(base); err == nil {
+		t.Fatal("audit persistence failure was hidden")
+	}
+	if bad.Len() != 0 || bad.Status()["healthy"] != false {
+		t.Fatalf("failed durable audit state = len %d status %#v", bad.Len(), bad.Status())
+	}
+}
+
+func TestEventLogAuditStructuredFieldsAreNeverSilentlyTruncated(t *testing.T) {
+	log := NewEventLog(filepath.Join(t.TempDir(), "events.jsonl"), 20)
+	record := AuditRecord{
+		ID: strings.Repeat("i", 64), Action: strings.Repeat("a", 128),
+		Target: strings.Repeat("가", 170), Reason: strings.Repeat("🙂", maxAuditReasonRunes),
+		Operator: strings.Repeat("o", 64), Phase: strings.Repeat("p", 32),
+	}
+	if err := log.RecordAudit(record); err != nil {
+		t.Fatalf("record boundary-sized audit: %v", err)
+	}
+	stored := log.List(1)[0].(map[string]any)
+	for key, want := range map[string]string{
+		"audit_id": record.ID, "action": record.Action, "target": record.Target,
+		"reason": record.Reason, "operator": record.Operator, "phase": record.Phase,
+	} {
+		if stored[key] != want {
+			t.Fatalf("%s was altered: got bytes=%d want bytes=%d", key, len(stored[key].(string)), len(want))
+		}
+	}
+
+	record.ID = "next"
+	record.Target += "가"
+	if err := log.RecordAudit(record); err == nil {
+		t.Fatal("over-byte-limit target was silently truncated")
+	}
+	if log.Len() != 1 {
+		t.Fatalf("rejected audit entered ring: %d", log.Len())
+	}
+}
+
 func TestEventWatcherRecordsStateAlertAndInventoryTransitions(t *testing.T) {
 	log := NewEventLog(filepath.Join(t.TempDir(), "watcher-events.jsonl"), 50)
 	cache := NewFleetCache()

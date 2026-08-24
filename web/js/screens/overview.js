@@ -214,7 +214,10 @@ function init(root, ctx) {
   N.attEmptyIco = el('span', { class: 'empty-icon' });
   N.attEmptyTitle = el('div', { class: 'empty-title' });
   N.attEmptySub = el('div', { class: 'empty-sub' });
-  N.attEmpty = el('div', { class: 'empty sc-ov-att-empty' }, [N.attEmptyIco, N.attEmptyTitle, N.attEmptySub]);
+  N.attEmptyAdd = t(el('button', {
+    class: 'btn btn--primary btn--sm', type: 'button', 'data-ov-goto': 'manage', hidden: true,
+  }), 'Add device', '장비 추가');
+  N.attEmpty = el('div', { class: 'empty sc-ov-att-empty' }, [N.attEmptyIco, N.attEmptyTitle, N.attEmptySub, N.attEmptyAdd]);
   N.availVal = el('span', { class: 'sc-ov-avail-val u-mono' });
   N.availDelta = el('span', { class: 'sc-ov-avail-delta u-muted u-mono', hidden: true });
   N.availBar = el('i', { class: 'sc-ov-avail-fill' });
@@ -463,7 +466,7 @@ function init(root, ctx) {
   root.appendChild(wrap);
 
   /* ── 로컬 이벤트 위임 1개 ── */
-  onClick = (e) => {
+  onClick = async (e) => {
     const goto = e.target.closest && e.target.closest('[data-ov-goto]');
     if (goto && ROOT.contains(goto)) {
       const v = goto.getAttribute('data-ov-goto');
@@ -486,18 +489,33 @@ function init(root, ctx) {
       return;
     }
     // 경보 행의 [확인] 퀵 버튼 — 행 네비게이션보다 먼저 매칭해 상세 이동을 막는다.
-    // store 뮤테이션 형태는 incidents.js 의 확인과 동일(값=ISO 시각) — 서버 동기화는
-    // app.js 의 pushAck 구독이 알아서 처리한다.
+    // 셸/인시던트와 같은 운영자 확인을 거치며, 서버 감사 계약이 보존할 구조형 메타를 쓴다.
     const ackBtn = e.target.closest && e.target.closest('.sc-ov-alert-ack');
     if (ackBtn && ROOT.contains(ackBtn)) {
       const key = ackBtn.dataset.ackKey || '';
-      if (key && C && C.store) {
+      if (key && C && C.store && typeof C.confirmAction === 'function') {
+        const approved = await C.confirmAction({
+          title: L('Acknowledge alert', '경보 확인'),
+          impact: L(
+            'This alert will be marked acknowledged. Monitoring and the source alert are unchanged.',
+            '이 경보를 확인됨으로 표시합니다. 모니터링과 원본 경보는 변경되지 않습니다.'
+          ),
+          confirmLabel: L('Acknowledge', '확인 처리'),
+          requireReason: true,
+        });
+        if (!approved) return;
         C.store.setState((st) => {
           const next = Object.assign({}, st.ackedAlerts);
-          next[key] = new Date().toISOString();
+          next[key] = {
+            ts: new Date().toISOString(),
+            by: approved.operator || C.operator || 'admin',
+            reason: approved.reason || '',
+          };
           return { ackedAlerts: next };
         });
         if (typeof C.showToast === 'function') C.showToast(L('Alert acknowledged', '경보를 확인했습니다'));
+      } else if (key && C && typeof C.showToast === 'function') {
+        C.showToast(L('Confirmation is unavailable; acknowledgement was not changed.', '확인 창을 사용할 수 없어 경보 상태를 변경하지 않았습니다.'));
       }
       return;
     }
@@ -812,6 +830,7 @@ function render(state, ctx) {
 
   /* (1) 주의 필요 */
   const attN = (m.attentionAll || []).length;
+  const initialLoading = !!state.pollPending && !state.lastPoll && !state.liveError && !state.uiError;
   show(N.attCount, attN > 0);
   setText(N.attCount, attN);
 
@@ -824,17 +843,24 @@ function render(state, ctx) {
     ? m.incStats.critical
     : (m.activeAlerts || m.alertsAll || []).filter((a) => a.sev === 'critical').length;
   const heroN = heroCrit || attN;
-  const heroTone = heroCrit ? 'neg' : (attN ? 'warn' : 'pos');
+  const heroTone = initialLoading ? 'mut' : (heroCrit ? 'neg' : (attN ? 'warn' : 'pos'));
   setToneClass(N.attHero, 'sc-ov-big sc-ov-att-hero u-mono', heroTone);
   setText(N.attHero, String(heroN));
   // 숫자와 라벨이 별도 엘리먼트라 영문은 앞에 공백이 필요하다 —
   // 한국어는 '9건'처럼 붙여 쓰지만 영문은 '9active…'가 되어 버린다(실측 발견).
   setText(N.attHeroLbl, attentionHeroLabel(heroCrit, attN, L));
 
-  const emptyMode = pollerDown ? 'poller' : (m.total === 0 ? 'none' : (attN === 0 ? 'ok' : ''));
+  const emptyMode = initialLoading ? 'loading' : (pollerDown ? 'poller' : (m.total === 0 ? 'none' : (attN === 0 ? 'ok' : '')));
   show(N.attList, emptyMode === '');
   show(N.attEmpty, emptyMode !== '');
-  if (emptyMode === 'poller') {
+  show(N.attEmptyAdd, emptyMode === 'none');
+  if (emptyMode === 'loading') {
+    setIcon(N.attEmptyIco, 'clock', 24);
+    N.attEmptyIco.className = 'empty-icon';
+    N.attEmptyTitle.className = 'empty-title';
+    setText(N.attEmptyTitle, L('Loading devices…', '장비 불러오는 중…'));
+    setText(N.attEmptySub, L('Waiting for the first successful collection', '첫 수집 성공을 기다리는 중입니다'));
+  } else if (emptyMode === 'poller') {
     setIcon(N.attEmptyIco, 'warningCircle', 24);
     N.attEmptyIco.className = 'empty-icon is-neg';
     setToneClass(N.attEmptyTitle, 'empty-title', 'neg');
@@ -844,8 +870,9 @@ function render(state, ctx) {
     setIcon(N.attEmptyIco, 'box', 24);
     N.attEmptyIco.className = 'empty-icon';
     N.attEmptyTitle.className = 'empty-title';
-    setText(N.attEmptyTitle, poll.lastPoll ? L('No devices', '장비 없음') : L('Loading…', '로딩 중'));
-    setText(N.attEmptySub, poll.lastPoll ? L('No devices registered', '등록된 장비 없음') : L('Fetching status…', '상태 확인 중'));
+    setText(N.attEmptyTitle, L('No devices', '장비 없음'));
+    setText(N.attEmptySub, L('No devices registered. Add one to begin monitoring.', '등록된 장비가 없습니다. 장비를 추가해 모니터링을 시작하세요.'));
+    setText(N.attEmptyAdd, L('Add device', '장비 추가'));
   } else if (emptyMode === 'ok') {
     setIcon(N.attEmptyIco, 'check', 24);
     N.attEmptyIco.className = 'empty-icon is-pos';

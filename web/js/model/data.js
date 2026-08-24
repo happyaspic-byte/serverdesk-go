@@ -15,7 +15,8 @@ import { setUsageThresholds } from '../util/fmt.js';
 export const TYPES = {
   EV:   { label: 'everRun',        short: 'EV',   kindEN: 'Datacenter FT',          kindKO: '데이터센터 FT',     icon: 'ph-stack' },
   EDGE: { label: 'ztC Edge',       short: 'EDGE', kindEN: 'Edge FT',                kindKO: '엣지 FT',          icon: 'ph-cpu' },
-  END:  { label: 'ztC Endurance',  short: 'END',  kindEN: 'Datacenter FT',          kindKO: '데이터센터 FT',     icon: 'ph-hard-drives' },
+  // 레거시 import 표시 전용. 현재 수집기에는 Endurance ingestion/persistence 계약이 없다.
+  END:  { label: 'ztC Endurance',  short: 'END',  kindEN: 'Legacy imported record', kindKO: '레거시 가져오기 레코드', icon: 'ph-hard-drives', supported: false },
   FTS:  { label: 'ftServer',       short: 'FTS',  kindEN: 'Fault-tolerant server',  kindKO: '무정지 서버',       icon: 'ph-shield-check' },
   SRV:  { label: '서버', labelEN: 'Server', short: 'SRV',  kindEN: 'General server',         kindKO: '일반 서버',        icon: 'ph-hard-drive' },
   PLC:  { label: 'PLC',            short: 'PLC',  kindEN: 'Controller',             kindKO: '제어기',           icon: 'ph-squares-four' },
@@ -444,6 +445,11 @@ export async function pullPatch(state, url, timeoutMs) {
       source: 'live',
       refreshSec: r.refreshSec,
       lastPoll: r.polledAt,
+      lastAttempt: Date.now(),
+      pollPending: false,
+      // 직전 실패의 stale=true를 정상 응답에서 반드시 지운다. 폴러 자체가 캐시
+      // 지연을 보고한 성공 응답만 stale로 유지한다.
+      stale: !!r.stale,
       // 이벤트 이력(폴러 events[]) — 로그 화면 tail 의 정본. 활성 경보 스냅샷과 달리
       // 해소된 경보·상태 전이가 이력으로 남는다.
       liveEventLog: r.events,
@@ -461,7 +467,8 @@ export async function pullPatch(state, url, timeoutMs) {
     source: 'live',
     liveError: r.error || 'unreachable',
     stale: true,
-    lastPoll: Date.now(),
+    lastAttempt: Date.now(),
+    pollPending: false,
   };
 }
 
@@ -595,66 +602,10 @@ export function pushMaint(delta, timeoutMs) { return pushState(MAINT_URL, delta,
 /** 장비 메모 델타를 서버에 본다(pushAck 과 같은 계약·재시도). */
 export function pushNotes(delta, timeoutMs) { return pushState(NOTES_URL, delta, timeoutMs); }
 
-const ESCAL_URL = '/escal';
-const NOTIFY_URL = '/notify';
-
-/**
- * 에스컬레이션 클레임 — 서버가 락 안에서 add-if-absent 로 병합하고, 실제로 새로 들어간
- * 키만 added 로 돌려준다. 콘솔이 여러 개 열리든 added 를 받은 한 쪽만 웹훅을 쏜다(중복 발송 방지).
- * 실패하면 null(다음 틱에 다시 시도).
- */
-export async function claimEscal(keys, timeoutMs) {
-  if (typeof fetch !== 'function' || !keys || !keys.length) return null;
-  const set = {};
-  const iso = new Date().toISOString();
-  keys.forEach((k) => { set[k] = iso; });
-  let timer = null;
-  try {
-    const opt = {
-      method: 'PUT', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ set }),
-    };
-    if (typeof AbortController === 'function') {
-      const ctrl = new AbortController();
-      timer = setTimeout(() => { try { ctrl.abort(); } catch (_) { /* noop */ } }, timeoutMs || 2500);
-      opt.signal = ctrl.signal;
-    }
-    const r = await fetch(ESCAL_URL, opt);
-    if (!r || !r.ok) return null;
-    const j = await r.json();
-    return (j && Array.isArray(j.added)) ? j.added : null;
-  } catch (e) {
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-/** 웹훅 발송 — serve.py /notify 가 Slack(text)·Discord(content) 양식으로 중계한다. */
-export async function sendWebhook(url, text, timeoutMs) {
-  if (typeof fetch !== 'function' || !url || !text) return false;
-  let timer = null;
-  try {
-    const opt = {
-      method: 'POST', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, text }),
-    };
-    if (typeof AbortController === 'function') {
-      const ctrl = new AbortController();
-      timer = setTimeout(() => { try { ctrl.abort(); } catch (_) { /* noop */ } }, timeoutMs || 3000);
-      opt.signal = ctrl.signal;
-    }
-    const r = await fetch(NOTIFY_URL, opt);
-    if (!r || !r.ok) return false;
-    const j = await r.json().catch(() => null);
-    return !!(j && j.ok);
-  } catch (e) {
-    return false;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+/** Server response replaces local fallback; null means the server was unreachable. */
+export function authoritativeSharedState(localValue, remoteValue) {
+  return (remoteValue && typeof remoteValue === 'object' && !Array.isArray(remoteValue))
+    ? remoteValue : (localValue || {});
 }
 
 /** 이전 맵 → 다음 맵의 차이를 델타로 계산한다(순수 · 테스트 가능). */

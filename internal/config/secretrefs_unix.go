@@ -107,3 +107,32 @@ func writeCredentialFile(dir, name, value string) error {
 	ok = true
 	return nil
 }
+
+func listCredentialNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && validSecretName(entry.Name()) {
+			names = append(names, entry.Name())
+		}
+	}
+	return names, nil
+}
+
+func removeCredentialFile(dir, name string) error {
+	path, err := credentialPath(dir, name)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("credential cleanup target must be a regular non-symlink file")
+	}
+	return os.Remove(path)
+}

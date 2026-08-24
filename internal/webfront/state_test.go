@@ -66,8 +66,15 @@ func TestAckDeltaMerge(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "ack-state.json")); err != nil {
 		t.Fatalf("ack-state.json missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "ack-state.json.tmp")); !os.IsNotExist(err) {
-		t.Fatalf("tmp file left behind")
+	if info, err := os.Stat(filepath.Join(dir, "ack-state.json")); err != nil {
+		t.Fatal(err)
+	} else if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("ack-state.json mode = %04o, want 0600", got)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, ".ack-state.json-*")); err != nil {
+		t.Fatal(err)
+	} else if len(matches) != 0 {
+		t.Fatalf("temporary state files left behind: %v", matches)
 	}
 
 	// 명시적 전체 교체.
@@ -160,6 +167,90 @@ func TestAckKeyCapKeepsNewest(t *testing.T) {
 	}
 	if _, has := got["k5000"]; !has {
 		t.Errorf("newest key k5000 should have been kept")
+	}
+}
+
+func TestAckStructuredReasonIsBoundedAndLegacyCompatible(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestServer(t, Options{StateDir: dir})
+	xssText := `<img src=x onerror="globalThis.pwned=true">`
+	reason := xssText + strings.Repeat("가", 600)
+	body, err := json.Marshal(map[string]any{"set": map[string]any{
+		"legacy": "2026-08-24T00:00:00Z",
+		"new": map[string]any{
+			"ts": "2026-08-25T00:00:00Z", "by": strings.Repeat("u", 100), "reason": reason,
+		},
+		"missing-ts": map[string]any{"reason": "ignored"},
+		"junk":       []any{"ignored"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := putJSON(s, "/ack", string(body), nil)
+	assertOK(t, rec, 2, true)
+	if contentType := rec.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("structured ack served as executable content: %q", contentType)
+	}
+	got := getJSON(t, s, "/ack")
+	if got["legacy"] != "2026-08-24T00:00:00Z" {
+		t.Fatalf("legacy ack changed: %#v", got["legacy"])
+	}
+	structured, ok := got["new"].(map[string]any)
+	if !ok || structured["ts"] != "2026-08-25T00:00:00Z" {
+		t.Fatalf("structured ack = %#v", got["new"])
+	}
+	if len([]rune(structured["by"].(string))) != 80 || len([]rune(structured["reason"].(string))) != 500 ||
+		!strings.HasPrefix(structured["reason"].(string), xssText) {
+		t.Fatalf("structured ack bounds = %#v", structured)
+	}
+	// The markup-like reason is round-tripped only as a JSON string; the server
+	// never interpolates it into HTML or evaluates it.
+	stored, err := os.ReadFile(filepath.Join(dir, "ack-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedJSON map[string]any
+	if json.Unmarshal(stored, &storedJSON) != nil || storedJSON["new"].(map[string]any)["reason"] != structured["reason"] {
+		t.Fatalf("stored reason was not inert JSON data: %s", stored)
+	}
+}
+
+func TestCorruptOperatorStateFailsClosedWithoutOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ack-state.json")
+	corrupt := []byte(`{"existing":`)
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer(t, Options{StateDir: dir})
+	get := do(s, "GET", "/ack", nil, nil)
+	if get.Code != 500 || !strings.Contains(get.Body.String(), "decode operator state") {
+		t.Fatalf("corrupt GET = %d %s", get.Code, get.Body.String())
+	}
+	put := putJSON(s, "/ack", `{"set":{"new":"2026-08-24T00:00:00Z"}}`, nil)
+	if put.Code != 500 || !strings.Contains(put.Body.String(), "decode operator state") {
+		t.Fatalf("corrupt PUT = %d %s", put.Code, put.Body.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(corrupt) {
+		t.Fatalf("corrupt state was silently replaced: %q", after)
+	}
+	if _, err := s.ExportUIStateWithError(); err == nil {
+		t.Fatal("corrupt state export succeeded")
+	}
+}
+
+func TestAckCapOrdersLegacyAndStructuredValuesByTimestamp(t *testing.T) {
+	got := cleanAck(map[string]any{
+		"old": "2026-08-23T00:00:00Z",
+		"new": map[string]any{"ts": "2026-08-25T00:00:00Z", "by": "operator", "reason": "verified"},
+		"mid": map[string]any{"ts": "2026-08-24T00:00:00Z"},
+	}, 2)
+	if len(got) != 2 || got["old"] != nil || got["new"] == nil || got["mid"] == nil {
+		t.Fatalf("mixed ack cap = %#v", got)
 	}
 }
 

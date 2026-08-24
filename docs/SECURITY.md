@@ -68,12 +68,25 @@ Serverdesk 웹 콘솔은 단일 관리자(`admin`) 계정 기반으로 작동하
 
 ## 3. 알려진 한계 및 완화 대책 (Known Limitations & Mitigations)
 
+### 3.0 Windows packaged runtime — commercial NO-GO
+
+현재 Windows Scheduled Task는 web/API/collector 전체를 `SYSTEM`으로 실행한다. 따라서 원격 입력을
+처리하는 코드의 취약점이 곧 host `SYSTEM` 권한으로 확대될 수 있다. 이 상태는 Windows commercial
+production 승인 근거로 사용할 수 없으며 UAT 결과와 무관하게 **NO-GO**다.
+
+해제 조건은 executable/scripts를 `C:\Program Files\Serverdesk`의 read/execute-only ACL에 두고,
+config/auth/data/log/DPAPI credential만 `C:\ProgramData\Serverdesk`의 전용 writable ACL로 분리한 뒤
+LocalService 또는 검증된 전용 service identity로 실행하는 것이다. 기존 설치 migration, DPAPI 복호화,
+TLS/AVCLI/JRE read 권한, updater rollback 및 uninstall 보존을 실제 Windows에서 검증해야 한다.
+
 ### 3.1 `avcli -p` 프로세스 인자 노출
 - **한계**: Stratus everRun / ztC Edge CLI인 `avcli`는 비밀번호를 파일이나 환경변수로 전달하는 표준 옵션이 없어, 실행 시 `-p <암호>` 형태로 커맨드라인(`argv`)에 일시 노출됩니다.
   - 관련 코드: `internal/avcli/client.go:45-46`
 - **완화 대책**:
-  - 시스템 관리자 외 일반 사용자가 `/proc` 프로세스 목록을 볼 수 없도록 Linux 커널 마운트 옵션 `hidepid=2` 적용을 권장합니다.
-  - Serverdesk 기동 시 `/proc/mounts` 및 로컬 계정 상태를 점검하여 다중 사용자 환경에서 `hidepid` 미적용 시 경고를 출력합니다(`CheckArgvExposure`).
+  - 시스템 관리자 외 일반 사용자가 `/proc` 프로세스 목록을 볼 수 없도록 Linux 커널 마운트 옵션 `hidepid=2`를 적용합니다.
+  - Packaged installer와 Serverdesk 기동 검사는 service-private proc namespace가 아니라 host-wide
+    `/proc/mounts` 및 로컬 계정 상태를 확인합니다. 다중 사용자 환경에서 `hidepid=2` 미적용은
+    production 설치를 중단해야 하며, 명시적 break-glass는 보안 검증 통과가 아닙니다(`CheckArgvExposure`).
   - 관련 코드: `internal/config/checks.go:32-58, 83-143`
 
 ### 3.2 장비 자격증명 저장

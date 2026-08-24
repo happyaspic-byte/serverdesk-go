@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -28,9 +29,24 @@ const (
 	maxEventHostBytes        = 512
 	maxEventLabelBytes       = 2048
 	maxEventDescriptionBytes = 8192
+	maxAuditReasonRunes      = 500
 	maxEventLineBytes        = 16 << 10
 	minEventFileBytes        = 1 << 20
 )
+
+// AuditRecord is a structured, secret-free operator mutation record. Phase is
+// "prepared" before the state change and "committed" only after every part of
+// the mutation succeeded. The shared ID makes rollback/failure records
+// unambiguous during incident review.
+type AuditRecord struct {
+	ID        string
+	Action    string
+	Target    string
+	Reason    string
+	Operator  string
+	Phase     string
+	Timestamp time.Time
+}
 
 // EventLog 는 장비 이벤트의 링 + 크기가 제한된 jsonl 영속 저장소다.
 type EventLog struct {
@@ -199,7 +215,7 @@ func eventString(ev map[string]any, key string) string {
 }
 
 func normalizeEvent(ev map[string]any) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"ts":    truncateEventText(eventString(ev, "ts"), 64),
 		"host":  truncateEventText(eventString(ev, "host"), maxEventHostBytes),
 		"label": truncateEventText(eventString(ev, "label"), maxEventLabelBytes),
@@ -207,6 +223,15 @@ func normalizeEvent(ev map[string]any) map[string]any {
 		"sev":   truncateEventText(eventString(ev, "sev"), 32),
 		"desc":  truncateEventText(eventString(ev, "desc"), maxEventDescriptionBytes),
 	}
+	if eventString(ev, "kind") == "audit" {
+		out["audit_id"] = truncateEventText(eventString(ev, "audit_id"), 64)
+		out["action"] = truncateEventText(eventString(ev, "action"), 128)
+		out["target"] = truncateEventText(eventString(ev, "target"), maxEventHostBytes)
+		out["reason"] = truncateEventText(eventString(ev, "reason"), 2048)
+		out["operator"] = truncateEventText(eventString(ev, "operator"), 64)
+		out["phase"] = truncateEventText(eventString(ev, "phase"), 32)
+	}
+	return out
 }
 
 // marshalEventLine 은 JSON escaping까지 적용된 최종 한 줄을 절대 상한 안에 둔다.
@@ -392,6 +417,79 @@ func (el *EventLog) Add(host, label, kind, sev, desc string) {
 	} else if recovered {
 		logf("info", "events", "이벤트 이력 저장 복구")
 	}
+}
+
+// RecordAudit atomically rewrites and fsyncs the bounded event log before it
+// reports success. Records share EventLog's keep limit; this is a durable recent
+// operations trail, not an immutable or indefinite compliance archive. Unlike
+// Add, a failed audit write is never retained in the in-memory retry ring:
+// callers may roll the corresponding mutation back, so a later retry must not
+// resurrect a false "committed" record.
+func (el *EventLog) RecordAudit(record AuditRecord) error {
+	if el == nil {
+		return errors.New("audit event log is unavailable")
+	}
+	record.ID = strings.TrimSpace(record.ID)
+	record.Action = strings.TrimSpace(record.Action)
+	record.Target = strings.TrimSpace(record.Target)
+	record.Reason = strings.TrimSpace(record.Reason)
+	record.Operator = strings.TrimSpace(record.Operator)
+	record.Phase = strings.TrimSpace(record.Phase)
+	if record.ID == "" || record.Action == "" || record.Target == "" || record.Operator == "" || record.Phase == "" {
+		return errors.New("audit record is missing a required field")
+	}
+	if record.Reason == "" || !utf8.ValidString(record.Reason) || utf8.RuneCountInString(record.Reason) > maxAuditReasonRunes {
+		return fmt.Errorf("audit reason must contain 1-%d valid Unicode characters", maxAuditReasonRunes)
+	}
+	// These byte limits exactly match normalizeEvent so structured fields are
+	// rejected rather than silently truncated in the durable record.
+	if len(record.ID) > 64 || len(record.Action) > 128 || len(record.Target) > maxEventHostBytes ||
+		len(record.Operator) > 64 || len(record.Phase) > 32 || len(record.Reason) > 2048 {
+		return errors.New("audit record field exceeds its limit")
+	}
+	if record.Timestamp.IsZero() {
+		record.Timestamp = time.Now()
+	}
+	ev := normalizeEvent(map[string]any{
+		"ts": record.Timestamp.UTC().Format(time.RFC3339Nano), "host": record.Target,
+		"label": record.Operator, "kind": "audit", "sev": "info", "desc": record.Reason,
+		"audit_id": record.ID, "action": record.Action, "target": record.Target,
+		"reason": record.Reason, "operator": record.Operator, "phase": record.Phase,
+	})
+	if _, err := marshalEventLine(ev); err != nil {
+		return err
+	}
+
+	el.mu.Lock()
+	if el.loadBlocked {
+		err := errors.New("audit event log is blocked by an unreadable existing history")
+		el.lastError = err.Error()
+		el.lastErrorAt = time.Now()
+		el.mu.Unlock()
+		return err
+	}
+	previousRing := el.ring
+	candidate := append(append([]map[string]any(nil), previousRing...), ev)
+	if len(candidate) > el.keep {
+		candidate = candidate[len(candidate)-el.keep:]
+	}
+	el.ring = candidate
+	err := el.compactLocked()
+	if err != nil {
+		el.ring = previousRing
+		el.dirty = true
+		el.lastError = err.Error()
+		el.lastErrorAt = time.Now()
+		el.mu.Unlock()
+		logf("warn", "events", fmt.Sprintf("감사 이벤트 저장 실패: %v", err))
+		return err
+	}
+	el.dirty = false
+	el.lastError = ""
+	el.lastErrorAt = time.Time{}
+	el.lastWriteAt = time.Now()
+	el.mu.Unlock()
+	return nil
 }
 
 // Status 는 인증된 상세 health에 노출할 영속 저장 상태다. 파일 경로와 이벤트
