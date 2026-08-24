@@ -47,8 +47,9 @@ if [ "$action" = remove ] && [ ! -e "$config" ] && [ ! -L "$config" ]; then
   echo "[OK] no applied network state to remove"
   exit 0
 fi
-[ -f "$config" ] && [ ! -L "$config" ] && [ -r "$config" ] ||
+if [ ! -f "$config" ] || [ -L "$config" ] || [ ! -r "$config" ]; then
   fail "configuration must be a readable, regular, non-symlink file: $config"
+fi
 
 net_interface=
 aux_address=
@@ -116,6 +117,8 @@ valid_ipv4_cidr() {
   [ "$prefix" -le 32 ] 2>/dev/null || return 1
   old_ifs=$IFS
   IFS=.
+  # Intentional field splitting turns the IPv4 address into four octets.
+  # shellcheck disable=SC2086
   set -- $ip
   IFS=$old_ifs
   [ "$#" -eq 4 ] || return 1
@@ -130,8 +133,9 @@ valid_port "$source_port" || fail "SERVERDESK_TRAP_SOURCE_PORT must be 1..65535"
 valid_port "$target_port" || fail "SERVERDESK_TRAP_TARGET_PORT must be 1..65535"
 
 if [ -n "$net_interface" ] || [ -n "$aux_address" ]; then
-  [ -n "$net_interface" ] && [ -n "$aux_address" ] ||
+  if [ -z "$net_interface" ] || [ -z "$aux_address" ]; then
     fail "SERVERDESK_NET_INTERFACE and SERVERDESK_AUX_ADDRESS must be set together"
+  fi
   case "$net_interface" in -*|*[!A-Za-z0-9_.:@-]*) fail "invalid SERVERDESK_NET_INTERFACE" ;; esac
   valid_ipv4_cidr "$aux_address" || fail "SERVERDESK_AUX_ADDRESS must be an IPv4 CIDR such as 192.0.2.10/24"
 fi
@@ -152,18 +156,22 @@ iptables_bin=
 # resources created by Serverdesk; pre-existing host configuration is never
 # adopted merely because it has the same value.
 if [ "$action" = apply ] && [ -n "$state" ] && { [ -e "$state" ] || [ -L "$state" ]; }; then
-  [ -f "$state" ] && [ ! -L "$state" ] || fail "applied state must be a regular non-symlink file: $state"
+  if [ ! -f "$state" ] || [ -L "$state" ]; then
+    fail "applied state must be a regular non-symlink file: $state"
+  fi
   "$0" --config "$state" validate >/dev/null
   if grep -q '^SERVERDESK_AUX_ADDRESS=..*$' "$state"; then
-    grep -F -x -q "SERVERDESK_NET_INTERFACE=$net_interface" "$state" &&
-      grep -F -x -q "SERVERDESK_AUX_ADDRESS=$aux_address" "$state" ||
+    if ! grep -F -x -q "SERVERDESK_NET_INTERFACE=$net_interface" "$state" ||
+      ! grep -F -x -q "SERVERDESK_AUX_ADDRESS=$aux_address" "$state"; then
       fail "applied state owns a different auxiliary address; remove it before apply"
+    fi
     address_owned=1
   fi
   if grep -F -x -q 'SERVERDESK_ENABLE_TRAP_REDIRECT=true' "$state"; then
-    grep -F -x -q "SERVERDESK_TRAP_SOURCE_PORT=$source_port" "$state" &&
-      grep -F -x -q "SERVERDESK_TRAP_TARGET_PORT=$target_port" "$state" ||
+    if ! grep -F -x -q "SERVERDESK_TRAP_SOURCE_PORT=$source_port" "$state" ||
+      ! grep -F -x -q "SERVERDESK_TRAP_TARGET_PORT=$target_port" "$state"; then
       fail "applied state owns a different trap redirect; remove it before apply"
+    fi
     redirect_owned=1
   fi
 fi

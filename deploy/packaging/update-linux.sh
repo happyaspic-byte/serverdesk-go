@@ -16,9 +16,9 @@ INSTALLER=deploy/packaging/install-linux.sh
   echo "[FAIL] missing state directory: $STATE" >&2
   exit 1
 }
-[ -f "$INSTALLER" ] && [ ! -L "$INSTALLER" ] || {
+if [ ! -f "$INSTALLER" ] || [ -L "$INSTALLER" ]; then
   echo "[FAIL] missing or unsafe installer: $INSTALLER" >&2
   exit 1
-}
+fi
 
 exec sh "$INSTALLER"

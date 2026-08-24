@@ -5,13 +5,16 @@ set -eu
 [ "$#" -eq 2 ] || { echo "usage: $0 linux|windows STAGE_DIR" >&2; exit 2; }
 platform=$1
 stage=$2
-[ -d "$stage" ] && [ ! -L "$stage" ] || { echo "invalid release stage: $stage" >&2; exit 1; }
+if [ ! -d "$stage" ] || [ -L "$stage" ]; then
+  echo "invalid release stage: $stage" >&2
+  exit 1
+fi
 
 for path in config.example.json README.md NOTICE SECURITY.md deploy docs licenses; do
-  [ -e "$stage/$path" ] && [ ! -L "$stage/$path" ] || {
+  if [ ! -e "$stage/$path" ] || [ -L "$stage/$path" ]; then
     echo "missing or unsafe release payload: $path" >&2
     exit 1
-  }
+  fi
 done
 for license in LICENSE-Pretendard.txt LICENSE-SUIT.txt; do
   [ -f "$stage/licenses/$license" ] || { echo "missing font license: $license" >&2; exit 1; }
