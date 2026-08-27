@@ -4,6 +4,7 @@
   "avcli_bin": "avcli",
   "avcli_timeout": 90,
   "cache_refresh": 5,
+  "avail_retention_days": 90,
   "clusters": [],
   "_clusters_comment": "clusters 스키마 예시: everRun / ztC Edge FT 클러스터",
   "_clusters_example": [

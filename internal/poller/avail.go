@@ -22,19 +22,21 @@ import (
 )
 
 const (
-	availSampleSec  = 60  // 샘플 주기
-	availFlushEvery = 5   // N 샘플마다 디스크 flush
-	availGapCap     = 180 // 샘플 간격이 이보다 크면 폴러 미가동 — 그 구간은 관측 제외
-	availWindowDays = 30  // 실측 가용성 창
-	availPruneDays  = 35  // 이보다 오래된 일자 버킷은 버린다
-	availMinObsSec  = 600 // 관측 10분 미만이면 실측 대신 명목값 유지
-	kstOffset       = 9 * 3600
+	availSampleSec       = 60  // 샘플 주기
+	availFlushEvery      = 5   // N 샘플마다 디스크 flush
+	availGapCap          = 180 // 샘플 간격이 이보다 크면 폴러 미가동 — 그 구간은 관측 제외
+	defaultRetentionDays = 90
+	minRetentionDays     = 30
+	maxRetentionDays     = 365
+	availMinObsSec       = 600 // 관측 10분 미만이면 실측 대신 명목값 유지
+	kstOffset            = 9 * 3600
 )
 
 // AvailTracker 는 상태 샘플러 + 실측 가용성 계산이다.
 // GetStatuses: () -> [(id, status)].
 type AvailTracker struct {
-	path string
+	path          string
+	retentionDays int
 	// GetStatuses 는 (장비 id, "op"|"deg"|"down") 목록을 돌려준다.
 	GetStatuses func() [][2]string
 
@@ -53,12 +55,24 @@ func kstDay(epoch float64) string {
 	return time.Unix(int64(epoch), 0).UTC().Add(kstOffset * time.Second).Format("2006-01-02")
 }
 
-// NewAvailTracker 는 runtimeDir/availability.json 을 읽어 트래커를 만든다.
+// NewAvailTracker 는 기본 90일 보존 설정으로 트래커를 만든다.
 func NewAvailTracker(runtimeDir string, getStatuses func() [][2]string) *AvailTracker {
+	return NewAvailTrackerWithRetention(runtimeDir, defaultRetentionDays, getStatuses)
+}
+
+// NewAvailTrackerWithRetention 은 지정된 보존 기간(30~365일)으로 트래커를 만든다.
+func NewAvailTrackerWithRetention(runtimeDir string, retentionDays int, getStatuses func() [][2]string) *AvailTracker {
+	if retentionDays < minRetentionDays {
+		retentionDays = defaultRetentionDays
+	}
+	if retentionDays > maxRetentionDays {
+		retentionDays = maxRetentionDays
+	}
 	t := &AvailTracker{
-		path:        runtimeDir + string(os.PathSeparator) + "availability.json",
-		GetStatuses: getStatuses,
-		state:       map[string]*availRec{},
+		path:          runtimeDir + string(os.PathSeparator) + "availability.json",
+		retentionDays: retentionDays,
+		GetStatuses:   getStatuses,
+		state:         map[string]*availRec{},
 	}
 	if data, err := os.ReadFile(t.path); err == nil {
 		var raw map[string]*availRec
@@ -163,22 +177,35 @@ func (t *AvailTracker) Sample() {
 	t.mu.Unlock()
 }
 
-// pruneLocked 은 35일 넘은 일자 버킷을 버린다.
+// pruneLocked 은 보존 기간을 넘은 일자 버킷과 빈 장비 레코드를 버린다.
 func (t *AvailTracker) pruneLocked() {
-	cut := kstDay(nowFloat() - availPruneDays*86400)
-	for _, rec := range t.state {
+	cut := kstDay(nowFloat() - float64(t.retentionDays)*86400)
+	for id, rec := range t.state {
 		for k := range rec.Days {
 			if k < cut {
 				delete(rec.Days, k)
 			}
 		}
+		if len(rec.Days) == 0 {
+			delete(t.state, id)
+		}
 	}
+}
+
+func (t *AvailTracker) windowDays(days int) int {
+	if days <= 0 {
+		return t.retentionDays
+	}
+	if days > t.retentionDays {
+		return t.retentionDays
+	}
+	return days
 }
 
 // Apply 는 /api/devices 응답의 device[] 에 실측 availN·availDays 를 주입한다.
 // 관측이 10분 미만인 장비는 명목값을 유지한다.
 func (t *AvailTracker) Apply(devices []map[string]any) {
-	cut := kstDay(nowFloat() - availWindowDays*86400)
+	cut := kstDay(nowFloat() - float64(t.retentionDays)*86400)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, d := range devices {
@@ -194,12 +221,12 @@ func (t *AvailTracker) Apply(devices []map[string]any) {
 			}
 		}
 		if tot < availMinObsSec {
-			continue // 관측 부족 — 명목값 유지
+			continue
 		}
 		d["availN"] = round3(100.0 * (1.0 - down/tot))
-		days := math.RoundToEven(tot/86400.0*100) / 100 // Python round(x, 2)
+		days := math.RoundToEven(tot/86400.0*100) / 100
 		if days == 0 {
-			days = 0.01 // 관측 시작 직후도 0 이 아니게
+			days = 0.01
 		}
 		d["availDays"] = days
 	}
@@ -212,10 +239,23 @@ type AvailCSVRow struct {
 	ObservedSec float64
 }
 
-// CSVSnapshot 은 30일 창의 (일자×장비) 실측 가용성을 돌려준다(날짜→장비 id 순).
-// 관측 10분 미만 셀은 Apply 와 같은 이유(신뢰 불가)로 제외한다.
+// DeviceSLARow 는 지정 기간의 장비별 SLA 집계다.
+type DeviceSLARow struct {
+	Device       string
+	Avail        float64
+	ObservedSec  float64
+	DownSec      float64
+	ObservedDays int
+}
+
+// CSVSnapshot 은 전체 보존 창의 일자별 실측 가용성을 돌려준다.
 func (t *AvailTracker) CSVSnapshot() []AvailCSVRow {
-	cut := kstDay(nowFloat() - availWindowDays*86400)
+	return t.CSVSnapshotDays(0)
+}
+
+// CSVSnapshotDays 는 지정 기간의 일자별 실측 가용성을 돌려준다.
+func (t *AvailTracker) CSVSnapshotDays(days int) []AvailCSVRow {
+	cut := kstDay(nowFloat() - float64(t.windowDays(days))*86400)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var out []AvailCSVRow
@@ -234,6 +274,33 @@ func (t *AvailTracker) CSVSnapshot() []AvailCSVRow {
 		}
 		return out[i].Device < out[j].Device
 	})
+	return out
+}
+
+// SLASnapshot 은 지정 기간의 장비별 가용성 집계를 돌려준다.
+func (t *AvailTracker) SLASnapshot(days int) []DeviceSLARow {
+	cut := kstDay(nowFloat() - float64(t.windowDays(days))*86400)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []DeviceSLARow
+	for id, rec := range t.state {
+		tot, down, observedDays := 0.0, 0.0, 0
+		for day, cell := range rec.Days {
+			if day < cut || len(cell) < 2 || cell[0] < availMinObsSec {
+				continue
+			}
+			tot += cell[0]
+			down += cell[1]
+			observedDays++
+		}
+		if tot < availMinObsSec {
+			continue
+		}
+		out = append(out, DeviceSLARow{Device: id,
+			Avail: round3(100.0 * (1.0 - down/tot)), ObservedSec: tot,
+			DownSec: down, ObservedDays: observedDays})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Device < out[j].Device })
 	return out
 }
 

@@ -358,7 +358,8 @@ type Config struct {
 	HistoryPoints      int                `json:"history_points"` // 기본 120
 	CacheRefresh       int                `json:"cache_refresh"`  // 초, 기본 5
 	RuntimeDir         string             `json:"runtime_dir"`
-	SSHTimeout         int                `json:"ssh_timeout"` // 초, 기본 20
+	AvailRetentionDays int                `json:"avail_retention_days"` // 가용성 보존 기간(일), 기본 90 (30~365)
+	SSHTimeout         int                `json:"ssh_timeout"`          // 초, 기본 20
 	SNMPEnabled        bool               `json:"snmp_enabled"`
 	SNMPCommunity      string             `json:"snmp_community,omitempty"`
 	Intervals          Intervals          `json:"intervals"`
@@ -478,6 +479,11 @@ func parseWithCredentialDirectory(data []byte, managedDir string) (*Config, erro
 	}
 	if _, ok := top["runtime_dir"]; !ok {
 		c.RuntimeDir = "data"
+	}
+	if _, ok := top["avail_retention_days"]; !ok {
+		c.AvailRetentionDays = 90
+	} else if c.AvailRetentionDays < 30 || c.AvailRetentionDays > 365 {
+		return nil, fmt.Errorf("avail_retention_days: 30 이상 365 이하의 일수여야 합니다 (입력: %d)", c.AvailRetentionDays)
 	}
 	if _, ok := top["ssh_timeout"]; !ok {
 		c.SSHTimeout = 20

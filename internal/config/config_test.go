@@ -56,6 +56,9 @@ func TestLoadDefaults(t *testing.T) {
 	if c.RuntimeDir != "data" {
 		t.Errorf("runtime_dir = %q", c.RuntimeDir)
 	}
+	if c.AvailRetentionDays != 90 {
+		t.Errorf("avail_retention_days = %d, want 90", c.AvailRetentionDays)
+	}
 	if c.SSHTimeout != 20 {
 		t.Errorf("ssh_timeout = %d, want 20", c.SSHTimeout)
 	}

@@ -3,11 +3,13 @@ param([string]$Binary, [string]$HealthUrl)
 # Transactional serverdesk Windows updater (PowerShell 5.1).
 $ErrorActionPreference = 'Stop'
 $src = Split-Path -Parent $MyInvocation.MyCommand.Path
-$dst = 'C:\serverdesk'
-$exe = "$dst\serverdesk.exe"
-$configPath = "$dst\config.local.json"
-$authPath = "$dst\auth.json"
-$transaction = "$dst\.update-transaction"
+$programDir = Join-Path $env:ProgramFiles 'Serverdesk'
+$dataDir = Join-Path $env:ProgramData 'Serverdesk'
+$dst = $programDir
+$exe = Join-Path $programDir 'serverdesk.exe'
+$configPath = Join-Path $dataDir 'config.local.json'
+$authPath = Join-Path $dataDir 'auth.json'
+$transaction = Join-Path $dataDir '.update-transaction'
 $new = if ($Binary) {
     $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Binary)
 } else {
@@ -77,7 +79,7 @@ foreach ($trustedInstalledPath in @($exe, $configPath, $authPath, "$dst\run-serv
         Assert-ServerdeskTrustedReadOnlyPath $trustedInstalledPath 'Installed package/control file'
     }
 }
-$credentialDir = "$dst\credentials"
+$credentialDir = Join-Path $dataDir 'credentials'
 $credentialDirectoryExisted = Test-Path -LiteralPath $credentialDir
 if ($credentialDirectoryExisted) {
     $credentialItem = Get-Item -LiteralPath $credentialDir -Force
@@ -149,7 +151,7 @@ $trackedFiles = @('serverdesk.exe', 'config.local.json', 'run-serverdesk.cmd', '
     'update.ps1', 'uninstall.ps1', 'windows-deployment-common.ps1')
 $existed = @{}
 $priorAclEntries = @()
-$aclPaths = @($dst, "$dst\credentials", $authPath, "$dst\initial-login.txt")
+$aclPaths = @($dst, $dataDir, $credentialDir, $authPath, (Join-Path $dataDir 'initial-login.txt'))
 $aclPaths += @($trackedFiles | ForEach-Object { Join-Path $dst $_ })
 if (Test-Path -LiteralPath $credentialDir -PathType Container) {
     $aclPaths += @(Get-ChildItem -LiteralPath $credentialDir -Recurse -Force |
@@ -242,7 +244,7 @@ try {
     }
 
     New-Item -ItemType Directory -Path $credentialDir -Force | Out-Null
-    & icacls.exe $credentialDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+    & icacls.exe $credentialDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)F' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Failed to protect the runtime credential store.' }
     Write-ServerdeskRunner "$dst\run-serverdesk.ps1" $credentialDir
     if ($null -ne (Get-ChildItem -LiteralPath $credentialDir -Force | Select-Object -First 1)) {
@@ -264,7 +266,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "Failed to set trusted owner: $ownedPath" }
         }
     }
-    Register-ServerdeskTask $dst
+    Register-ServerdeskTask $programDir $dataDir
     Set-ServerdeskFirewall -Endpoint $endpoint -Program $exe
 
     Start-ScheduledTask -TaskName serverdesk
@@ -285,7 +287,7 @@ try {
     } else {
         Write-Host "[OK] updated transactionally and healthy ($code) at $($endpoint.HealthUrl)."
     }
-    Write-Host '     Previous executable is retained as C:\serverdesk\serverdesk.exe.bak.'
+    Write-Host "     Previous executable is retained as $exe.bak."
 } catch {
     $updateError = $_
     if (-not $serviceTouched) {
