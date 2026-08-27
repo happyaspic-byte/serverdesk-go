@@ -6,13 +6,17 @@ param([string]$HealthUrl)
 # Licensed Stratus AVCLI/JRE/MIB artifacts are provisioned separately and are never unpacked here.
 $ErrorActionPreference = 'Stop'
 $src = Split-Path -Parent $MyInvocation.MyCommand.Path
-$dst = 'C:\serverdesk'
-$authPath = "$dst\auth.json"
-$initialLoginPath = "$dst\initial-login.txt"
+$legacyRoot = 'C:\serverdesk'
+$programDir = Join-Path $env:ProgramFiles 'Serverdesk'
+$dataDir = Join-Path $env:ProgramData 'Serverdesk'
+$dst = $programDir
+$configPath = Join-Path $dataDir 'config.local.json'
+$authPath = Join-Path $dataDir 'auth.json'
+$initialLoginPath = Join-Path $dataDir 'initial-login.txt'
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $binarySource = "$src\serverdesk-windows-amd64.exe"
 $commonSource = "$src\windows-deployment-common.ps1"
-$installMarker = "$dst\.install-in-progress"
+$installMarker = Join-Path $dataDir '.install-in-progress'
 $destinationCreatedByRun = $false
 $mayMigrateLegacyAcl = $false
 foreach ($requiredAsset in @($binarySource, $commonSource, "$src\config.example.json",
@@ -40,6 +44,35 @@ while (-not [string]::IsNullOrWhiteSpace($bootstrapCursor)) {
 }
 . $commonSource
 Assert-ServerdeskAdministrator
+
+foreach ($managedRoot in @($programDir, $dataDir)) {
+    if (Test-Path -LiteralPath $managedRoot) {
+        $managedItem = Get-Item -LiteralPath $managedRoot -Force
+        if (-not $managedItem.PSIsContainer -or
+            ($managedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Managed root must be a regular directory: $managedRoot"
+        }
+    } else {
+        New-Item -ItemType Directory -Path $managedRoot -Force | Out-Null
+    }
+}
+
+# Legacy C:\serverdesk state is copied, never moved, until health succeeds.
+if (Test-Path -LiteralPath $legacyRoot -PathType Container -and
+    -not (Test-Path -LiteralPath (Join-Path $dataDir 'config.local.json'))) {
+    foreach ($name in @('config.local.json', 'auth.json', 'initial-login.txt', 'data', 'credentials', 'run.log')) {
+        $source = Join-Path $legacyRoot $name
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $dataDir $name) -Recurse -Force
+        }
+    }
+}
+
+& icacls.exe $programDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)RX' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to protect Program Files root: $programDir" }
+& icacls.exe $dataDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to protect ProgramData root: $dataDir" }
+
 $binarySourceItem = Get-Item -LiteralPath $binarySource -Force
 if (($binarySourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "Refusing reparse-point package binary: $binarySource"
@@ -77,7 +110,7 @@ if (Test-Path -LiteralPath $dst) {
     $legacyActionRecognized = $null -ne $legacyTask
     $mayMigrateLegacyAcl = $legacyActionRecognized -and
         (Test-Path -LiteralPath "$dst\serverdesk.exe" -PathType Leaf) -and
-        (Test-Path -LiteralPath "$dst\config.local.json" -PathType Leaf)
+        (Test-Path -LiteralPath $configPath -PathType Leaf)
     $destinationAcl = Get-Acl -LiteralPath $dst
     $ownerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $destinationAcl.Owner
     $ownerSid = $ownerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
@@ -194,14 +227,14 @@ function Assert-RegularNonReparseFile([string]$Path, [string]$Description) {
     }
 }
 
-$freshInstall = -not (Test-Path -LiteralPath "$dst\config.local.json")
+$freshInstall = -not (Test-Path -LiteralPath $configPath)
 if (-not $freshInstall) {
-    Assert-RegularNonReparseFile "$dst\config.local.json" 'Existing config'
-    $null = Get-Content "$dst\config.local.json" -Raw | ConvertFrom-Json
+    Assert-RegularNonReparseFile $configPath 'Existing config'
+    $null = Get-Content $configPath -Raw | ConvertFrom-Json
     $preflightHealthUrl = if ($HealthUrl) { $HealthUrl } else { $env:SERVERDESK_HEALTH_URL }
-    $preflightEndpoint = Get-ServerdeskEndpoint -ConfigPath "$dst\config.local.json" -HealthUrl $preflightHealthUrl
+    $preflightEndpoint = Get-ServerdeskEndpoint -ConfigPath $configPath -HealthUrl $preflightHealthUrl
     $preflightAllowDegraded = $env:SERVERDESK_ALLOW_DEGRADED_COLLECTION -eq '1'
-    Test-ServerdeskAvcliPrerequisites -Endpoint $preflightEndpoint -ConfigPath "$dst\config.local.json" -AllowDegraded:$preflightAllowDegraded
+    Test-ServerdeskAvcliPrerequisites -Endpoint $preflightEndpoint -ConfigPath $configPath -AllowDegraded:$preflightAllowDegraded
 }
 
 if (Test-Path -LiteralPath $authPath) {
@@ -258,7 +291,7 @@ if ($hadExistingBinary) {
     }
 }
 $hadExistingConfig = -not $freshInstall
-$existingConfigBytes = if ($hadExistingConfig) { [IO.File]::ReadAllBytes("$dst\config.local.json") } else { $null }
+$existingConfigBytes = if ($hadExistingConfig) { [IO.File]::ReadAllBytes($configPath) } else { $null }
 $priorTask = Get-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
 $null = Assert-ServerdeskManagedTask $priorTask $dst
 $priorTaskXml = Export-ScheduledTask -TaskName serverdesk -ErrorAction SilentlyContinue
@@ -288,14 +321,14 @@ if ((Test-Path "$src\docs") -and -not (Test-Path "$dst\docs")) {
 }
 
 if ($freshInstall) {
-    Copy-Item "$src\config.example.json" "$dst\config.local.json"
+    Copy-Item "$src\config.example.json" $configPath
     Write-Host "[INFO] config.local.json created - edit device addresses and settings."
     Write-Host "       NOTE: save it as UTF-8 *without* BOM (VS Code default). Notepad UTF-8 BOM is rejected by the Go JSON parser."
 } else {
     Write-Host "[INFO] keeping existing config.local.json"
 }
 
-$cfg = Get-Content "$dst\config.local.json" -Raw | ConvertFrom-Json
+$cfg = Get-Content $configPath -Raw | ConvertFrom-Json
 $configChanged = $false
 $runtimeValue = [string]$cfg.runtime_dir
 if ([string]::IsNullOrWhiteSpace($runtimeValue)) {
@@ -311,9 +344,9 @@ if ([string]::IsNullOrWhiteSpace($runtimeValue)) {
 $runtimeDir = if ([IO.Path]::IsPathRooted($runtimeValue)) {
     [IO.Path]::GetFullPath($runtimeValue).TrimEnd('\')
 } else {
-    [IO.Path]::GetFullPath((Join-Path $dst $runtimeValue)).TrimEnd('\')
+    [IO.Path]::GetFullPath((Join-Path $dataDir $runtimeValue)).TrimEnd('\')
 }
-$installRoot = [IO.Path]::GetFullPath($dst).TrimEnd('\')
+$installRoot = [IO.Path]::GetFullPath($dataDir).TrimEnd('\')
 if ($runtimeDir -eq $installRoot -or
     -not $runtimeDir.StartsWith(($installRoot + '\'), [StringComparison]::OrdinalIgnoreCase)) {
     throw "runtime_dir must be a child of the protected installation directory: $installRoot"
@@ -328,15 +361,15 @@ foreach ($name in @('sim_devices', 'sim_seed', '_sim_note')) {
     }
 }
 if ($configChanged) {
-    [IO.File]::WriteAllText("$dst\config.local.json", (($cfg | ConvertTo-Json -Depth 20) + [Environment]::NewLine), $utf8NoBom)
+    [IO.File]::WriteAllText($configPath, (($cfg | ConvertTo-Json -Depth 20) + [Environment]::NewLine), $utf8NoBom)
 }
 if ($legacyRemoved) {
     Write-Host "[INFO] removed legacy simulation settings"
 }
-$installCreatedDirectories += @(New-ServerdeskTrackedDirectory $runtimeDir $dst)
-$credentialDir = "$dst\credentials"
-$installCreatedDirectories += @(New-ServerdeskTrackedDirectory $credentialDir $dst)
-& icacls.exe $credentialDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+$installCreatedDirectories += @(New-ServerdeskTrackedDirectory $runtimeDir $dataDir)
+$credentialDir = Join-Path $dataDir 'credentials'
+$installCreatedDirectories += @(New-ServerdeskTrackedDirectory $credentialDir $dataDir)
+& icacls.exe $credentialDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Failed to harden credential store ACLs: $credentialDir" }
 
 $mibDir = "$dst\mibs"
@@ -347,14 +380,14 @@ Write-Host "[INFO] Licensed MIB files may be provisioned separately in $mibDir; 
 if ($LASTEXITCODE -ne 0) { throw "Failed to enforce trusted owners in $dst" }
 
 $effectiveHealthUrl = if ($HealthUrl) { $HealthUrl } else { $env:SERVERDESK_HEALTH_URL }
-$endpoint = Get-ServerdeskEndpoint -ConfigPath "$dst\config.local.json" -HealthUrl $effectiveHealthUrl
+$endpoint = Get-ServerdeskEndpoint -ConfigPath $configPath -HealthUrl $effectiveHealthUrl
 $allowDegraded = $env:SERVERDESK_ALLOW_DEGRADED_COLLECTION -eq '1'
-Test-ServerdeskAvcliPrerequisites -Endpoint $endpoint -ConfigPath "$dst\config.local.json" -AllowDegraded:$allowDegraded
+Test-ServerdeskAvcliPrerequisites -Endpoint $endpoint -ConfigPath $configPath -AllowDegraded:$allowDegraded
 Set-ServerdeskFirewall -Endpoint $endpoint -Program "$dst\serverdesk.exe"
 Write-ServerdeskRunner "$dst\run-serverdesk.ps1" $credentialDir
 & icacls.exe "$dst\run-serverdesk.ps1" /setowner '*S-1-5-32-544' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Failed to set trusted owner on the runtime runner.' }
-Register-ServerdeskTask $dst
+Register-ServerdeskTask $programDir $dataDir
 Start-ScheduledTask -TaskName serverdesk
 Start-Sleep -Seconds 6
 
@@ -389,9 +422,9 @@ Start-Sleep -Seconds 6
         Remove-Item "$dst\serverdesk.exe" -Force -ErrorAction SilentlyContinue
     }
     if ($hadExistingConfig) {
-        [IO.File]::WriteAllBytes("$dst\config.local.json", $existingConfigBytes)
+        [IO.File]::WriteAllBytes($configPath, $existingConfigBytes)
     } else {
-        Remove-Item "$dst\config.local.json" -Force -ErrorAction SilentlyContinue
+        Remove-Item $configPath -Force -ErrorAction SilentlyContinue
     }
     if ($null -ne $priorTaskXml) {
         Register-ScheduledTask -TaskName serverdesk -Xml $priorTaskXml -Force | Out-Null

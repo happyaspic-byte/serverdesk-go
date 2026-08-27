@@ -100,7 +100,8 @@ function Assert-ServerdeskAdministrator {
 function Assert-ServerdeskManagedTask($Task, [string]$Destination) {
     if ($null -eq $Task) { return }
     $principal = [string]$Task.Principal.UserId
-    if ($principal -notin @('SYSTEM', 'S-1-5-18', 'NT AUTHORITY\SYSTEM')) {
+    if ($principal -notin @('SYSTEM', 'S-1-5-18', 'NT AUTHORITY\SYSTEM',
+        'LOCAL SERVICE', 'S-1-5-19', 'NT AUTHORITY\LOCAL SERVICE')) {
         throw "Refusing an existing serverdesk task with an unexpected principal: $principal"
     }
     $actions = @($Task.Actions)
@@ -521,13 +522,19 @@ while ($true) {
     [IO.File]::WriteAllText($Destination, ($runner + [Environment]::NewLine), [Text.Encoding]::ASCII)
 }
 
-function Register-ServerdeskTask([string]$Destination) {
-    $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $taskAction = New-ScheduledTaskAction -Execute $powershell `
-        -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\serverdesk\run-serverdesk.ps1' `
-        -WorkingDirectory $Destination
+function Register-ServerdeskTask([string]$ProgramDirectory, [string]$DataDirectory) {
+    if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
+        $DataDirectory = $ProgramDirectory
+    }
+    $executable = Join-Path $ProgramDirectory 'serverdesk.exe'
+    $configPath = Join-Path $DataDirectory 'config.local.json'
+    $authPath = Join-Path $DataDirectory 'auth.json'
+    $arguments = "-c `"$configPath`" -auth `"$authPath`""
+    $taskAction = New-ScheduledTaskAction -Execute $executable `
+        -Argument $arguments -WorkingDirectory $ProgramDirectory
     $taskTrigger = New-ScheduledTaskTrigger -AtStartup
-    $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\LOCAL SERVICE' `
+        -LogonType ServiceAccount -RunLevel Limited
     $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew

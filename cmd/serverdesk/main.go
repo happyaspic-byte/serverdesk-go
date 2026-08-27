@@ -373,7 +373,7 @@ func main() {
 	}
 
 	// 실측 가용성 트래커 — FT 클러스터 + 엣지 장비 상태를 60초 샘플링해 영속.
-	avail := poller.NewAvailTracker(runtimeDir, func() [][2]string {
+	avail := poller.NewAvailTrackerWithRetention(runtimeDir, cfg.AvailRetentionDays, func() [][2]string {
 		var out [][2]string
 		fleet, _, _ := cache.Snapshot()
 		if fleet != nil {

@@ -318,8 +318,8 @@ grep -F -q 'Set-Acl -LiteralPath $entry.Path -AclObject $entry.Acl' \
   deploy/packaging/install-windows.ps1 || fail 'Windows reinstall does not restore prior ACLs'
 grep -F -q 'New-ServerdeskTrackedDirectory' deploy/packaging/install-windows.ps1 ||
   fail 'Windows reinstall does not track newly created managed directories'
-grep -F -q 'Join-Path $dst $runtimeValue' deploy/packaging/install-windows.ps1 ||
-  fail 'Windows installer discards a custom relative runtime_dir instead of managing it below the install root'
+grep -F -q 'Join-Path $dataDir $runtimeValue' deploy/packaging/install-windows.ps1 ||
+  fail 'Windows installer must resolve relative runtime_dir below ProgramData'
 grep -F -q 'Failed to set trusted owner on the runtime runner' deploy/packaging/install-windows.ps1 ||
   fail 'Windows installer leaves SYSTEM task code owned by the invoking account'
 grep -F -q 'new transaction directory is not empty; preserving it for inspection' \
@@ -361,7 +361,7 @@ grep -F -q 'A deployment transaction/recovery path is present' deploy/packaging/
 grep -F -q 'ForEach-Object { Write-ServerdeskLog' deploy/packaging/windows-deployment-common.ps1 ||
   fail 'Windows runner must enforce log rotation while the process is running'
 grep -F -q 'Windows packaged runtime — commercial NO-GO' docs/SECURITY.md ||
-  fail 'Windows SYSTEM runtime must remain an explicit commercial production NO-GO'
+  fail 'Windows packaging must remain an explicit commercial production NO-GO until real hardware UAT'
 if grep -n -E 'Invoke-WebRequest[[:space:]]+http://127\.0\.0\.1:6005|Expand-Archive.*(avcli|jre)' \
   deploy/packaging/*.ps1 >/dev/null 2>&1; then
   fail 'Windows deployment regressed to fixed health URL or bundled vendor extraction'
