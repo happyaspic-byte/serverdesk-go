@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -61,6 +62,102 @@ type EventLog struct {
 	lastErrorAt  time.Time
 	dirty        bool
 	loadBlocked  bool
+
+	sinks        []AuditSink
+	forwardCh    chan AuditEvent
+	sinkWG       sync.WaitGroup
+	forwardCtx   context.Context
+	forwardDone  context.CancelFunc
+	forwardDrops atomic.Int64
+	forwardSent  atomic.Int64
+	forwardErrs  atomic.Int64
+	lastSinkErr  string
+}
+
+// RegisterAuditSink 는 외부 Syslog/SIEM 수신처를 등록한다.
+func (el *EventLog) RegisterAuditSink(sink AuditSink) {
+	if sink == nil || el == nil {
+		return
+	}
+	el.mu.Lock()
+	defer el.mu.Unlock()
+	el.sinks = append(el.sinks, sink)
+}
+
+// StartAuditForwarder 는 비동기 전송 워커 루프를 시작한다.
+func (el *EventLog) StartAuditForwarder(ctx context.Context, buffer int) {
+	if el == nil {
+		return
+	}
+	if buffer <= 0 {
+		buffer = 1000
+	}
+	el.mu.Lock()
+	el.forwardCh = make(chan AuditEvent, buffer)
+	el.forwardCtx, el.forwardDone = context.WithCancel(ctx)
+	el.mu.Unlock()
+
+	el.sinkWG.Add(1)
+	go func() {
+		defer el.sinkWG.Done()
+		for {
+			select {
+			case <-el.forwardCtx.Done():
+				el.drainSinks()
+				return
+			case ev, ok := <-el.forwardCh:
+				if !ok {
+					el.drainSinks()
+					return
+				}
+				el.dispatchAudit(ev)
+			}
+		}
+	}()
+}
+
+func (el *EventLog) dispatchAudit(ev AuditEvent) {
+	el.mu.RLock()
+	sinks := append([]AuditSink(nil), el.sinks...)
+	el.mu.RUnlock()
+
+	for _, s := range sinks {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := s.Send(ctx, ev)
+		cancel()
+		if err != nil {
+			el.forwardErrs.Add(1)
+			el.mu.Lock()
+			el.lastSinkErr = err.Error()
+			el.mu.Unlock()
+			logf("warn", "events", fmt.Sprintf("외부 감사 전송 실패: %v", err))
+		} else {
+			el.forwardSent.Add(1)
+		}
+	}
+}
+
+func (el *EventLog) drainSinks() {
+	el.mu.RLock()
+	sinks := append([]AuditSink(nil), el.sinks...)
+	el.mu.RUnlock()
+	for _, s := range sinks {
+		_ = s.Close()
+	}
+}
+
+// StopAuditForwarder 는 워커를 안전하게 중지한다.
+func (el *EventLog) StopAuditForwarder() {
+	if el == nil {
+		return
+	}
+	el.mu.Lock()
+	done := el.forwardDone
+	el.mu.Unlock()
+	if done != nil {
+		done()
+		el.sinkWG.Wait()
+	}
 }
 
 // NewEventLog 는 path 의 제한된 테일(최대 keep 건)만 복원한다. 이전 버전의
@@ -410,7 +507,24 @@ func (el *EventLog) Add(host, label, kind, sev, desc string) {
 		el.lastWriteAt = time.Now()
 	}
 	newError := err != nil && err.Error() != previousError
+	forwardCh := el.forwardCh
 	el.mu.Unlock()
+
+	if forwardCh != nil {
+		audit := AuditEvent{
+			Timestamp:   time.Now().UTC(),
+			Host:        eventString(ev, "host"),
+			Label:       eventString(ev, "label"),
+			Kind:        eventString(ev, "kind"),
+			Severity:    eventString(ev, "sev"),
+			Description: eventString(ev, "desc"),
+		}
+		select {
+		case forwardCh <- audit:
+		default:
+			el.forwardDrops.Add(1)
+		}
+	}
 
 	if newError {
 		logf("warn", "events", fmt.Sprintf("이벤트 이력 저장 실패: %v", err))
@@ -508,6 +622,14 @@ func (el *EventLog) Status() map[string]any {
 	if el.lastError != "" {
 		lastErr = el.lastError
 	}
+	var sinkErr any
+	if el.lastSinkErr != "" {
+		sinkErr = el.lastSinkErr
+	}
+	queueDepth := 0
+	if el.forwardCh != nil {
+		queueDepth = len(el.forwardCh)
+	}
 	return map[string]any{
 		"healthy":        !el.dirty && !el.loadBlocked && el.lastError == "",
 		"buffered":       len(el.ring),
@@ -518,6 +640,14 @@ func (el *EventLog) Status() map[string]any {
 		"last_write_at":  lastWrite,
 		"last_error":     lastErr,
 		"last_error_at":  lastErrAt,
+		"forwarder": map[string]any{
+			"enabled":     el.forwardCh != nil,
+			"queue_depth": queueDepth,
+			"sent":        el.forwardSent.Load(),
+			"errors":      el.forwardErrs.Load(),
+			"dropped":     el.forwardDrops.Load(),
+			"last_error":  sinkErr,
+		},
 	}
 }
 

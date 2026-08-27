@@ -70,14 +70,12 @@ Serverdesk 웹 콘솔은 단일 관리자(`admin`) 계정 기반으로 작동하
 
 ### 3.0 Windows packaged runtime — commercial NO-GO
 
-현재 Windows Scheduled Task는 web/API/collector 전체를 `SYSTEM`으로 실행한다. 따라서 원격 입력을
-처리하는 코드의 취약점이 곧 host `SYSTEM` 권한으로 확대될 수 있다. 이 상태는 Windows commercial
-production 승인 근거로 사용할 수 없으며 UAT 결과와 무관하게 **NO-GO**다.
+Windows 패키지는 executable/scripts를 `C:\Program Files\Serverdesk`, config/auth/data/log를
+`C:\ProgramData\Serverdesk`로 분리하고 Scheduled Task를 `NT AUTHORITY\LOCAL SERVICE`로 실행한다.
+Program Files는 LocalService read/execute 전용, ProgramData는 LocalService와 Administrators만 writable이다.
 
-해제 조건은 executable/scripts를 `C:\Program Files\Serverdesk`의 read/execute-only ACL에 두고,
-config/auth/data/log/DPAPI credential만 `C:\ProgramData\Serverdesk`의 전용 writable ACL로 분리한 뒤
-LocalService 또는 검증된 전용 service identity로 실행하는 것이다. 기존 설치 migration, DPAPI 복호화,
-TLS/AVCLI/JRE read 권한, updater rollback 및 uninstall 보존을 실제 Windows에서 검증해야 한다.
+구조적 SYSTEM 차단은 해소했지만 상용 GA는 아직 **NO-GO**다. 기존 설치 migration, machine-scoped DPAPI,
+TLS/AVCLI/JRE read 권한, updater rollback, uninstall 보존을 실제 Windows Server에서 검증해야 한다.
 
 ### 3.1 `avcli -p` 프로세스 인자 노출
 - **한계**: Stratus everRun / ztC Edge CLI인 `avcli`는 비밀번호를 파일이나 환경변수로 전달하는 표준 옵션이 없어, 실행 시 `-p <암호>` 형태로 커맨드라인(`argv`)에 일시 노출됩니다.
