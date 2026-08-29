@@ -110,6 +110,9 @@ func NewWebhookSink(url string, client *http.Client) *WebhookSink {
 	if client == nil {
 		client = &http.Client{
 			Timeout: 5 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 			},

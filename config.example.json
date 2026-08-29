@@ -122,6 +122,15 @@
     "retry_max": 5,
     "retry_base_seconds": 5
   },
+  "_audit_comment": "외부 SIEM/Syslog 포워더. 기본 비활성. 현재 운영 경로는 syslog만 지원합니다. webhook은 아직 지원하지 않습니다. 포워더 실패는 수집을 막지 않으며 /api/admin/health의 event_store.forwarder에 상태가 표시됩니다.",
+  "audit": {
+    "enabled": false,
+    "transport": "syslog",
+    "syslog_network": "udp",
+    "syslog_address": "127.0.0.1:514",
+    "syslog_app": "serverdesk",
+    "queue_buffer": 1000
+  },
   "thresholds": {
     "crit": 90,
     "warn": 78

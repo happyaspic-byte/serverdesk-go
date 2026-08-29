@@ -82,7 +82,10 @@ Stable tag는 **candidate만** 생성한다. 승인 workflow가 이미 존재하
 가능하다는 뜻이 아니다. 현재 workflow의 두 번 비교는 **동일 staged payload의 archive determinism**이며,
 독립된 compiler rebuild의 재현성 증명이 아니다. [RELEASE.md](RELEASE.md)를 따른다.
 
-구조화된 감사 `events.jsonl`은 최근 500건 범위다. 외부 SIEM/감사 저장소와 별도 보존 시험 없이
-장기·불변 규제 보존을 지원한다고 표시하지 않는다. Credential 노출, TLS 우회, rollback 실패,
+구조화된 감사 `events.jsonl`은 최근 500건 범위다. 외부 포워더는 설정에서 명시적으로 활성화한
+Syslog UDP/TCP만 운영 경로에 연결되며, queue depth/sent/errors/dropped/last error는 인증된
+`/api/admin/health`의 `event_store.forwarder`에 노출된다. 포워더 오류·drop은 수집을 중단하지 않고
+상세 health를 degraded로 만든다. Webhook 포워더와 고객의 장기·불변 규제 보존 요건은 별도 구현·보존
+시험 없이는 지원한다고 표시하지 않는다. Credential 노출, TLS 우회, rollback 실패,
 미지원 destructive action이 발견되면 배포를 중단한다. 지원/승인 기준은
 [SUPPORT-MATRIX.md](SUPPORT-MATRIX.md), [COMMERCIAL-UAT.md](COMMERCIAL-UAT.md)를 따른다.

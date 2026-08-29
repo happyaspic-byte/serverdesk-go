@@ -77,7 +77,12 @@ Program Files는 LocalService read/execute 전용, ProgramData는 LocalService�
 구조적 SYSTEM 차단은 해소했지만 상용 GA는 아직 **NO-GO**다. 기존 설치 migration, machine-scoped DPAPI,
 TLS/AVCLI/JRE read 권한, updater rollback, uninstall 보존을 실제 Windows Server에서 검증해야 한다.
 
-### 3.1 `avcli -p` 프로세스 인자 노출
+### 3.1 외부 감사 포워더
+- 기본 비활성입니다. 명시적으로 활성화하면 현재 운영 경로는 RFC 5424 Syslog UDP/TCP뿐입니다.
+- 전송은 비동기 bounded queue에서 수행하며, 외부 수신처 오류나 queue drop이 수집을 중단시키지 않습니다. 오류·drop·queue depth는 인증된 `/api/admin/health`의 `event_store.forwarder`에서 확인하고, 오류가 있으면 상세 health가 `degraded`가 됩니다.
+- Webhook 포워더, TLS Syslog, 장기·불변 규제 보존은 아직 지원하지 않습니다. 별도 전송 보안·보존 UAT 전에는 해당 기능을 상용 지원으로 표시하지 않습니다.
+
+### 3.2 `avcli -p` 프로세스 인자 노출
 - **한계**: Stratus everRun / ztC Edge CLI인 `avcli`는 비밀번호를 파일이나 환경변수로 전달하는 표준 옵션이 없어, 실행 시 `-p <암호>` 형태로 커맨드라인(`argv`)에 일시 노출됩니다.
   - 관련 코드: `internal/avcli/client.go:45-46`
 - **완화 대책**:
@@ -87,7 +92,7 @@ TLS/AVCLI/JRE read 권한, updater rollback, uninstall 보존을 실제 Windows 
     production 설치를 중단해야 하며, 명시적 break-glass는 보안 검증 통과가 아닙니다(`CheckArgvExposure`).
   - 관련 코드: `internal/config/checks.go:32-58, 83-143`
 
-### 3.2 장비 자격증명 저장
+### 3.3 장비 자격증명 저장
 - **운영 기본값**: `secret_policy=require-references`는 평문 비밀이 있는 설정의 기동을 거부합니다.
   `secret://NAME`은 worker 구성 전에 메모리에서만 해석되며 원본 JSON과 API 백업에는 참조만 남습니다.
 - **Linux**: systemd `LoadCredential=`가 제공하는 private `CREDENTIALS_DIRECTORY`를 우선 사용합니다.

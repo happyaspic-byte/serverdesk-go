@@ -103,11 +103,13 @@ func (el *EventLog) StartAuditForwarder(ctx context.Context, buffer int) {
 		for {
 			select {
 			case <-el.forwardCtx.Done():
-				el.drainSinks()
+				el.flushQueuedAudits()
+				el.closeAuditSinks()
 				return
 			case ev, ok := <-el.forwardCh:
 				if !ok {
-					el.drainSinks()
+					el.flushQueuedAudits()
+					el.closeAuditSinks()
 					return
 				}
 				el.dispatchAudit(ev)
@@ -137,7 +139,21 @@ func (el *EventLog) dispatchAudit(ev AuditEvent) {
 	}
 }
 
-func (el *EventLog) drainSinks() {
+func (el *EventLog) flushQueuedAudits() {
+	for {
+		select {
+		case ev, ok := <-el.forwardCh:
+			if !ok {
+				return
+			}
+			el.dispatchAudit(ev)
+		default:
+			return
+		}
+	}
+}
+
+func (el *EventLog) closeAuditSinks() {
 	el.mu.RLock()
 	sinks := append([]AuditSink(nil), el.sinks...)
 	el.mu.RUnlock()
@@ -642,6 +658,7 @@ func (el *EventLog) Status() map[string]any {
 		"last_error_at":  lastErrAt,
 		"forwarder": map[string]any{
 			"enabled":     el.forwardCh != nil,
+			"healthy":     el.forwardErrs.Load() == 0 && el.forwardDrops.Load() == 0,
 			"queue_depth": queueDepth,
 			"sent":        el.forwardSent.Load(),
 			"errors":      el.forwardErrs.Load(),

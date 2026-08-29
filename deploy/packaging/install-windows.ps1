@@ -68,10 +68,8 @@ if (Test-Path -LiteralPath $legacyRoot -PathType Container -and
     }
 }
 
-& icacls.exe $programDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)RX' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Failed to protect Program Files root: $programDir" }
-& icacls.exe $dataDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)F' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Failed to protect ProgramData root: $dataDir" }
+Set-ServerdeskProgramAcl $programDir
+Set-ServerdeskDataAcl $dataDir
 
 $binarySourceItem = Get-Item -LiteralPath $binarySource -Force
 if (($binarySourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -119,7 +117,7 @@ if (Test-Path -LiteralPath $dst) {
     }
     foreach ($entry in @($destinationAcl.Access)) {
         $entrySid = $entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-        if ($entrySid -notin @('S-1-5-18', 'S-1-5-32-544') -and -not $mayMigrateLegacyAcl) {
+        if ($entrySid -notin @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-19') -and -not $mayMigrateLegacyAcl) {
             throw "Refusing installation destination with untrusted ACL entry: $entrySid"
         }
     }
@@ -191,14 +189,8 @@ function New-ServerdeskTrackedDirectory([string]$Path, [string]$InstallationRoot
 }
 
 try {
-& icacls.exe $dst /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to harden ACLs on $dst"
-}
-& icacls.exe $dst /setowner '*S-1-5-32-544' | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to set trusted owner on $dst"
-}
+Set-ServerdeskProgramAcl $programDir
+Set-ServerdeskDataAcl $dataDir
 $hardenedAcl = Get-Acl -LiteralPath $dst
 $hardenedOwner = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $hardenedAcl.Owner
 if ($hardenedOwner.Translate([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
@@ -387,6 +379,9 @@ Set-ServerdeskFirewall -Endpoint $endpoint -Program "$dst\serverdesk.exe"
 Write-ServerdeskRunner "$dst\run-serverdesk.ps1" $credentialDir
 & icacls.exe "$dst\run-serverdesk.ps1" /setowner '*S-1-5-32-544' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Failed to set trusted owner on the runtime runner.' }
+Set-ServerdeskProgramAcl $programDir
+Set-ServerdeskDataAcl $dataDir
+Assert-ServerdeskRuntimeAcl -ProgramDirectory $programDir -DataDirectory $dataDir
 Register-ServerdeskTask $programDir $dataDir
 Start-ScheduledTask -TaskName serverdesk
 Start-Sleep -Seconds 6
