@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +121,56 @@ func TestDetailedHealthDetectsStaleCacheAndMissingEdgeSnapshot(t *testing.T) {
 		t.Fatalf("missing edge snapshot = %#v", edge)
 	}
 }
+
+func TestDetailedHealthMasksAuditForwarderError(t *testing.T) {
+	secret := "siem-token-abcdef"
+	config.RegisterSecret(secret)
+	events := poller.NewEventLog(filepath.Join(t.TempDir(), "events.jsonl"), 20)
+	events.RegisterAuditSink(healthErrorAuditSink{err: "webhook failed for " + secret})
+	events.StartAuditForwarder(t.Context(), 8)
+	t.Cleanup(events.StopAuditForwarder)
+	events.Add("node0", "everRun", "alert", "critical", "offline")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status := events.Status()
+		fwd, _ := status["forwarder"].(map[string]any)
+		if n, ok := fwd["errors"].(int64); ok && n > 0 {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("audit forwarder did not record an error")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	srv := newHealthTestServer(t, events)
+	_, body := healthRequest(t, srv, http.MethodGet, "/api/admin/health")
+	if body["status"] != "degraded" {
+		t.Fatalf("audit forwarder failure status = %#v", body["status"])
+	}
+	store, _ := body["event_store"].(map[string]any)
+	fwd, _ := store["forwarder"].(map[string]any)
+	if fwd["healthy"] != false {
+		t.Fatalf("audit forwarder health = %#v", fwd["healthy"])
+	}
+	last, _ := fwd["last_error"].(string)
+	if last == "" {
+		t.Fatalf("expected masked forwarder last_error, got %#v", store)
+	}
+	if strings.Contains(last, secret) {
+		t.Fatalf("forwarder last_error leaked secret: %q", last)
+	}
+	if !strings.Contains(last, "***") {
+		t.Fatalf("forwarder last_error was not masked: %q", last)
+	}
+}
+
+type healthErrorAuditSink struct{ err string }
+
+func (s healthErrorAuditSink) Send(ctx context.Context, ev poller.AuditEvent) error {
+	return errors.New(s.err)
+}
+
+func (s healthErrorAuditSink) Close() error { return nil }
 
 func TestEdgeCollectorCompleteButStaleDegrades(t *testing.T) {
 	fresh, severity := edgeCollectorHealth(3*time.Minute, poller.EdgeCollectorStatus{

@@ -266,6 +266,9 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "Failed to set trusted owner: $ownedPath" }
         }
     }
+    Set-ServerdeskProgramAcl $programDir
+    Set-ServerdeskDataAcl $dataDir
+    Assert-ServerdeskRuntimeAcl -ProgramDirectory $programDir -DataDirectory $dataDir
     Register-ServerdeskTask $programDir $dataDir
     Set-ServerdeskFirewall -Endpoint $endpoint -Program $exe
 

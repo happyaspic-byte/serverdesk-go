@@ -345,6 +345,16 @@ type NotificationConfig struct {
 	RetryBaseSeconds int    `json:"retry_base_seconds"` // exponential backoff base
 }
 
+// AuditConfig 는 외부 Syslog/SIEM 감사 로그 포워더 설정이다.
+type AuditConfig struct {
+	Enabled       bool   `json:"enabled"`
+	Transport     string `json:"transport,omitempty"`      // syslog
+	SyslogNetwork string `json:"syslog_network,omitempty"` // udp | tcp
+	SyslogAddress string `json:"syslog_address,omitempty"` // host:port
+	SyslogApp     string `json:"syslog_app,omitempty"`
+	QueueBuffer   int    `json:"queue_buffer"` // 10..10000, 기본 1000
+}
+
 type Config struct {
 	SecretPolicy       string             `json:"secret_policy"` // require-references | allow-plaintext (마이그레이션 전용)
 	Listen             string             `json:"listen"`
@@ -365,6 +375,7 @@ type Config struct {
 	Intervals          Intervals          `json:"intervals"`
 	Thresholds         Thresholds         `json:"thresholds"`           // warn/crit 사용률 임계값 %, 기본 78/90
 	Notifications      NotificationConfig `json:"notifications"`        // 서버 상주 critical 웹훅
+	Audit              AuditConfig        `json:"audit"`                // 외부 감사 로그 포워더(기본 비활성)
 	Trap               TrapConfig         `json:"-"`                    // 스키마는 평면 trap_* 키(및 관용적으로 중첩 trap 객체) — Load 가 수동 해석
 	CORSAllowedOrigins []string           `json:"cors_allowed_origins"` // 비어 있으면 ACAO 미부여(드라이브바이 인벤토리 유출 방지)
 	HTTPTimeout        int                `json:"http_timeout"`         // 초, 기본 30 — 유휴/slowloris 차단
@@ -525,6 +536,49 @@ func parseWithCredentialDirectory(data []byte, managedDir string) (*Config, erro
 	}
 	if c.Notifications.Enabled && strings.TrimSpace(c.Notifications.WebhookURL) == "" {
 		return nil, errors.New("notifications.webhook_url is required when notifications are enabled")
+	}
+	var auditRaw map[string]json.RawMessage
+	if raw, ok := top["audit"]; ok {
+		if err := json.Unmarshal(raw, &auditRaw); err != nil {
+			return nil, fmt.Errorf("audit must be an object: %w", err)
+		}
+		if auditRaw == nil {
+			return nil, errors.New("audit must be an object")
+		}
+	}
+	if _, ok := auditRaw["queue_buffer"]; !ok {
+		c.Audit.QueueBuffer = 1000
+	}
+	if err := validateRange("audit.queue_buffer", c.Audit.QueueBuffer, 10, 10000); err != nil {
+		return nil, err
+	}
+	if c.Audit.Enabled {
+		c.Audit.Transport = strings.ToLower(strings.TrimSpace(c.Audit.Transport))
+		c.Audit.SyslogNetwork = strings.ToLower(strings.TrimSpace(c.Audit.SyslogNetwork))
+		c.Audit.SyslogAddress = strings.TrimSpace(c.Audit.SyslogAddress)
+		c.Audit.SyslogApp = strings.TrimSpace(c.Audit.SyslogApp)
+		switch c.Audit.Transport {
+		case "syslog":
+			if c.Audit.SyslogNetwork == "" {
+				c.Audit.SyslogNetwork = "udp"
+			}
+			if c.Audit.SyslogNetwork != "udp" && c.Audit.SyslogNetwork != "tcp" {
+				return nil, fmt.Errorf("audit.syslog_network must be udp or tcp (got %q)", c.Audit.SyslogNetwork)
+			}
+			host, portText, err := net.SplitHostPort(c.Audit.SyslogAddress)
+			if err != nil || strings.TrimSpace(host) == "" {
+				return nil, fmt.Errorf("audit.syslog_address must be host:port (got %q)", c.Audit.SyslogAddress)
+			}
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				return nil, fmt.Errorf("audit.syslog_address port must be numeric (got %q)", portText)
+			}
+			if err := validateRange("audit.syslog_address port", port, 1, 65535); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("audit.transport must be syslog when enabled (got %q)", c.Audit.Transport)
+		}
 	}
 	if _, ok := top["cors_allowed_origins"]; !ok {
 		c.CORSAllowedOrigins = []string{}
