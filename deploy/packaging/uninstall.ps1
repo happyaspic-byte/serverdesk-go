@@ -63,7 +63,8 @@ if (Get-Command Assert-ServerdeskManagedTask -ErrorAction SilentlyContinue) {
     $executeName = [IO.Path]::GetFileName([string]$action.Execute)
     $arguments = ([string]$action.Arguments).Trim()
     $workingDirectory = ([string]$action.WorkingDirectory).TrimEnd('\')
-    $knownAction = ($executeName -ieq 'powershell.exe' -and $workingDirectory -ieq $dst -and
+    $knownAction = ($executeName -ieq 'serverdesk.exe' -and $workingDirectory -ieq $dst) -or
+        ($executeName -ieq 'powershell.exe' -and $workingDirectory -ieq $dst -and
             $arguments -ieq '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\serverdesk\run-serverdesk.ps1') -or
         ($executeName -ieq 'cmd.exe' -and $workingDirectory -ieq $dst -and
             $arguments -ieq '/d /c run-serverdesk.cmd') -or

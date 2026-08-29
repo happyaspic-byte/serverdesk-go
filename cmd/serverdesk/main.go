@@ -391,6 +391,11 @@ func main() {
 
 	// 이벤트 이력(라이브 로그) — 상태 전이·경보 발생/해제를 10초 diff 로 기록.
 	eventLog := poller.NewEventLog(runtimeDir+string(os.PathSeparator)+"events.jsonl", 500)
+	if cfg.Audit.Enabled {
+		eventLog.RegisterAuditSink(poller.NewSyslogSink(cfg.Audit.SyslogNetwork, cfg.Audit.SyslogAddress, cfg.Audit.SyslogApp))
+		eventLog.StartAuditForwarder(ctx, cfg.Audit.QueueBuffer)
+		logMsg("info", "audit", "외부 감사 포워더 시작 transport=syslog")
+	}
 
 	// SNMP 트랩 수신기(바인드 실패해도 폴리 본체는 계속 동작한다).
 	trapCommunity := ""
@@ -573,6 +578,7 @@ func main() {
 	case <-time.After(5 * time.Second):
 	}
 	avail.Flush()
+	eventLog.StopAuditForwarder()
 	if trapRx != nil {
 		trapRx.Receiver.Close()
 	}

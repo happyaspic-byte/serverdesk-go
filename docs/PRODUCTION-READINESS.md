@@ -54,8 +54,11 @@ CI와 tag release는 같은 race·coverage·JavaScript·배포·취약점 게이
   검증한다.
 - Chromium 계열 브라우저에서 로그인, action 비활성화, detail/topology 렌더링, CSRF 실패 UI를 DOM
   E2E로 검증하고, NVDA/VoiceOver 키보드·스크린리더 UAT를 완료한다.
-- 구조화된 감사 이벤트는 현재 `events.jsonl` 최근 500건 범위다. 고객의 장기·불변 규제 보존 요건은
-  외부 SIEM/감사 저장소 연동과 별도 보존 시험 없이는 지원한다고 표시하지 않는다.
+- 구조화된 감사 이벤트는 현재 `events.jsonl` 최근 500건 범위다. 외부 포워더는 설정에서 명시적으로 활성화한
+  Syslog UDP/TCP만 운영 경로에 연결되며, queue depth/sent/errors/dropped/last error는 인증된
+  `/api/admin/health`의 `event_store.forwarder`에 노출된다. 포워더 오류·drop은 수집을 중단하지 않고
+  상세 health를 degraded로 만든다. Webhook 포워더와 고객의 장기·불변 규제 보존 요건은 별도 구현·보존
+  시험 없이는 지원한다고 표시하지 않는다.
 
 UAT 중 credential 노출, TLS 검증 우회, rollback 실패, 미지원 destructive action 실행이 한 건이라도
 발견되면 배포를 중단하고 이 점수를 재평가한다.
