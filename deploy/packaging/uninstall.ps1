@@ -31,7 +31,9 @@ foreach ($transactionPath in @("$dst\.update-transaction", "$dst\.install-in-pro
     "$dst\serverdesk.exe.install-backup", "$dst\.serverdesk.update-new",
     "$dst\serverdesk.exe.bak.new", "$dst\config.local.json.update.tmp",
     "$dst\update.ps1.update-new", "$dst\uninstall.ps1.update-new",
-    "$dst\windows-deployment-common.ps1.update-new")) {
+    "$dst\windows-deployment-common.ps1.update-new",
+    "$dataDir\.update-transaction", "$dataDir\.install-in-progress",
+    "$dataDir\config.local.json.update.tmp")) {
     if (Test-Path -LiteralPath $transactionPath) {
         throw "A deployment transaction/recovery path is present. Inspect it before uninstalling: $transactionPath"
     }

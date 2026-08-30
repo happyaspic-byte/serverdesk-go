@@ -45,15 +45,23 @@ while (-not [string]::IsNullOrWhiteSpace($bootstrapCursor)) {
 . $commonSource
 Assert-ServerdeskAdministrator
 
-foreach ($managedRoot in @($programDir, $dataDir)) {
-    if (Test-Path -LiteralPath $managedRoot) {
-        $managedItem = Get-Item -LiteralPath $managedRoot -Force
-        if (-not $managedItem.PSIsContainer -or
-            ($managedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Managed root must be a regular directory: $managedRoot"
-        }
-    } else {
-        New-Item -ItemType Directory -Path $managedRoot -Force | Out-Null
+# ProgramData must exist before legacy copy and DataAcl. Do not create Program
+# Files here: mkdir-before-recognition makes every fresh install look like an
+# unrecognized pre-existing destination and never sets destinationCreatedByRun.
+if (Test-Path -LiteralPath $dataDir) {
+    $managedItem = Get-Item -LiteralPath $dataDir -Force
+    if (-not $managedItem.PSIsContainer -or
+        ($managedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Managed root must be a regular directory: $dataDir"
+    }
+} else {
+    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+}
+if (Test-Path -LiteralPath $programDir) {
+    $managedItem = Get-Item -LiteralPath $programDir -Force
+    if (-not $managedItem.PSIsContainer -or
+        ($managedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Managed root must be a regular directory: $programDir"
     }
 }
 
@@ -68,8 +76,10 @@ if (Test-Path -LiteralPath $legacyRoot -PathType Container -and
     }
 }
 
-Set-ServerdeskProgramAcl $programDir
 Set-ServerdeskDataAcl $dataDir
+if (Test-Path -LiteralPath $programDir) {
+    Set-ServerdeskProgramAcl $programDir
+}
 
 $binarySourceItem = Get-Item -LiteralPath $binarySource -Force
 if (($binarySourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -146,7 +156,11 @@ if (-not $destinationCreatedByRun) {
 }
 foreach ($name in @('update.ps1', 'uninstall.ps1', 'windows-deployment-common.ps1',
     'run-serverdesk.ps1', 'run-serverdesk.cmd', 'auth.json', 'initial-login.txt')) {
-    $path = Join-Path $dst $name
+    $path = if ($name -in @('auth.json', 'initial-login.txt')) {
+        Join-Path $dataDir $name
+    } else {
+        Join-Path $dst $name
+    }
     $present = Test-Path -LiteralPath $path -PathType Leaf
     $installTrackedExisted[$name] = $present
     if ($present) { $installTrackedBytes[$name] = [IO.File]::ReadAllBytes($path) }
@@ -338,6 +352,15 @@ $runtimeDir = if ([IO.Path]::IsPathRooted($runtimeValue)) {
 } else {
     [IO.Path]::GetFullPath((Join-Path $dataDir $runtimeValue)).TrimEnd('\')
 }
+if (-not [IO.Path]::IsPathRooted($runtimeValue)) {
+    if ($cfg.PSObject.Properties['runtime_dir']) {
+        $cfg.runtime_dir = $runtimeDir
+    } else {
+        $cfg | Add-Member -NotePropertyName runtime_dir -NotePropertyValue $runtimeDir
+    }
+    $configChanged = $true
+    Write-Host "[INFO] runtime data path set to $runtimeDir"
+}
 $installRoot = [IO.Path]::GetFullPath($dataDir).TrimEnd('\')
 if ($runtimeDir -eq $installRoot -or
     -not $runtimeDir.StartsWith(($installRoot + '\'), [StringComparison]::OrdinalIgnoreCase)) {
@@ -376,7 +399,7 @@ $endpoint = Get-ServerdeskEndpoint -ConfigPath $configPath -HealthUrl $effective
 $allowDegraded = $env:SERVERDESK_ALLOW_DEGRADED_COLLECTION -eq '1'
 Test-ServerdeskAvcliPrerequisites -Endpoint $endpoint -ConfigPath $configPath -AllowDegraded:$allowDegraded
 Set-ServerdeskFirewall -Endpoint $endpoint -Program "$dst\serverdesk.exe"
-Write-ServerdeskRunner "$dst\run-serverdesk.ps1" $credentialDir
+Write-ServerdeskRunner "$dst\run-serverdesk.ps1" $programDir $dataDir $credentialDir
 & icacls.exe "$dst\run-serverdesk.ps1" /setowner '*S-1-5-32-544' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Failed to set trusted owner on the runtime runner.' }
 Set-ServerdeskProgramAcl $programDir
@@ -447,7 +470,11 @@ Start-Sleep -Seconds 6
             catch { $rollbackProblems += "remove newly copied docs: $($_.Exception.Message)" }
         }
         foreach ($name in $installTrackedExisted.Keys) {
-            $path = Join-Path $dst $name
+            $path = if ($name -in @('auth.json', 'initial-login.txt')) {
+                Join-Path $dataDir $name
+            } else {
+                Join-Path $dst $name
+            }
             try {
                 if ($installTrackedExisted[$name]) {
                     [IO.File]::WriteAllBytes($path, [byte[]]$installTrackedBytes[$name])

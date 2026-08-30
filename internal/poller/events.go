@@ -554,7 +554,7 @@ func (el *EventLog) Add(host, label, kind, sev, desc string) {
 // operations trail, not an immutable or indefinite compliance archive. Unlike
 // Add, a failed audit write is never retained in the in-memory retry ring:
 // callers may roll the corresponding mutation back, so a later retry must not
-// resurrect a false "committed" record.
+// resurrect a false "committed" record. After compact, enqueue for the audit sink.
 func (el *EventLog) RecordAudit(record AuditRecord) error {
 	if el == nil {
 		return errors.New("audit event log is unavailable")
@@ -618,7 +618,24 @@ func (el *EventLog) RecordAudit(record AuditRecord) error {
 	el.lastError = ""
 	el.lastErrorAt = time.Time{}
 	el.lastWriteAt = time.Now()
+	forwardCh := el.forwardCh
 	el.mu.Unlock()
+
+	if forwardCh != nil {
+		audit := AuditEvent{
+			Timestamp:   record.Timestamp.UTC(),
+			Host:        eventString(ev, "host"),
+			Label:       eventString(ev, "label"),
+			Kind:        eventString(ev, "kind"),
+			Severity:    eventString(ev, "sev"),
+			Description: eventString(ev, "desc"),
+		}
+		select {
+		case forwardCh <- audit:
+		default:
+			el.forwardDrops.Add(1)
+		}
+	}
 	return nil
 }
 
