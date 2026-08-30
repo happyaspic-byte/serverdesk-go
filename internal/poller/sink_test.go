@@ -205,3 +205,42 @@ func TestWebhookSinkRefusesRedirect(t *testing.T) {
 		t.Error("expected error when webhook redirects")
 	}
 }
+
+func TestRecordAuditForwardsToSink(t *testing.T) {
+	el := NewEventLog(filepath.Join(t.TempDir(), "events.jsonl"), 10)
+	sink := &mockSink{}
+	el.RegisterAuditSink(sink)
+	el.StartAuditForwarder(context.Background(), 100)
+	ts := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	if err := el.RecordAudit(AuditRecord{
+		ID:        "audit-1",
+		Timestamp: ts,
+		Action:    "login",
+		Target:    "console",
+		Reason:    "administrator signed in",
+		Operator:  "admin",
+		Phase:     "auth",
+	}); err != nil {
+		t.Fatalf("RecordAudit: %v", err)
+	}
+	el.StopAuditForwarder()
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.received) != 1 {
+		t.Fatalf("RecordAudit forwarded %d events, want 1", len(sink.received))
+	}
+	got := sink.received[0]
+	if !got.Timestamp.Equal(ts) {
+		t.Errorf("Timestamp = %v, want %v", got.Timestamp, ts)
+	}
+	if got.Host != "console" || got.Label != "admin" || got.Kind != "audit" {
+		t.Errorf("forwarded event fields: %+v", got)
+	}
+	if got.Severity != "info" || got.Description != "administrator signed in" {
+		t.Errorf("forwarded event payload: %+v", got)
+	}
+	if !sink.closed {
+		t.Error("StopAuditForwarder must close sinks after flushing")
+	}
+}

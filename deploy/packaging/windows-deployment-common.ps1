@@ -134,6 +134,49 @@ function Test-ServerdeskAclGrant {
     return $false
 }
 
+function Assert-ServerdeskManagedWritablePath {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [string]$Description = 'Managed writable path'
+    )
+    Assert-ServerdeskPathComponents $Path
+    $allowedSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-19')
+    $modify = [Security.AccessControl.FileSystemRights]::Modify
+    $acl = Get-Acl -LiteralPath $Path
+    try {
+        $ownerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $acl.Owner
+        $ownerSid = $ownerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        throw "$Description has an unresolvable owner: $Path"
+    }
+    if ($ownerSid -notin @('S-1-5-18', 'S-1-5-32-544')) {
+        throw "$Description owner must be SYSTEM or Administrators: $Path"
+    }
+    $localServiceModify = $false
+    foreach ($entry in @($acl.Access)) {
+        if (($entry.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) {
+            continue
+        }
+        try {
+            $entrySid = $entry.IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+        } catch {
+            throw "$Description has an unresolvable ACL entry: $Path"
+        }
+        if ($entrySid -notin $allowedSids) {
+            throw "$Description ACL may grant access only to SYSTEM, Administrators, and LocalService: $Path"
+        }
+        if ($entrySid -eq 'S-1-5-19' -and
+            $entry.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ($entry.FileSystemRights -band $modify) -eq $modify) {
+            $localServiceModify = $true
+        }
+    }
+    if (-not $localServiceModify) {
+        throw "$Description ACL must grant LocalService modify access: $Path"
+    }
+}
+
 function Assert-ServerdeskRuntimeAcl {
     param(
         [Parameter(Mandatory=$true)][string]$ProgramDirectory,
@@ -558,12 +601,12 @@ function Set-ServerdeskFirewall {
     }
 }
 
-function Write-ServerdeskRunner([string]$Destination, [string]$CredentialDirectory) {
+function Write-ServerdeskRunner([string]$Destination, [string]$ProgramDirectory, [string]$DataDirectory, [string]$CredentialDirectory) {
     $runner = @'
 $ErrorActionPreference = 'Continue'
-Set-Location 'C:\serverdesk'
+Set-Location '__SERVERDESK_PROGRAM_DIR__'
 $env:SERVERDESK_CREDENTIALS_STORE = '__SERVERDESK_CREDENTIALS_STORE__'
-$logPath = 'C:\serverdesk\run.log'
+$logPath = '__SERVERDESK_DATA_DIR__\run.log'
 $maxLogBytes = 20MB
 
 function Rotate-ServerdeskLog {
@@ -585,7 +628,7 @@ function Write-ServerdeskLog([string]$Line) {
 
 while ($true) {
     Rotate-ServerdeskLog
-    & 'C:\serverdesk\serverdesk.exe' -c 'C:\serverdesk\config.local.json' -auth 'C:\serverdesk\auth.json' 2>&1 |
+    & '__SERVERDESK_PROGRAM_DIR__\serverdesk.exe' -c '__SERVERDESK_DATA_DIR__\config.local.json' -auth '__SERVERDESK_DATA_DIR__\auth.json' 2>&1 |
         ForEach-Object { Write-ServerdeskLog ([string]$_) }
     $exitCode = $LASTEXITCODE
     Write-ServerdeskLog "[$([DateTime]::Now.ToString('s'))] serverdesk exited with code $exitCode; restarting in 5 seconds"
@@ -593,6 +636,8 @@ while ($true) {
 }
 '@
     $runner = $runner.Replace('__SERVERDESK_CREDENTIALS_STORE__', $CredentialDirectory)
+    $runner = $runner.Replace('__SERVERDESK_PROGRAM_DIR__', $ProgramDirectory)
+    $runner = $runner.Replace('__SERVERDESK_DATA_DIR__', $DataDirectory)
     [IO.File]::WriteAllText($Destination, ($runner + [Environment]::NewLine), [Text.Encoding]::ASCII)
 }
 
