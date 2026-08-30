@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -280,7 +281,7 @@ func main() {
 	if !once && !transport.tlsEnabled() && transport.allowInsecureHTTP && !transport.loopback() {
 		logMsg("warn", "-", "비루프백 평문 HTTP break-glass 모드입니다; forwarded header를 신뢰하지 않으므로 운영에서는 직접 TLS 또는 루프백 프록시를 사용하십시오")
 	}
-	runtimeDir := poller.ExpandUser(cfg.RuntimeDir)
+	runtimeDir := resolveRuntimeDir(cfg.RuntimeDir, cfg.Path)
 	if demoMode {
 		runtimeDir = demoRuntimeDir(runtimeDir)
 		logMsg("info", "demo", "읽기 전용 샘플 모드 활성화 — 실장비 수집과 외부 알림이 비활성화됩니다")
@@ -620,6 +621,21 @@ func readPassword(in io.Reader) (string, error) {
 		}
 	}
 	return string(password), nil
+}
+
+func resolveRuntimeDir(runtimeDir, configPath string) string {
+	runtimeDir = poller.ExpandUser(runtimeDir)
+	if runtimeDir == "" {
+		runtimeDir = "data"
+	}
+	if filepath.IsAbs(runtimeDir) {
+		return filepath.Clean(runtimeDir)
+	}
+	base := filepath.Dir(configPath)
+	if base == "" || base == "." {
+		return filepath.Clean(runtimeDir)
+	}
+	return filepath.Join(base, runtimeDir)
 }
 
 // convertEdgeDevices 는 config 의 엣지 설정을 edge 패키지 계약으로 옮긴다.

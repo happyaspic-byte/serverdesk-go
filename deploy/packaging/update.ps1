@@ -56,10 +56,11 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
 Assert-ServerdeskRegularFile $exe 'Installed serverdesk executable'
 Assert-ServerdeskRegularFile $configPath 'Installed config'
 Assert-ServerdeskRegularFile $authPath 'Installed auth store'
-Assert-ServerdeskPrivateKey -Path $authPath -ConfigPath $configPath -Description 'Auth store'
-if (Test-Path -LiteralPath "$dst\initial-login.txt" -PathType Leaf) {
-    Assert-ServerdeskPrivateKey -Path "$dst\initial-login.txt" -ConfigPath $configPath `
-        -Description 'Initial-login file'
+Assert-ServerdeskManagedWritablePath $configPath 'Installed config'
+Assert-ServerdeskManagedWritablePath $authPath 'Auth store'
+$initialLoginPath = Join-Path $dataDir 'initial-login.txt'
+if (Test-Path -LiteralPath $initialLoginPath -PathType Leaf) {
+    Assert-ServerdeskManagedWritablePath $initialLoginPath 'Initial-login file'
 }
 $destinationItem = Get-Item -LiteralPath $dst -Force
 if (-not $destinationItem.PSIsContainer -or
@@ -73,7 +74,7 @@ if ($null -ne $reparseChild) {
     throw "Installation directory contains a reparse point: $($reparseChild.FullName)"
 }
 Assert-ServerdeskTrustedReadOnlyPath $dst 'Installation directory'
-foreach ($trustedInstalledPath in @($exe, $configPath, $authPath, "$dst\run-serverdesk.ps1", "$dst\run-serverdesk.cmd",
+foreach ($trustedInstalledPath in @($exe, "$dst\run-serverdesk.ps1", "$dst\run-serverdesk.cmd",
     "$dst\update.ps1", "$dst\uninstall.ps1", "$dst\windows-deployment-common.ps1")) {
     if (Test-Path -LiteralPath $trustedInstalledPath -PathType Leaf) {
         Assert-ServerdeskTrustedReadOnlyPath $trustedInstalledPath 'Installed package/control file'
@@ -87,14 +88,10 @@ if ($credentialDirectoryExisted) {
         ($credentialItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Credential store must be a regular non-reparse directory: $credentialDir"
     }
-    Assert-ServerdeskTrustedReadOnlyPath $credentialDir 'Managed credential store'
+    Assert-ServerdeskManagedWritablePath $credentialDir 'Managed credential store'
     foreach ($credentialItemPath in @(Get-ChildItem -LiteralPath $credentialDir -Recurse -Force |
         ForEach-Object { $_.FullName })) {
-        Assert-ServerdeskTrustedReadOnlyPath $credentialItemPath 'Managed credential entry'
-        if (Test-Path -LiteralPath $credentialItemPath -PathType Leaf) {
-            Assert-ServerdeskPrivateKey -Path $credentialItemPath -ConfigPath $configPath `
-                -Description 'Managed credential file'
-        }
+        Assert-ServerdeskManagedWritablePath $credentialItemPath 'Managed credential entry'
     }
 }
 & $new -auth $authPath -check-auth | Out-Null
@@ -106,7 +103,7 @@ if (-not (Test-Path -LiteralPath $endpoint.RuntimePath -PathType Container)) {
     throw "Managed runtime directory is missing; run the full installer before updating: $($endpoint.RuntimePath)"
 }
 Assert-ServerdeskPathComponents $endpoint.RuntimePath
-Assert-ServerdeskTrustedReadOnlyPath $endpoint.RuntimePath 'Managed runtime directory'
+Assert-ServerdeskManagedWritablePath $endpoint.RuntimePath 'Managed runtime directory'
 $allowDegraded = $env:SERVERDESK_ALLOW_DEGRADED_COLLECTION -eq '1'
 $preflightAvcliBin = [string](Get-ServerdeskProperty $endpoint.Config 'avcli_bin' '')
 if ([IO.Path]::GetExtension($preflightAvcliBin).ToLowerInvariant() -in @('.bat', '.cmd')) {
@@ -147,7 +144,7 @@ function Copy-Verified([string]$From, [string]$To) {
     if ($sourceHash -cne $copyHash) { throw "Backup verification failed: $From -> $To" }
 }
 
-$trackedFiles = @('serverdesk.exe', 'config.local.json', 'run-serverdesk.cmd', 'run-serverdesk.ps1',
+$trackedFiles = @('serverdesk.exe', 'run-serverdesk.cmd', 'run-serverdesk.ps1',
     'update.ps1', 'uninstall.ps1', 'windows-deployment-common.ps1')
 $existed = @{}
 $priorAclEntries = @()
@@ -246,15 +243,14 @@ try {
     New-Item -ItemType Directory -Path $credentialDir -Force | Out-Null
     & icacls.exe $credentialDir /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)F' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Failed to protect the runtime credential store.' }
-    Write-ServerdeskRunner "$dst\run-serverdesk.ps1" $credentialDir
+    Write-ServerdeskRunner "$dst\run-serverdesk.ps1" $programDir $dataDir $credentialDir
     if ($null -ne (Get-ChildItem -LiteralPath $credentialDir -Force | Select-Object -First 1)) {
         & icacls.exe "$credentialDir\*" /reset /T /C | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Failed to protect existing managed credentials.' }
         & icacls.exe "$credentialDir\*" /setowner '*S-1-5-32-544' /T /C | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Failed to set trusted owners on existing managed credentials.' }
     }
-    foreach ($ownedPath in @($exe, $configPath, $authPath, "$dst\initial-login.txt",
-        "$dst\run-serverdesk.ps1", $credentialDir, "$dst\update.ps1", "$dst\uninstall.ps1",
+    foreach ($ownedPath in @($exe, "$dst\run-serverdesk.ps1", "$dst\update.ps1", "$dst\uninstall.ps1",
         "$dst\windows-deployment-common.ps1")) {
         if (Test-Path -LiteralPath $ownedPath) {
             $ownedItem = Get-Item -LiteralPath $ownedPath -Force
