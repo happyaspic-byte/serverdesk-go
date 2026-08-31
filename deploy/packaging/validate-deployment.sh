@@ -395,9 +395,10 @@ grep -F -q 'StartAuditForwarder' cmd/serverdesk/main.go ||
   fail 'daemon must start the audit forwarder'
 grep -F -q 'StopAuditForwarder' cmd/serverdesk/main.go ||
   fail 'daemon must stop the audit forwarder during shutdown'
-grep -F -q '"healthy":' internal/poller/events.go &&
-grep -F -q 'forwardErrs.Load() == 0' internal/poller/events.go ||
+if ! grep -F -q '"healthy":' internal/poller/events.go ||
+   ! grep -F -q 'forwardErrs.Load() == 0' internal/poller/events.go; then
   fail 'audit forwarder health must reflect delivery errors or queue drops'
+fi
 grep -F -q 'fwd["healthy"]' internal/httpapi/httpapi.go ||
   fail 'admin health must evaluate audit forwarder health'
 grep -F -q 'event_store.forwarder' config.example.json ||
