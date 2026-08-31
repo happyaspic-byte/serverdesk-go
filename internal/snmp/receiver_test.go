@@ -81,6 +81,16 @@ func TestReceiverEndToEnd(t *testing.T) {
 		t.Errorf("저장소 건수 = %d, want 1", len(store.Load()))
 	}
 
+	// onTrap 전달과 Delivered 카운터 증가는 같은 고루틴에서 순차 실행되므로,
+	// 채널 수신 직후에는 카운터 증가가 아직 관찰되지 않을 수 있다.
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		st := rx.Stats()
+		if st.Received == 1 && st.Parsed == 1 && st.Delivered == 1 && st.Errors == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	st := rx.Stats()
 	if st.Received != 1 || st.Parsed != 1 || st.Delivered != 1 || st.Errors != 0 {
 		t.Errorf("stats = %+v", st)
