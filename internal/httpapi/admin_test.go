@@ -1669,10 +1669,11 @@ func TestCORSAndGzipResponse(t *testing.T) {
 	}
 }
 
-// TestHandleAvailabilityCSV 는 /api/availability.csv 다운로드 경로를 검증한다.
+// TestHandleAvailabilityCSV 는 /api/availability.csv 다운로드 경로 및 파라미터를 검증한다.
 func TestHandleAvailabilityCSV(t *testing.T) {
 	f := newAdminTestFixture(t, "")
 
+	// 1. 기본 일자별 CSV
 	rec, _ := execRequest(f.srv, http.MethodGet, "/api/availability.csv", nil, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for availability.csv, got %d: %s", rec.Code, rec.Body.String())
@@ -1682,6 +1683,21 @@ func TestHandleAvailabilityCSV(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "date,device,availability_pct,observed_sec") {
 		t.Fatalf("CSV header missing: %s", rec.Body.String())
+	}
+
+	// 2. SLA 요약 CSV (?summary=true)
+	recSummary, _ := execRequest(f.srv, http.MethodGet, "/api/availability.csv?summary=true&days=90", nil, "")
+	if recSummary.Code != http.StatusOK {
+		t.Fatalf("expected 200 for summary CSV, got %d: %s", recSummary.Code, recSummary.Body.String())
+	}
+	if !strings.Contains(recSummary.Body.String(), "device,availability_pct,observed_sec,down_sec,observed_days") {
+		t.Fatalf("Summary CSV header missing: %s", recSummary.Body.String())
+	}
+
+	// 3. 잘못된 days 파라미터 400 거부
+	recBad, _ := execRequest(f.srv, http.MethodGet, "/api/availability.csv?days=999", nil, "")
+	if recBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for days=999, got %d", recBad.Code)
 	}
 }
 

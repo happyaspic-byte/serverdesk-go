@@ -56,6 +56,9 @@ func TestLoadDefaults(t *testing.T) {
 	if c.RuntimeDir != "data" {
 		t.Errorf("runtime_dir = %q", c.RuntimeDir)
 	}
+	if c.AvailRetentionDays != 90 {
+		t.Errorf("avail_retention_days = %d, want 90", c.AvailRetentionDays)
+	}
 	if c.SSHTimeout != 20 {
 		t.Errorf("ssh_timeout = %d, want 20", c.SSHTimeout)
 	}
@@ -110,6 +113,50 @@ func TestNestedTrapOverlay(t *testing.T) {
 	}
 	if c.Trap.Ring != 500 {
 		t.Errorf("trap.ring = %d, want default 500", c.Trap.Ring)
+	}
+}
+
+func TestAuditConfigDefaultsAndValidation(t *testing.T) {
+	c, err := Parse([]byte(`{"clusters":[]}`))
+	if err != nil {
+		t.Fatalf("Parse defaults: %v", err)
+	}
+	if c.Audit.Enabled {
+		t.Error("audit.enabled must default to false")
+	}
+	if c.Audit.QueueBuffer != 1000 {
+		t.Errorf("audit.queue_buffer = %d, want default 1000", c.Audit.QueueBuffer)
+	}
+
+	validSyslog := []byte(`{
+		"clusters": [],
+		"audit": {
+			"enabled": true,
+			"transport": "syslog",
+			"syslog_network": "udp",
+			"syslog_address": "127.0.0.1:514",
+			"syslog_app": "serverdesk-siem"
+		}
+	}`)
+	c, err = Parse(validSyslog)
+	if err != nil {
+		t.Fatalf("Parse valid syslog audit: %v", err)
+	}
+	if !c.Audit.Enabled || c.Audit.Transport != "syslog" || c.Audit.SyslogNetwork != "udp" || c.Audit.SyslogAddress != "127.0.0.1:514" {
+		t.Errorf("audit syslog config mismatch: %+v", c.Audit)
+	}
+
+	for _, invalid := range []string{
+		`{"clusters":[],"audit":{"enabled":true,"transport":"unknown"}}`,
+		`{"clusters":[],"audit":{"enabled":true,"transport":"webhook"}}`,
+		`{"clusters":[],"audit":{"enabled":true,"transport":"syslog"}}`,
+		`{"clusters":[],"audit":{"enabled":true,"transport":"syslog","syslog_network":"raw","syslog_address":"127.0.0.1:514"}}`,
+		`{"clusters":[],"audit":{"enabled":true,"transport":"syslog","syslog_address":"127.0.0.1:514","queue_buffer":5}}`,
+		`{"clusters":[],"audit":{"enabled":true,"transport":"syslog","syslog_address":"127.0.0.1:514","queue_buffer":20000}}`,
+	} {
+		if _, err := Parse([]byte(invalid)); err == nil {
+			t.Errorf("accepted invalid audit config: %s", invalid)
+		}
 	}
 }
 

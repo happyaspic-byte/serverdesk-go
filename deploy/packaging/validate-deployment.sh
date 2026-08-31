@@ -220,6 +220,8 @@ if grep -n 'Get-ScheduledTaskInfo.*\.State' deploy/packaging/*.ps1 >/dev/null 2>
 fi
 grep -F -q 'function Assert-ServerdeskManagedTask' deploy/packaging/windows-deployment-common.ps1 ||
   fail 'Windows deployment does not protect against an unrelated scheduled-task name collision'
+grep -F -q "Join-Path \$Destination 'serverdesk.exe'" deploy/packaging/windows-deployment-common.ps1 ||
+  fail 'Windows task ownership validation does not recognize the managed LocalService executable action'
 for script in install-windows.ps1 update.ps1 uninstall.ps1; do
   managed_task_line=$(grep -n -F 'Assert-ServerdeskManagedTask' "deploy/packaging/$script" | head -1 | cut -d: -f1)
   task_stop_line=$(grep -n -F 'Stop-ScheduledTask -TaskName serverdesk' "deploy/packaging/$script" | head -1 | cut -d: -f1)
@@ -277,6 +279,29 @@ grep -F -q 'Assert-ServerdeskRegularFile $jar '\''AVCLI JAR'\''' \
   fail 'Windows AVCLI preflight does not reject a JAR reparse point'
 grep -F -q 'Set-ServerdeskFirewall -Endpoint $endpoint' deploy/packaging/install-windows.ps1 ||
   fail 'Windows installer firewall does not follow the parsed endpoint'
+grep -F -q 'Set-ServerdeskProgramAcl $programDir' deploy/packaging/install-windows.ps1 ||
+  fail 'Windows installer does not enforce final LocalService read/execute access on Program Files'
+grep -F -q 'Set-ServerdeskDataAcl $dataDir' deploy/packaging/install-windows.ps1 ||
+  fail 'Windows installer does not enforce final LocalService write access on ProgramData'
+grep -F -q 'Assert-ServerdeskRuntimeAcl -ProgramDirectory $programDir -DataDirectory $dataDir' \
+  deploy/packaging/install-windows.ps1 ||
+  fail 'Windows installer does not verify effective LocalService ACLs before task registration'
+grep -F -q 'Set-ServerdeskProgramAcl $programDir' deploy/packaging/update.ps1 ||
+  fail 'Windows updater does not preserve LocalService read/execute access on Program Files'
+grep -F -q 'Set-ServerdeskDataAcl $dataDir' deploy/packaging/update.ps1 ||
+  fail 'Windows updater does not preserve LocalService write access on ProgramData'
+grep -F -q 'Assert-ServerdeskRuntimeAcl -ProgramDirectory $programDir -DataDirectory $dataDir' \
+  deploy/packaging/update.ps1 ||
+  fail 'Windows updater does not verify effective LocalService ACLs before task registration'
+grep -F -q "Join-Path \$ProgramDirectory 'serverdesk.exe'" \
+  deploy/packaging/windows-deployment-common.ps1 ||
+  fail 'Windows ACL verification does not test LocalService executable access'
+grep -F -q "Join-Path \$DataDirectory 'config.local.json'" \
+  deploy/packaging/windows-deployment-common.ps1 ||
+  fail 'Windows ACL verification does not test LocalService config access'
+grep -F -q "Join-Path \$DataDirectory 'auth.json'" \
+  deploy/packaging/windows-deployment-common.ps1 ||
+  fail 'Windows ACL verification does not test LocalService auth-store access'
 grep -F -q 'Copy-Verified $new "$dst\.serverdesk.update-new"' deploy/packaging/update.ps1 ||
   fail 'Windows updater does not verify a staged binary before downtime'
 touch_line=$(grep -n -F '$serviceTouched = $true' deploy/packaging/update.ps1 | head -1 | cut -d: -f1)
@@ -318,8 +343,8 @@ grep -F -q 'Set-Acl -LiteralPath $entry.Path -AclObject $entry.Acl' \
   deploy/packaging/install-windows.ps1 || fail 'Windows reinstall does not restore prior ACLs'
 grep -F -q 'New-ServerdeskTrackedDirectory' deploy/packaging/install-windows.ps1 ||
   fail 'Windows reinstall does not track newly created managed directories'
-grep -F -q 'Join-Path $dst $runtimeValue' deploy/packaging/install-windows.ps1 ||
-  fail 'Windows installer discards a custom relative runtime_dir instead of managing it below the install root'
+grep -F -q 'Join-Path $dataDir $runtimeValue' deploy/packaging/install-windows.ps1 ||
+  fail 'Windows installer must resolve relative runtime_dir below ProgramData'
 grep -F -q 'Failed to set trusted owner on the runtime runner' deploy/packaging/install-windows.ps1 ||
   fail 'Windows installer leaves SYSTEM task code owned by the invoking account'
 grep -F -q 'new transaction directory is not empty; preserving it for inspection' \
@@ -361,7 +386,23 @@ grep -F -q 'A deployment transaction/recovery path is present' deploy/packaging/
 grep -F -q 'ForEach-Object { Write-ServerdeskLog' deploy/packaging/windows-deployment-common.ps1 ||
   fail 'Windows runner must enforce log rotation while the process is running'
 grep -F -q 'Windows packaged runtime — commercial NO-GO' docs/SECURITY.md ||
-  fail 'Windows SYSTEM runtime must remain an explicit commercial production NO-GO'
+  fail 'Windows packaging must remain an explicit commercial production NO-GO until real hardware UAT'
+grep -F -q 'NewSyslogSink' cmd/serverdesk/main.go ||
+  fail 'daemon must wire the configured Syslog audit sink'
+grep -F -q 'audit.transport must be syslog when enabled' internal/config/config.go ||
+  fail 'audit configuration must fail closed for unsupported transports'
+grep -F -q 'StartAuditForwarder' cmd/serverdesk/main.go ||
+  fail 'daemon must start the audit forwarder'
+grep -F -q 'StopAuditForwarder' cmd/serverdesk/main.go ||
+  fail 'daemon must stop the audit forwarder during shutdown'
+if ! grep -F -q '"healthy":' internal/poller/events.go ||
+   ! grep -F -q 'forwardErrs.Load() == 0' internal/poller/events.go; then
+  fail 'audit forwarder health must reflect delivery errors or queue drops'
+fi
+grep -F -q 'fwd["healthy"]' internal/httpapi/httpapi.go ||
+  fail 'admin health must evaluate audit forwarder health'
+grep -F -q 'event_store.forwarder' config.example.json ||
+  fail 'config template must document audit forwarder health visibility'
 if grep -n -E 'Invoke-WebRequest[[:space:]]+http://127\.0\.0\.1:6005|Expand-Archive.*(avcli|jre)' \
   deploy/packaging/*.ps1 >/dev/null 2>&1; then
   fail 'Windows deployment regressed to fixed health URL or bundled vendor extraction'

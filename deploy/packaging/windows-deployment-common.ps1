@@ -90,6 +90,120 @@ function Assert-ServerdeskTrustedReadOnlyPath([string]$Path, [string]$Descriptio
     }
 }
 
+function Set-ServerdeskProgramAcl([string]$ProgramDirectory) {
+    & icacls.exe $ProgramDirectory /inheritance:r /grant:r `
+        '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)RX' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to protect Program Files root: $ProgramDirectory" }
+    if ($null -ne (Get-ChildItem -LiteralPath $ProgramDirectory -Force | Select-Object -First 1)) {
+        & icacls.exe "$ProgramDirectory\*" /reset /T /C | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to propagate Program Files ACLs: $ProgramDirectory" }
+    }
+    & icacls.exe $ProgramDirectory /setowner '*S-1-5-32-544' /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set Program Files owners: $ProgramDirectory" }
+}
+
+function Set-ServerdeskDataAcl([string]$DataDirectory) {
+    & icacls.exe $DataDirectory /inheritance:r /grant:r `
+        '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to protect ProgramData root: $DataDirectory" }
+    if ($null -ne (Get-ChildItem -LiteralPath $DataDirectory -Force | Select-Object -First 1)) {
+        & icacls.exe "$DataDirectory\*" /reset /T /C | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to propagate ProgramData ACLs: $DataDirectory" }
+    }
+    & icacls.exe $DataDirectory /setowner '*S-1-5-32-544' /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set ProgramData owners: $DataDirectory" }
+}
+
+function Test-ServerdeskAclGrant {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Sid,
+        [Parameter(Mandatory=$true)][Security.AccessControl.FileSystemRights]$RequiredRights
+    )
+    $acl = Get-Acl -LiteralPath $Path
+    foreach ($entry in @($acl.Access)) {
+        try {
+            $entrySid = $entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        } catch { continue }
+        if ($entrySid -eq $Sid -and
+            $entry.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ($entry.FileSystemRights -band $RequiredRights) -eq $RequiredRights) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Assert-ServerdeskManagedWritablePath {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [string]$Description = 'Managed writable path'
+    )
+    Assert-ServerdeskPathComponents $Path
+    $allowedSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-19')
+    $modify = [Security.AccessControl.FileSystemRights]::Modify
+    $acl = Get-Acl -LiteralPath $Path
+    try {
+        $ownerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $acl.Owner
+        $ownerSid = $ownerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        throw "$Description has an unresolvable owner: $Path"
+    }
+    if ($ownerSid -notin @('S-1-5-18', 'S-1-5-32-544')) {
+        throw "$Description owner must be SYSTEM or Administrators: $Path"
+    }
+    $localServiceModify = $false
+    foreach ($entry in @($acl.Access)) {
+        if (($entry.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) {
+            continue
+        }
+        try {
+            $entrySid = $entry.IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+        } catch {
+            throw "$Description has an unresolvable ACL entry: $Path"
+        }
+        if ($entrySid -notin $allowedSids) {
+            throw "$Description ACL may grant access only to SYSTEM, Administrators, and LocalService: $Path"
+        }
+        if ($entrySid -eq 'S-1-5-19' -and
+            $entry.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ($entry.FileSystemRights -band $modify) -eq $modify) {
+            $localServiceModify = $true
+        }
+    }
+    if (-not $localServiceModify) {
+        throw "$Description ACL must grant LocalService modify access: $Path"
+    }
+}
+
+function Assert-ServerdeskRuntimeAcl {
+    param(
+        [Parameter(Mandatory=$true)][string]$ProgramDirectory,
+        [Parameter(Mandatory=$true)][string]$DataDirectory
+    )
+    $readExecute = ([Security.AccessControl.FileSystemRights]::ReadAndExecute)
+    $modify = ([Security.AccessControl.FileSystemRights]::Modify)
+    $executable = Join-Path $ProgramDirectory 'serverdesk.exe'
+    $configPath = Join-Path $DataDirectory 'config.local.json'
+    $authPath = Join-Path $DataDirectory 'auth.json'
+    foreach ($readPath in @($ProgramDirectory, $executable)) {
+        if (-not (Test-Path -LiteralPath $readPath)) { continue }
+        if (-not (Test-ServerdeskAclGrant -Path $readPath -Sid 'S-1-5-19' -RequiredRights $readExecute)) {
+            throw "Program Files ACL must grant LocalService read/execute access: $readPath"
+        }
+        if (Test-ServerdeskAclGrant -Path $readPath -Sid 'S-1-5-19' -RequiredRights $modify) {
+            throw "Program Files ACL must not grant LocalService modify access: $readPath"
+        }
+    }
+    foreach ($writePath in @($DataDirectory, $configPath, $authPath)) {
+        if (-not (Test-Path -LiteralPath $writePath)) { continue }
+        if (-not (Test-ServerdeskAclGrant -Path $writePath -Sid 'S-1-5-19' -RequiredRights $modify)) {
+            throw "ProgramData ACL must grant LocalService modify access: $writePath"
+        }
+    }
+}
+
 function Assert-ServerdeskAdministrator {
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -100,7 +214,8 @@ function Assert-ServerdeskAdministrator {
 function Assert-ServerdeskManagedTask($Task, [string]$Destination) {
     if ($null -eq $Task) { return }
     $principal = [string]$Task.Principal.UserId
-    if ($principal -notin @('SYSTEM', 'S-1-5-18', 'NT AUTHORITY\SYSTEM')) {
+    if ($principal -notin @('SYSTEM', 'S-1-5-18', 'NT AUTHORITY\SYSTEM',
+        'LOCAL SERVICE', 'S-1-5-19', 'NT AUTHORITY\LOCAL SERVICE')) {
         throw "Refusing an existing serverdesk task with an unexpected principal: $principal"
     }
     $actions = @($Task.Actions)
@@ -111,6 +226,9 @@ function Assert-ServerdeskManagedTask($Task, [string]$Destination) {
     $executeName = [IO.Path]::GetFileName([string]$action.Execute)
     $arguments = ([string]$action.Arguments).Trim()
     $workingDirectory = ([string]$action.WorkingDirectory).TrimEnd('\')
+    $directBinaryAction = $executeName -ieq 'serverdesk.exe' -and
+        $workingDirectory -ieq $Destination -and
+        ([IO.Path]::GetFullPath([string]$action.Execute) -ieq [IO.Path]::GetFullPath((Join-Path $Destination 'serverdesk.exe')))
     $currentAction = $executeName -ieq 'powershell.exe' -and
         $workingDirectory -ieq $Destination -and
         $arguments -ieq '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\serverdesk\run-serverdesk.ps1'
@@ -119,7 +237,7 @@ function Assert-ServerdeskManagedTask($Task, [string]$Destination) {
         $arguments -ieq '/d /c run-serverdesk.cmd'
     $legacyAction = $executeName -in @('cmd', 'cmd.exe') -and
         $arguments -ieq '/c C:\serverdesk\serverdesk.exe -c C:\serverdesk\config.local.json >> C:\serverdesk\run.log 2>&1'
-    if (-not ($currentAction -or $cmdRunnerAction -or $legacyAction)) {
+    if (-not ($directBinaryAction -or $currentAction -or $cmdRunnerAction -or $legacyAction)) {
         throw 'Refusing an existing serverdesk task whose action is not owned by this installation.'
     }
     if ([string]$Task.State -notin @('Running', 'Ready', 'Disabled')) {
@@ -483,12 +601,12 @@ function Set-ServerdeskFirewall {
     }
 }
 
-function Write-ServerdeskRunner([string]$Destination, [string]$CredentialDirectory) {
+function Write-ServerdeskRunner([string]$Destination, [string]$ProgramDirectory, [string]$DataDirectory, [string]$CredentialDirectory) {
     $runner = @'
 $ErrorActionPreference = 'Continue'
-Set-Location 'C:\serverdesk'
+Set-Location '__SERVERDESK_PROGRAM_DIR__'
 $env:SERVERDESK_CREDENTIALS_STORE = '__SERVERDESK_CREDENTIALS_STORE__'
-$logPath = 'C:\serverdesk\run.log'
+$logPath = '__SERVERDESK_DATA_DIR__\run.log'
 $maxLogBytes = 20MB
 
 function Rotate-ServerdeskLog {
@@ -510,7 +628,7 @@ function Write-ServerdeskLog([string]$Line) {
 
 while ($true) {
     Rotate-ServerdeskLog
-    & 'C:\serverdesk\serverdesk.exe' -c 'C:\serverdesk\config.local.json' -auth 'C:\serverdesk\auth.json' 2>&1 |
+    & '__SERVERDESK_PROGRAM_DIR__\serverdesk.exe' -c '__SERVERDESK_DATA_DIR__\config.local.json' -auth '__SERVERDESK_DATA_DIR__\auth.json' 2>&1 |
         ForEach-Object { Write-ServerdeskLog ([string]$_) }
     $exitCode = $LASTEXITCODE
     Write-ServerdeskLog "[$([DateTime]::Now.ToString('s'))] serverdesk exited with code $exitCode; restarting in 5 seconds"
@@ -518,16 +636,24 @@ while ($true) {
 }
 '@
     $runner = $runner.Replace('__SERVERDESK_CREDENTIALS_STORE__', $CredentialDirectory)
+    $runner = $runner.Replace('__SERVERDESK_PROGRAM_DIR__', $ProgramDirectory)
+    $runner = $runner.Replace('__SERVERDESK_DATA_DIR__', $DataDirectory)
     [IO.File]::WriteAllText($Destination, ($runner + [Environment]::NewLine), [Text.Encoding]::ASCII)
 }
 
-function Register-ServerdeskTask([string]$Destination) {
-    $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $taskAction = New-ScheduledTaskAction -Execute $powershell `
-        -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\serverdesk\run-serverdesk.ps1' `
-        -WorkingDirectory $Destination
+function Register-ServerdeskTask([string]$ProgramDirectory, [string]$DataDirectory) {
+    if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
+        $DataDirectory = $ProgramDirectory
+    }
+    $executable = Join-Path $ProgramDirectory 'serverdesk.exe'
+    $configPath = Join-Path $DataDirectory 'config.local.json'
+    $authPath = Join-Path $DataDirectory 'auth.json'
+    $arguments = "-c `"$configPath`" -auth `"$authPath`""
+    $taskAction = New-ScheduledTaskAction -Execute $executable `
+        -Argument $arguments -WorkingDirectory $ProgramDirectory
     $taskTrigger = New-ScheduledTaskTrigger -AtStartup
-    $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\LOCAL SERVICE' `
+        -LogonType ServiceAccount -RunLevel Limited
     $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
