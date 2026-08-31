@@ -66,7 +66,7 @@ if (Test-Path -LiteralPath $programDir) {
 }
 
 # Legacy C:\serverdesk state is copied, never moved, until health succeeds.
-if (Test-Path -LiteralPath $legacyRoot -PathType Container -and
+if ((Test-Path -LiteralPath $legacyRoot -PathType Container) -and
     -not (Test-Path -LiteralPath (Join-Path $dataDir 'config.local.json'))) {
     foreach ($name in @('config.local.json', 'auth.json', 'initial-login.txt', 'data', 'credentials', 'run.log')) {
         $source = Join-Path $legacyRoot $name
