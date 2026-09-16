@@ -18,6 +18,8 @@ for script in deploy/packaging/*.sh; do
   sh -n "$script" || fail "shell syntax: $script"
 done
 
+sh deploy/packaging/validate-commercial-nogo.sh || fail 'commercial NO-GO contract failed'
+
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 

@@ -2,9 +2,11 @@
 
 Stratus everRun / ztC Edge와 엣지 장비(NAS·PLC·프린터·Proxmox·일반 서버)를 한 화면에서 감시하는 읽기 전용 단일 바이너리 모니터링 콘솔. Python 스택(everrun-poller + server-monitoring)을 하나의 Go 바이너리로 통합한 후속 프로젝트다.
 
-> **지원 범위:** 현재 릴리스는 everRun/ztC Edge 모니터링용이다. ztC Endurance 화면 모델은
+> **지원 범위:** everRun/ztC Edge 수집 코드는 있다. **유료 인증 조합은 아직 없다**
+> ([`docs/SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md)). ztC Endurance 화면 모델은
 > 설계·표시 호환용 프리뷰이며, Endurance SNMPv3/OPC UA/IPMI 수집은 아직 구현·실장비 인증되지
-> 않았다. 재부팅·종료·failover 같은 장비 관리 액션도 제공하지 않는다.
+> 않았고 판매 대상이 아니다. 재부팅·종료·failover 같은 장비 관리 액션도 제공하지 않는다.
+> Windows 패키지 Scheduled Task가 `SYSTEM`인 동안 Windows 상용 배포는 NO-GO다.
 
 - 백엔드: Go(stdlib-only) — 폴리(avcli/SNMP/SSH), SNMP 트랩 수신, 실측 가용성 트래커, 이벤트 로그
 - 프런트: Vanilla JS ES modules + CSS (빌드 단계 없음, embed.FS로 바이너리에 내장)
