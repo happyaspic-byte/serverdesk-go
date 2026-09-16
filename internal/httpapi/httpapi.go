@@ -589,6 +589,16 @@ func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
 		if value, ok := eventStatus["last_error"].(string); ok {
 			eventStatus["last_error"] = config.Mask(value)
 		}
+		if fwd, ok := eventStatus["forwarder"].(map[string]any); ok {
+			if value, ok := fwd["last_error"].(string); ok {
+				fwd["last_error"] = config.Mask(value)
+			}
+			if enabled, _ := fwd["enabled"].(bool); enabled {
+				if healthy, _ := fwd["healthy"].(bool); !healthy {
+					bump("degraded")
+				}
+			}
+		}
 		if healthy, _ := eventStatus["healthy"].(bool); !healthy {
 			bump("degraded")
 		}

@@ -438,25 +438,49 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	s.send(w, r, 200, map[string]any{"ok": true, "restart_required": changed, "ui_applied": uiApplied, "message": msg})
 }
 
-// handleAvailabilityCSV 는 GET /api/availability.csv — 30일 실측 가용성 내보내기.
-// 읽기지만 운영 데이터라 writeGate 와 같은 게이트를 적용한다.
+// handleAvailabilityCSV 는 GET /api/availability.csv 가용성 이력을 내보낸다.
 func (s *Server) handleAvailabilityCSV(w http.ResponseWriter, r *http.Request) {
 	if !s.writeGate(w, r) {
 		return
 	}
+	days := 0
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 365 {
+			s.send(w, r, http.StatusBadRequest, map[string]any{"error": "days는 1 이상 365 이하의 정수여야 합니다"})
+			return
+		}
+		days = parsed
+	}
+
 	var buf bytes.Buffer
 	cw := csv.NewWriter(&buf)
-	_ = cw.Write([]string{"date", "device", "availability_pct", "observed_sec"})
-	if s.Avail != nil {
-		for _, row := range s.Avail.CSVSnapshot() {
-			_ = cw.Write([]string{row.Day, row.Device,
-				strconv.FormatFloat(row.Avail, 'f', 3, 64),
-				strconv.FormatFloat(row.ObservedSec, 'f', 0, 64)})
+	filename := "availability-"
+	if r.URL.Query().Get("summary") == "true" {
+		filename = "sla-summary-"
+		_ = cw.Write([]string{"device", "availability_pct", "observed_sec", "down_sec", "observed_days"})
+		if s.Avail != nil {
+			for _, row := range s.Avail.SLASnapshot(days) {
+				_ = cw.Write([]string{row.Device,
+					strconv.FormatFloat(row.Avail, 'f', 3, 64),
+					strconv.FormatFloat(row.ObservedSec, 'f', 0, 64),
+					strconv.FormatFloat(row.DownSec, 'f', 0, 64),
+					strconv.Itoa(row.ObservedDays)})
+			}
+		}
+	} else {
+		_ = cw.Write([]string{"date", "device", "availability_pct", "observed_sec"})
+		if s.Avail != nil {
+			for _, row := range s.Avail.CSVSnapshotDays(days) {
+				_ = cw.Write([]string{row.Day, row.Device,
+					strconv.FormatFloat(row.Avail, 'f', 3, 64),
+					strconv.FormatFloat(row.ObservedSec, 'f', 0, 64)})
+			}
 		}
 	}
 	cw.Flush()
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="availability-`+time.Now().Format("20060102")+`.csv"`)
-	w.WriteHeader(200)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+time.Now().Format("20060102")+`.csv"`)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
 }

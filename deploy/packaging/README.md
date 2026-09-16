@@ -20,9 +20,9 @@ injection과 systemd unit 문법을 검사한다. 자세한 production 절차는
 
 ## Windows 7z SFX
 
-The current Windows task runs as SYSTEM and is not approved for commercial production. See the
-explicit NO-GO and least-privilege state/program split required by `docs/SECURITY.md`. Installer and
-rollback validation below must not be presented as a waiver of that blocker.
+The Windows package now installs executable code under `C:\Program Files\Serverdesk`, writable state
+under `C:\ProgramData\Serverdesk`, and runs the task as `NT AUTHORITY\LOCAL SERVICE`. Commercial GA
+still requires real Windows Server migration, DPAPI, update/rollback/uninstall, ACL, and reboot UAT.
 
 Use the full installer module `7zSD.sfx`. Do not use `7zS2.sfx` or
 `7zS2con.sfx`; the small modules ignore installer config and auto-select
@@ -39,12 +39,12 @@ RunProgram="powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%%T\\serve
 ;!@InstallEnd@!
 ```
 
-After installation, maintenance scripts are copied to `C:\serverdesk`:
+After installation, maintenance scripts are copied to `C:\Program Files\Serverdesk`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File C:\serverdesk\update.ps1 -Binary C:\path\serverdesk-windows-amd64.exe
-powershell -ExecutionPolicy Bypass -File C:\serverdesk\uninstall.ps1
-powershell -ExecutionPolicy Bypass -File C:\serverdesk\uninstall.ps1 -Full
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\Serverdesk\update.ps1" -Binary C:\path\serverdesk-windows-amd64.exe
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\Serverdesk\uninstall.ps1"
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\Serverdesk\uninstall.ps1" -Full
 ```
 
 Windows and Linux setup require no password input. A fresh install creates unique administrator

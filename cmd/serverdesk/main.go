@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -280,7 +281,7 @@ func main() {
 	if !once && !transport.tlsEnabled() && transport.allowInsecureHTTP && !transport.loopback() {
 		logMsg("warn", "-", "비루프백 평문 HTTP break-glass 모드입니다; forwarded header를 신뢰하지 않으므로 운영에서는 직접 TLS 또는 루프백 프록시를 사용하십시오")
 	}
-	runtimeDir := poller.ExpandUser(cfg.RuntimeDir)
+	runtimeDir := resolveRuntimeDir(cfg.RuntimeDir, cfg.Path)
 	if demoMode {
 		runtimeDir = demoRuntimeDir(runtimeDir)
 		logMsg("info", "demo", "읽기 전용 샘플 모드 활성화 — 실장비 수집과 외부 알림이 비활성화됩니다")
@@ -373,7 +374,7 @@ func main() {
 	}
 
 	// 실측 가용성 트래커 — FT 클러스터 + 엣지 장비 상태를 60초 샘플링해 영속.
-	avail := poller.NewAvailTracker(runtimeDir, func() [][2]string {
+	avail := poller.NewAvailTrackerWithRetention(runtimeDir, cfg.AvailRetentionDays, func() [][2]string {
 		var out [][2]string
 		fleet, _, _ := cache.Snapshot()
 		if fleet != nil {
@@ -391,6 +392,11 @@ func main() {
 
 	// 이벤트 이력(라이브 로그) — 상태 전이·경보 발생/해제를 10초 diff 로 기록.
 	eventLog := poller.NewEventLog(runtimeDir+string(os.PathSeparator)+"events.jsonl", 500)
+	if cfg.Audit.Enabled {
+		eventLog.RegisterAuditSink(poller.NewSyslogSink(cfg.Audit.SyslogNetwork, cfg.Audit.SyslogAddress, cfg.Audit.SyslogApp))
+		eventLog.StartAuditForwarder(ctx, cfg.Audit.QueueBuffer)
+		logMsg("info", "audit", "외부 감사 포워더 시작 transport=syslog")
+	}
 
 	// SNMP 트랩 수신기(바인드 실패해도 폴리 본체는 계속 동작한다).
 	trapCommunity := ""
@@ -573,6 +579,7 @@ func main() {
 	case <-time.After(5 * time.Second):
 	}
 	avail.Flush()
+	eventLog.StopAuditForwarder()
 	if trapRx != nil {
 		trapRx.Receiver.Close()
 	}
@@ -614,6 +621,21 @@ func readPassword(in io.Reader) (string, error) {
 		}
 	}
 	return string(password), nil
+}
+
+func resolveRuntimeDir(runtimeDir, configPath string) string {
+	runtimeDir = poller.ExpandUser(runtimeDir)
+	if runtimeDir == "" {
+		runtimeDir = "data"
+	}
+	if filepath.IsAbs(runtimeDir) {
+		return filepath.Clean(runtimeDir)
+	}
+	base := filepath.Dir(configPath)
+	if base == "" || base == "." {
+		return filepath.Clean(runtimeDir)
+	}
+	return filepath.Join(base, runtimeDir)
 }
 
 // convertEdgeDevices 는 config 의 엣지 설정을 edge 패키지 계약으로 옮긴다.
