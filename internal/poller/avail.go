@@ -138,6 +138,7 @@ func (t *AvailTracker) Sample() {
 		statuses = t.GetStatuses()
 	}
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	for _, s := range statuses {
 		devID, status := s[0], s[1]
 		rec := t.state[devID]
@@ -146,7 +147,9 @@ func (t *AvailTracker) Sample() {
 			t.state[devID] = rec
 		}
 		cell := rec.Days[day]
-		if cell == nil {
+		// 불완전한 영속 버킷은 관측/다운 쌍으로 복구한다.
+		// 빈 배열이나 관측값만 있는 배열을 인덱싱하면 샘플 루프가 패닉한다.
+		if len(cell) < 2 {
 			cell = []float64{0, 0}
 		}
 		cell[0] += dt
@@ -160,7 +163,6 @@ func (t *AvailTracker) Sample() {
 		t.pruneLocked()
 		t.flush()
 	}
-	t.mu.Unlock()
 }
 
 // pruneLocked 은 35일 넘은 일자 버킷을 버린다.
