@@ -10,6 +10,7 @@ package poller
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
@@ -94,43 +95,35 @@ func (m *EdgeManager) Devices() []edge.DeviceConfig {
 // 워커 교체 직후 새 워커의 첫 라운드가 비어 있으면 마지막 정상 스냅샷으로
 // 버틴다(최대 2라운드=130초). 이 폴섭이 없으면 장비 추가/삭제/수정 때마다
 // 엣지 장비가 화면에서 몇 초간 사라졌다 돌아온다.
+// 최상위 맵은 요청별 사본이다(가용성 주입용). 중첩 값은 읽기 전용이다.
 func (m *EdgeManager) Latest() []map[string]any {
 	m.mu.Lock()
-	w := m.worker
+	defer m.mu.Unlock()
+
 	keys := map[string]bool{}
 	for _, d := range m.devices {
 		keys[d.Key] = true
 	}
-	lg, lgAt := m.lastGood, m.lastGoodAt
-	m.mu.Unlock()
+	var latest []map[string]any
+	if m.worker != nil {
+		latest = m.worker.LatestDevices()
+	}
+	if len(latest) > 0 {
+		m.lastGood, m.lastGoodAt = latest, time.Now()
+	} else if len(m.lastGood) > 0 && time.Since(m.lastGoodAt) < 130*time.Second {
+		latest = m.lastGood
+	} else {
+		return nil
+	}
 
-	filter := func(in []map[string]any) []map[string]any {
-		out := []map[string]any{}
-		for _, d := range in {
-			id, _ := d["id"].(string)
-			if keys[id] {
-				out = append(out, d)
-			}
+	out := []map[string]any{}
+	for _, d := range latest {
+		id, _ := d["id"].(string)
+		if keys[id] {
+			out = append(out, maps.Clone(d))
 		}
-		return out
 	}
-
-	var out []map[string]any
-	if w != nil {
-		out = filter(w.LatestDevices())
-	}
-	if len(out) > 0 {
-		m.mu.Lock()
-		m.lastGood, m.lastGoodAt = out, time.Now()
-		m.mu.Unlock()
-		return out
-	}
-	// 폴섭은 워커 교체 직후 공백 구간에서만 — 오래된 스냅샷을 현재값처럼
-	// 계속 낼 수는 없으므로 2라운드(60s×2 + 여유)를 넘기면 빈 채로 둔다.
-	if len(lg) > 0 && time.Since(lgAt) < 130*time.Second {
-		return filter(lg)
-	}
-	return nil
+	return out
 }
 
 // CollectorStatus reports worker liveness without exposing device identities.
@@ -172,12 +165,13 @@ func (m *EdgeManager) Remove(key string) {
 }
 
 // PatchMeta 는 표시 메타 변경을 즉시 반영한다. 목록의 설정을 고치고 워커를
-// 교체하며, 교체 완료 전까지는 현재 스냅샷의 meta 를 직접 패치해 다음 GET 부터
-// 새 값이 보이게 한다(Python 의 _LATEST 패치와 같은 의도).
+// 교체하며, 교체 완료 전까지는 마지막 스냅샷의 사본을 패치해 다음 GET 부터
+// 새 값이 보이게 한다. 이미 발행된 스냅샷과 워커의 맵은 변경하지 않는다.
 //
 // config 키 → 엣지 meta 키(카멜) 매핑 — floor_pos 만 이름이 갈린다(floorPos).
 func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	for i := range m.devices {
 		if m.devices[i].Key != key {
 			continue
@@ -202,20 +196,20 @@ func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 			}
 		}
 	}
-	w := m.worker
-	m.respawnLocked()
-	m.mu.Unlock()
-
-	// 스냅샷 즉시 패치(새 워커의 첫 라운드가 완료되기 전까지 유효).
-	if w == nil {
-		return
+	// Latest 와 같은 잠금 안에서 폴섭을 교체해 이전 워커의 응답이
+	// 방금 편집한 스냅샷을 덮어쓰지 못하게 한다.
+	if m.worker != nil {
+		if latest := m.worker.LatestDevices(); len(latest) > 0 {
+			m.lastGood, m.lastGoodAt = latest, time.Now()
+		}
 	}
 	metaKey := map[string]string{
 		"label": "label", "company": "company", "factory": "factory",
 		"site": "site", "vendor": "vendor", "floor_pos": "floorPos",
 		"asset_tag": "assetTag",
 	}
-	for _, d := range w.LatestDevices() {
+	patched := append([]map[string]any(nil), m.lastGood...)
+	for i, d := range patched {
 		if id, _ := d["id"].(string); id != key {
 			continue
 		}
@@ -223,12 +217,18 @@ func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 		if meta == nil {
 			continue
 		}
+		d = maps.Clone(d)
+		meta = maps.Clone(meta)
+		d["meta"] = meta
+		patched[i] = d
 		for k, v := range fields {
 			if mk, ok := metaKey[k]; ok {
 				meta[mk] = v
 			}
 		}
 	}
+	m.lastGood = patched
+	m.respawnLocked()
 }
 
 // Stop 은 워커를 멈춘다(그레이스풀 셧다운 경로).
