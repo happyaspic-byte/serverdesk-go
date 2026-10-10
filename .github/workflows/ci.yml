@@ -106,3 +106,19 @@ jobs:
           cache: false
       - name: Run govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  docker:
+    name: Docker build and runtime smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate Compose and shell scripts
+        shell: bash
+        run: |
+          sh -n deploy/docker/entrypoint.sh deploy/docker/healthcheck.sh
+          bash -n deploy/docker/smoke-test.sh
+          docker compose config --quiet
+      - name: Build and exercise the hardened container
+        run: bash deploy/docker/smoke-test.sh

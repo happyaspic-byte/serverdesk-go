@@ -6,6 +6,10 @@ config.local.json.tmp
 /serverdesk
 cmd/serverdesk/serverdesk
 serverdesk.local.env
+/.env
+/.env.*
+!/.env.example
+serverdesk-state*.tar.gz
 dist/
 /auth.json
 /.serverdesk-auth-*

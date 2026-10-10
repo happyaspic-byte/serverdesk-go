@@ -1,0 +1,15 @@
+**
+!Dockerfile
+!go.mod
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!web/
+!web/**
+!deploy/
+!deploy/docker/
+!deploy/docker/*.sh
+!config.example.json
+!NOTICE
+!THIRD_PARTY_NOTICES.md

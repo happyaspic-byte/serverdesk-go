@@ -1,0 +1,31 @@
+name: serverdesk
+
+services:
+  serverdesk:
+    build: .
+    image: serverdesk:local
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${SERVERDESK_BIND:-127.0.0.1}:${SERVERDESK_PORT:-6005}:6005"
+    environment:
+      SERVERDESK_TLS_HOST: "${SERVERDESK_TLS_HOST:-localhost}"
+      SERVERDESK_TLS_CA_FILE: "${SERVERDESK_TLS_CA_FILE:-/var/lib/serverdesk/tls/server.crt}"
+    volumes:
+      - serverdesk-data:/var/lib/serverdesk
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  serverdesk-data:

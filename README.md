@@ -13,6 +13,23 @@ Stratus everRun / ztC Edge와 엣지 장비(NAS·PLC·프린터·Proxmox·일반
 - Go 코드 의존성: 표준 라이브러리만 사용한다. 단, 운영 수집에는 고객이 적법하게 제공한
   Stratus AVCLI/JRE/MIB와 호스트의 OpenSSH 도구가 필요하며 공개 소스·릴리스에는 이를 포함하지 않는다.
 
+## Docker로 시작 (권장)
+
+호스트 요구사항은 Docker Engine 또는 Docker Desktop과 Compose v2뿐이다. Go·Node.js를 호스트에
+설치하지 않고 루트에서 실행한다.
+
+```bash
+docker compose up -d --build --wait
+docker compose exec serverdesk cat /var/lib/serverdesk/initial-login.txt
+```
+
+초기 비밀번호는 안전하게 보관하고 문서의 stdin 명령으로 즉시 변경한 뒤 `initial-login.txt`를 삭제한다.
+브라우저에서 [`https://localhost:6005`](https://localhost:6005)에 접속한다. 기본 인증서는 로컬
+온보딩용 자체서명이므로 브라우저 경고가 표시된다. 인터넷/LAN 운영에는 신뢰된 인증서를 설치해야 한다.
+
+상태 보존, 암호 변경, TLS·백업·업데이트와 장비 연동 제한은 [`docs/DOCKER.md`](docs/DOCKER.md)를 따른다.
+기본 포트 공개는 `127.0.0.1`에 한정되며 AVCLI/JRE/MIB와 실장비 인증은 포함하지 않는다.
+
 ## 빌드
 
 ```bash
