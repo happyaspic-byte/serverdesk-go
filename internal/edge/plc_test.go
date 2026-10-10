@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"net"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -127,8 +128,46 @@ func plcStatusBody(runbit, mode byte, fatal, nonFatal uint16, msg string) []byte
 	return body
 }
 
+// isolateCIP — pollPLC 의 CIP 호출(:44818 고정)이 실제 서비스에 닿지 않도록
+// 루프백 CIP 포트를 테스트가 점유한다. TCP 는 즉시 끊고 UDP 는 잘못된 1바이트로
+// 응답해 CIP 조회가 타임아웃 없이 nil 로 끝나게 한다. 포트가 사용 중이면 건너뛴다.
+func isolateCIP(t *testing.T, ip string) {
+	t.Helper()
+	addr := net.JoinHostPort(ip, strconv.Itoa(cipPort))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Skipf("CIP port %s unavailable: %v", addr, err)
+	}
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		_ = ln.Close()
+		t.Skipf("CIP port %s unavailable: %v", addr, err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = pc.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			_, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = pc.WriteTo([]byte{0}, from)
+		}
+	}()
+}
+
 func plcTestEnv(t *testing.T) (*fakePLC, *Worker, *pollCtx, DeviceConfig) {
 	t.Helper()
+	isolateCIP(t, "127.0.0.1")
 	f := newFakePLC(t)
 	w, pc := testWorker(fakeSNMP{})
 	f.set(func(f *fakePLC) { f.clockEpoch = int64(pc.now+kstOffset.Seconds()) + 5 })
