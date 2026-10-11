@@ -1,6 +1,6 @@
 # NMS 개선 4종 설계 — 임계값 설정 / 백업·복구 / Quick Ack / 가용성 CSV
 
-날짜: 2026-08-08 · 대상: /home/ubuntu/projects/serverdesk-go · 상태: 승인됨(auto)
+날짜: 2026-08-08 · 대상: /home/ubuntu/project/serverdesk-go · 상태: 승인됨(auto)
 
 ## 배경
 

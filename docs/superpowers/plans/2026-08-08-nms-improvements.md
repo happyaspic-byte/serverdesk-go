@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - 이 디렉터리는 **git 저장소가 아니다** — 커밋 단계는 전부 "빌드+테스트 통과" 체크포인트로 대체한다.
-- 빌드/테스트: `cd /home/ubuntu/projects/serverdesk-go && export PATH=$PWD/.toolchain/go/bin:$PATH GOTOOLCHAIN=local && go build -o serverdesk ./cmd/serverdesk && go test ./...`
+- 빌드/테스트: `cd /home/ubuntu/project/serverdesk-go && export PATH=$PWD/.toolchain/go/bin:$PATH GOTOOLCHAIN=local && go build -o serverdesk ./cmd/serverdesk && go test ./...`
 - 웹 자산은 embed.FS — `web/` 수정 후 반드시 재빌드. 재기동: `kill -TERM $(pgrep -x serverdesk); sleep 2; (PATH=/home/ubuntu/bin:$PATH nohup ./serverdesk -c config.local.json > /tmp/serverdesk-shadowNN.log 2>&1 &)`
 - 한글 주석/문구는 기존 파일 톤을 따른다. Edit 도구가 한글 바이트 불일치로 실패하면 python3 치환을 쓴다.
 - 기존 주석·설계 원칙(파일 상단의 번호 매긴 결정 #NNN, GNN)을 훼손하지 않는다. 새 결정은 같은 관례로 짧게 남긴다.

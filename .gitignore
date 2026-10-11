@@ -10,3 +10,8 @@ dist/
 /auth.json
 /.serverdesk-auth-*
 /docs/HANDOFF.md
+
+# Local agent/tooling state — not part of the product or release payload.
+.claude/
+.omc/
+.serena/
