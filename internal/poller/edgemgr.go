@@ -11,6 +11,7 @@ package poller
 import (
 	"context"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -160,6 +161,13 @@ func (m *EdgeManager) Remove(key string) {
 		}
 	}
 	m.devices = append([]edge.DeviceConfig(nil), out...)
+	retained := make([]map[string]any, 0, len(m.lastGood))
+	for _, d := range m.lastGood {
+		if id, _ := d["id"].(string); id != key {
+			retained = append(retained, d)
+		}
+	}
+	m.lastGood = retained
 	m.respawnLocked()
 	m.mu.Unlock()
 }
@@ -172,11 +180,14 @@ func (m *EdgeManager) Remove(key string) {
 func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var updated edge.DeviceConfig
+	changed := false
 	for i := range m.devices {
 		if m.devices[i].Key != key {
 			continue
 		}
 		d := &m.devices[i]
+		before := edgeDisplayMeta(*d)
 		for k, v := range fields {
 			switch k {
 			case "label":
@@ -195,6 +206,14 @@ func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 				d.Vendor = v
 			}
 		}
+		updated = *d
+		changed = changed || before != edgeDisplayMeta(updated)
+	}
+	// Equivalent recognized fields (including empty overrides that resolve to
+	// the same effective defaults) change nothing: no config write, no cache
+	// refresh, no respawn. Real edits still restart the worker below.
+	if !changed {
+		return
 	}
 	// Latest 와 같은 잠금 안에서 폴섭을 교체해 이전 워커의 응답이
 	// 방금 편집한 스냅샷을 덮어쓰지 못하게 한다.
@@ -203,11 +222,7 @@ func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 			m.lastGood, m.lastGoodAt = latest, time.Now()
 		}
 	}
-	metaKey := map[string]string{
-		"label": "label", "company": "company", "factory": "factory",
-		"site": "site", "vendor": "vendor", "floor_pos": "floorPos",
-		"asset_tag": "assetTag",
-	}
+	values := edgeDisplayMeta(updated)
 	patched := append([]map[string]any(nil), m.lastGood...)
 	for i, d := range patched {
 		if id, _ := d["id"].(string); id != key {
@@ -221,14 +236,86 @@ func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 		meta = maps.Clone(meta)
 		d["meta"] = meta
 		patched[i] = d
-		for k, v := range fields {
-			if mk, ok := metaKey[k]; ok {
-				meta[mk] = v
+		for k := range fields {
+			switch k {
+			case "label":
+				meta["label"] = values.label
+			case "company":
+				meta["company"] = values.company
+			case "factory":
+				meta["factory"] = values.factory
+			case "site":
+				d["site"] = values.site
+			case "asset_tag":
+				meta["assetTag"] = values.assetTag
+			case "floor_pos":
+				meta["floorPos"] = values.floorPos
+			case "vendor":
+				meta["vendor"] = projectedVendor(updated, d, values.vendor)
 			}
 		}
 	}
 	m.lastGood = patched
 	m.respawnLocked()
+}
+
+// edgeDisplayMeta follows edge.baseDevice's configured defaults. Both the
+// no-op check and immediate fallback patch use the same effective values.
+type edgeMetaValues struct {
+	label, company, factory, site, assetTag, floorPos, vendor string
+}
+
+func edgeDisplayMeta(d edge.DeviceConfig) edgeMetaValues {
+	values := edgeMetaValues{d.Name, d.Company, d.Factory, d.Site, d.AssetTag, d.FloorPos, d.Vendor}
+	if values.label == "" {
+		values.label = d.Key
+	}
+	if values.company == "" {
+		values.company = "루비컴"
+	}
+	if values.factory == "" {
+		parts := strings.Split(d.IP, ".")
+		if len(parts) > 3 {
+			parts = parts[:3]
+		}
+		values.factory = strings.Join(parts, ".") + ".0/24"
+	}
+	if values.site == "" {
+		values.site = d.IP
+	}
+	return values
+}
+
+// projectedVendor keeps the vendor shown by the retained snapshot's producer
+// path while the configured value is empty. NAS, printer, and PLC hardcode a
+// constant on success and emit the raw configured value when down; proxmox
+// substitutes "Proxmox" for an empty configured vendor; server uses the
+// configured value unless Redfish reports a maker. A configured override
+// projects directly on every path, and the first replacement round replaces
+// the projection with the real producer output.
+func projectedVendor(dev edge.DeviceConfig, retained map[string]any, configured string) string {
+	if configured != "" {
+		return configured
+	}
+	status, _ := retained["status"].(string)
+	if status == "down" {
+		return ""
+	}
+	kind := dev.Kind
+	if kind == "" {
+		kind = dev.Type
+	}
+	switch kind {
+	case "nas":
+		return "Synology"
+	case "printer":
+		return "Samsung Electronics"
+	case "plc":
+		return "OMRON"
+	case "proxmox":
+		return "Proxmox"
+	}
+	return ""
 }
 
 // Stop 은 워커를 멈춘다(그레이스풀 셧다운 경로).
