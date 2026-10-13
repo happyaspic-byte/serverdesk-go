@@ -434,13 +434,15 @@ function mergeLocalWrites(localFleet, serverDevices) {
     if (!edit || typeof edit !== 'object') return srv;
     const m = srv.meta || {};
     // 폴리가 PUT 을 반영해 같은 값을 내리기 시작하면 오버라이드 종료.
-    const reflected = String(srv.site || '') === String(edit.site || '')
-      && LOCAL_EDIT_FIELDS.every((k) => String(m[k] || '') === String(edit[k] || ''))
+    const fields = LOCAL_EDIT_FIELDS.filter((k) => Object.hasOwn(edit, k));
+    const reflected = (!Object.hasOwn(edit, 'site') || String(srv.site || '') === String(edit.site || ''))
+      && fields.every((k) => String(m[k] || '') === String(edit[k] || ''))
       && (!edit.bmcIp || !!(m.bmc && String(m.bmc.ip || '') === String(edit.bmcIp)));
     if (reflected) return srv;
-    const dev = Object.assign({}, srv, { site: edit.site || srv.site });
+    const dev = Object.assign({}, srv);
+    if (Object.hasOwn(edit, 'site')) dev.site = String(edit.site || '');
     const meta = Object.assign({}, m);
-    for (const k of LOCAL_EDIT_FIELDS) meta[k] = String(edit[k] || '');
+    for (const k of fields) meta[k] = String(edit[k] || '');
     if (edit.bmcIp && meta.bmc) meta.bmc = Object.assign({}, meta.bmc, { ip: String(edit.bmcIp) });
     meta.localEdit = edit;
     dev.meta = meta;

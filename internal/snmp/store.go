@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -33,6 +36,10 @@ func NewTrapStore(path string, ring int) *TrapStore {
 // 깨진 줄은 걸러낸다 — 손상 한 줄이 전체 이력 로드를 막아서는 안 된다.
 func (s *TrapStore) Load() []Trap {
 	out := []Trap{}
+	if err := ValidateTrapPath(s.path); err != nil {
+		log.Print("snmp: trap persistence load refused")
+		return out
+	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		return out
@@ -46,6 +53,15 @@ func (s *TrapStore) Load() []Trap {
 		}
 		var t Trap
 		if json.Unmarshal(ln, &t) == nil {
+			if t.OID == "" {
+				var legacy struct {
+					OID string `json:"trap_oid"`
+				}
+				if json.Unmarshal(ln, &legacy) == nil {
+					t.OID = legacy.OID
+				}
+			}
+			t.Community = ""
 			out = append(out, t)
 		}
 	}
@@ -59,32 +75,131 @@ func (s *TrapStore) Load() []Trap {
 }
 
 // Add 는 트랩 1건을 링에 넣고 파일을 원자적으로 다시 쓴다.
-// 쓰기 실패(디스크 풀 등)는 조용히 넘긴다 — 저장 실패가 수신 루프를 죽이면 안 된다.
+// 실패는 비밀 없는 경고로 보고하고 이전 링/파일을 유지한다.
 func (s *TrapStore) Add(t Trap) {
+	if err := s.add(t); err != nil {
+		log.Print("snmp: trap persistence write refused or failed")
+	}
+}
+
+func (s *TrapStore) add(t Trap) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.buf = append(s.buf, t)
-	if len(s.buf) > s.ring {
-		s.buf = append([]Trap(nil), s.buf[len(s.buf)-s.ring:]...)
+	if err := ValidateTrapPath(s.path); err != nil {
+		return err
+	}
+	t.Community = ""
+	next := append(append([]Trap(nil), s.buf...), t)
+	if len(next) > s.ring {
+		next = next[len(next)-s.ring:]
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false) // 파이썬 json.dumps(ensure_ascii=False) 와 같은 가독성
-	for _, tr := range s.buf {
+	enc.SetEscapeHTML(false)
+	for _, tr := range next {
+		tr.Community = ""
 		if err := enc.Encode(tr); err != nil {
-			return
+			return err
 		}
 	}
-	if d := filepath.Dir(s.path); d != "" && d != "." {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := ValidateTrapPath(s.path); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".traps-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err = f.Write(buf.Bytes()); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err := ValidateTrapPath(s.path); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	s.buf = next
+	return nil
+}
+
+// ValidateTrapPath rejects symlink components and unsafe existing objects.
+// Missing private subdirectories are allowed; Add creates them with 0700.
+func ValidateTrapPath(path string) error {
+	if path != filepath.Clean(path) {
+		return fmt.Errorf("snmp: trap path must be canonical")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(abs)
+	// Walk outward: validate every existing ancestor before creating anything.
+	for cur := dir; ; cur = filepath.Dir(cur) {
+		info, err := os.Lstat(cur)
+		if err == nil {
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("snmp: trap directory must not be a symlink")
+			}
+			if err := validateTrapDirectory(info, cur == dir); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if cur == filepath.Dir(cur) {
+			break
 		}
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-		return
+	info, err := os.Lstat(abs)
+	if os.IsNotExist(err) {
+		return nil
 	}
-	_ = os.Rename(tmp, s.path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("snmp: trap path must be a regular file")
+	}
+	return validateTrapFile(info)
+}
+
+// ResolveTrapPath preserves absolute configured locations, but confines relative
+// locations to runtimeDir. Both paths still require protected directory checks.
+func ResolveTrapPath(runtimeDir, persist string) (string, error) {
+	if persist == "" {
+		persist = "traps.jsonl"
+	}
+	if persist != filepath.Clean(persist) {
+		return "", fmt.Errorf("snmp: trap path must be canonical")
+	}
+	if !filepath.IsAbs(persist) {
+		if runtimeDir != "" && runtimeDir != filepath.Clean(runtimeDir) {
+			return "", fmt.Errorf("snmp: runtime directory must be canonical")
+		}
+		clean := filepath.Clean(persist)
+		if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+			return "", fmt.Errorf("snmp: relative trap path escapes runtime directory")
+		}
+		persist = filepath.Join(runtimeDir, clean)
+	}
+	if err := ValidateTrapPath(persist); err != nil {
+		return "", err
+	}
+	return persist, nil
 }
 
 // Snapshot 은 현재 링 내용을 복사해 돌려준다(오래된 것이 앞). 뷰 병합용.

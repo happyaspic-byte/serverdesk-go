@@ -27,7 +27,10 @@ func cipIDFrame(status uint16, serial uint32, name string, state int) []byte {
 	if state >= 0 {
 		b = append(b, byte(state))
 	}
-	return b
+	binary.LittleEndian.PutUint16(b[26:28], 0x0c) // ListIdentity item
+	binary.LittleEndian.PutUint16(b[28:30], uint16(len(b)-30))
+	binary.LittleEndian.PutUint16(b[30:32], 1) // encapsulation version
+	return cipEncap(0x63, 0, b[24:])
 }
 
 func TestParseCIPIdentity(t *testing.T) {
@@ -87,7 +90,8 @@ func cipAttrResp(status, extSize byte, payload []byte) []byte {
 	r = append(r, u2[:]...)
 	binary.LittleEndian.PutUint16(u2[:], uint16(len(cip)))
 	r = append(r, u2[:]...)
-	return append(r, cip...)
+	r = append(r, cip...)
+	return cipEncap(0x6f, 7, r[24:])
 }
 
 func TestParseCIPAttrData(t *testing.T) {

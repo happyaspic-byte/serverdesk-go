@@ -15,20 +15,17 @@ type plcCntSample struct {
 	OutOctets uint32
 }
 
-// plcStatic — PLC 의 라운드 간 유지 상태.
-// Python poll_plc 는 refresh 플래그를 쓰지 않고 model 이 비었을 때만 정적
-// 정보를 다시 읽는다 — FINS/CIP 정적 조회가 제어기에 부담을 주지 않도록
-// 한번 잡히면 고정되는 관행을 그대로 유지한다.
+// plcStatic caches immutable identity, explicit unsupported commands and fault activation.
+// Live CIP status, network configuration and link observations are read each round.
 type plcStatic struct {
-	Model    string
-	FW       string
-	CIP      *cipIdentity
-	Eth      map[string]any
-	Hostname string
-	// FINS 확장 명령 지원 여부 1회 판별(NX 시리즈는 0602/2101 이 0401=미지원).
-	HasCycle  bool
-	HasErrlog bool
-	Cnt       *plcCntSample
+	Model             string
+	FW                string
+	CIP               *cipIdentity
+	CycleUnsupported  bool
+	ErrlogUnsupported bool
+	CIPFault          map[string]any
+	FINSFault         map[string]any
+	Cnt               *plcCntSample
 }
 
 var cipStateText = map[int]string{
@@ -57,9 +54,18 @@ func (w *Worker) pollPLC(pc *pollCtx, dev DeviceConfig, st *plcStatic) (map[stri
 		if a := stateAlert("down", pc.now); a != nil {
 			m["alerts"] = []any{a}
 		}
-		model, fw := "", ""
+		model, fw, serial, rev := "", "", "", ""
 		if st != nil {
 			model, fw = st.Model, st.FW
+			if st.CIP != nil {
+				serial, rev = st.CIP.Serial, st.CIP.Rev
+			}
+			if st.FINSFault != nil {
+				m["alerts"] = append(m["alerts"].([]any), observedAlert(st.FINSFault, false))
+			}
+			if st.CIPFault != nil {
+				m["alerts"] = append(m["alerts"].([]any), observedAlert(st.CIPFault, false))
+			}
 		}
 		m["plc"] = map[string]any{
 			"runState": "", "hasError": false, "errSev": "", "errSince": "",
@@ -67,9 +73,9 @@ func (w *Worker) pollPLC(pc *pollCtx, dev DeviceConfig, st *plcStatic) (map[stri
 			"maker": "OMRON", "model": model,
 			"detectedModel": model,
 			"productName":   trimSpaceASCII("OMRON " + model),
-			"fwVersion":     fw, "unitRev": "",
-			"serial": "", "finsRttMs": nil,
-			"cipStatus": "", "cipMajorFault": false, "cipMinorFault": false,
+			"fwVersion":     fw, "unitRev": rev,
+			"serial": serial, "finsRttMs": nil,
+			"cipStatus": "", "cipMajorFault": nil, "cipMinorFault": nil,
 			"linkSpeedMbps": nil, "linkFullDuplex": nil,
 			"clockSkewSec": nil, "procVars": []any{},
 		}
@@ -85,23 +91,30 @@ func (w *Worker) pollPLC(pc *pollCtx, dev DeviceConfig, st *plcStatic) (map[stri
 		errSev = "minor"
 	}
 
-	if st == nil || st.Model == "" {
+	if st == nil {
 		st = w.plcInitStatic(pc, ip, port, byte(sa1))
+	} else if st.Model == "" {
+		identity := w.plcInitStatic(pc, ip, port, byte(sa1))
+		st.Model, st.FW = identity.Model, identity.FW
 	}
 
 	var cycle *finsCycle
-	if st.HasCycle {
-		if c, ok := parseFINSCycle(finsReqData(pc, ip, port, []byte{0x06, 0x02, 0x00}, byte(sa1))); ok {
+	if !st.CycleUnsupported {
+		data := finsReqData(pc, ip, port, []byte{0x06, 0x02, 0x00}, byte(sa1))
+		st.CycleUnsupported = finsUnsupported(data)
+		if c, ok := parseFINSCycle(data); ok {
 			cycle = &c
 		}
 	}
 	errlog := []finsErrEntry{}
-	if st.HasErrlog {
-		errlog = parseFINSErrlog(finsReqData(pc, ip, port, []byte{0x21, 0x01, 0x00, 0x00, 0x00, 0x05}, byte(sa1)), 5)
+	if !st.ErrlogUnsupported {
+		data := finsReqData(pc, ip, port, []byte{0x21, 0x01, 0x00, 0x00, 0x00, 0x05}, byte(sa1))
+		st.ErrlogUnsupported = finsUnsupported(data)
+		errlog = parseFINSErrlog(data, 5)
 	}
 
 	// 실측 트래픽 — 카운터 델타/시간 = B/s. 카운터 랩어라운드(32비트)면 그 라운드는 건드너뛴다.
-	cnt := cipIfCountersReq(pc.ctx, ip)
+	cnt := w.cipCounters(pc.ctx, ip)
 	var inBps, outBps *int64
 	if cnt != nil && st.Cnt != nil && pc.now > st.Cnt.TS {
 		dt := pc.now - st.Cnt.TS
@@ -130,13 +143,33 @@ func (w *Worker) pollPLC(pc *pollCtx, dev DeviceConfig, st *plcStatic) (map[stri
 		status = "deg"
 	}
 
+	currentCIP := w.cipIdentity(pc.ctx, ip, cipIDTimeout)
+	if currentCIP != nil && st.CIP == nil {
+		identity := *currentCIP
+		identity.Status, identity.State, identity.IOConn = 0, -1, 0
+		identity.MajorFault, identity.MinorFault = false, false
+		st.CIP = &identity
+	}
 	var cip cipIdentity
 	if st.CIP != nil {
 		cip = *st.CIP
 	}
-	eth := st.Eth
-	if eth == nil {
-		eth = map[string]any{}
+	eth := w.cipLink(pc.ctx, ip)
+	_, speedKnown := eth["speedMbps"].(int64)
+	_, duplexKnown := eth["fullDuplex"].(bool)
+	linkUp, linkKnown := eth["linkUp"].(bool)
+	complete := currentCIP != nil && speedKnown && duplexKnown && linkKnown
+	if currentCIP != nil {
+		if currentCIP.MajorFault {
+			if st.CIPFault == nil {
+				st.CIPFault = map[string]any{"name": "PLC_CIP_FAULT", "desc": "CIP major fault", "time": tsKST(pc.now), "severity": "critical", "sev": "critical"}
+			}
+		} else {
+			st.CIPFault = nil
+		}
+	}
+	if !complete || st.CIPFault != nil || (currentCIP != nil && currentCIP.MinorFault) || (linkKnown && !linkUp) {
+		status = "deg"
 	}
 	errMsg := fst.Msg
 	if hasError {
@@ -146,20 +179,27 @@ func (w *Worker) pollPLC(pc *pollCtx, dev DeviceConfig, st *plcStatic) (map[stri
 		}
 	}
 	errSince := ""
-	if hasError || errSev != "" {
-		errSince = tsKST(pc.now)
+	if hasError {
+		if st.FINSFault == nil {
+			st.FINSFault = map[string]any{"name": "PLC_ERROR", "desc": errMsg, "time": tsKST(pc.now), "severity": "critical", "sev": "critical"}
+		}
+		errSince = st.FINSFault["time"].(string)
+	} else {
+		st.FINSFault = nil
+		if errSev != "" {
+			errSince = tsKST(pc.now)
+		}
 	}
 	productName := cip.Name
 	if productName == "" {
 		productName = trimSpaceASCII("OMRON " + st.Model)
 	}
 	cipStatus := ""
-	if st.CIP != nil {
-		cipStatus = cipStateText[cip.State]
-	}
-	var ioConn any
-	if st.CIP != nil {
-		ioConn = cip.IOConn
+	var ioConn, cipMajor, cipMinor any
+	if currentCIP != nil {
+		cipStatus = cipStateText[currentCIP.State]
+		ioConn = currentCIP.IOConn
+		cipMajor, cipMinor = currentCIP.MajorFault, currentCIP.MinorFault
 	}
 	fatalCode, nonFatalCode := "", ""
 	if fst.Fatal != 0 {
@@ -195,6 +235,8 @@ func (w *Worker) pollPLC(pc *pollCtx, dev DeviceConfig, st *plcStatic) (map[stri
 
 	d := baseDevice(dev, "PLC", status, 0)
 	m := d["meta"].(map[string]any)
+	m["stale"] = !complete
+	m["collection"] = map[string]any{"healthComplete": complete}
 	m["vendor"] = "OMRON"
 	m["version"] = st.FW
 	m["plc"] = map[string]any{
@@ -210,12 +252,13 @@ func (w *Worker) pollPLC(pc *pollCtx, dev DeviceConfig, st *plcStatic) (map[stri
 		"fwVersion":     st.FW, "unitRev": cip.Rev,
 		"serial": cip.Serial, "finsRttMs": rtt,
 		"cipStatus":     cipStatus,
-		"cipMajorFault": st.CIP != nil && cip.MajorFault,
-		"cipMinorFault": st.CIP != nil && cip.MinorFault,
+		"cipMajorFault": cipMajor,
+		"cipMinorFault": cipMinor,
 		"ioConn":        ioConn,
 		"linkSpeedMbps": eth["speedMbps"], "linkFullDuplex": eth["fullDuplex"],
 		"mac":      strOr(eth["mac"], ""),
-		"hostname": st.Hostname,
+		"hostname": strOr(eth["hostname"], ""),
+		"linkUp":   eth["linkUp"],
 		"netMask":  strOr(eth["netMask"], ""), "gateway": strOr(eth["gateway"], ""),
 		"clockSkewSec": numOrNil(skewPtr), "procVars": []any{},
 		"finsFatalCode": fatalCode, "finsNonFatalCode": nonFatalCode,
@@ -230,26 +273,22 @@ func (w *Worker) pollPLC(pc *pollCtx, dev DeviceConfig, st *plcStatic) (map[stri
 	if a := stateAlert(status, pc.now); a != nil {
 		alerts = append(alerts, a)
 	}
-	if hasError {
-		desc := errMsg
-		if desc == "" {
-			desc = "Controller error flag set"
-		}
-		alerts = append(alerts, map[string]any{
-			"name": "PLC_ERROR", "desc": desc,
-			"time": tsKST(pc.now), "severity": "critical", "sev": "critical",
-		})
+	if st.FINSFault != nil {
+		alerts = append(alerts, observedAlert(st.FINSFault, true))
 	} else if errSev == "minor" {
 		alerts = append(alerts, map[string]any{
 			"name": "PLC_WARNING", "desc": "Non-fatal error flag set",
 			"time": tsKST(pc.now), "severity": "warning", "sev": "warning",
 		})
 	}
+	if st.CIPFault != nil {
+		alerts = append(alerts, observedAlert(st.CIPFault, currentCIP != nil))
+	}
 	m["alerts"] = capAlerts(alerts)
 	return d, st
 }
 
-// plcInitStatic — model/FW(0501) + CIP identity + 이더넷 링크 + 확장 명령 지원 판별.
+// plcInitStatic — Only model/FW(0501); dynamic observations are never initialized once.
 func (w *Worker) plcInitStatic(pc *pollCtx, ip string, port int, sa1 byte) *plcStatic {
 	model, fw := "", ""
 	if md, _ := finsReq(pc.ctx, ip, port, []byte{0x05, 0x01}, sa1, finsReadTimeout); finsOK(md) && len(md) >= 34 {
@@ -258,17 +297,12 @@ func (w *Worker) plcInitStatic(pc *pollCtx, ip string, port int, sa1 byte) *plcS
 			fw = cleanStr(string(md[34:54]))
 		}
 	}
-	eth := cipEthLink(pc.ctx, ip)
-	st := &plcStatic{
-		Model: model, FW: fw,
-		CIP:      cipIdentityReq(pc.ctx, ip, cipIDTimeout),
-		Eth:      eth,
-		Hostname: strOr(eth["hostname"], ""),
-	}
-	// FINS 확장 명령 지원 여부 1회 판별(NX 시리즈는 0602/2101 이 0401=미지원).
-	_, st.HasCycle = parseFINSCycle(finsReqData(pc, ip, port, []byte{0x06, 0x02, 0x00}, sa1))
-	st.HasErrlog = len(parseFINSErrlog(finsReqData(pc, ip, port, []byte{0x21, 0x01, 0x00, 0x00, 0x00, 0x05}, sa1), 5)) > 0
-	return st
+	return &plcStatic{Model: model, FW: fw}
+}
+
+// finsUnsupported distinguishes explicit 0401 from timeout, malformed and transient errors.
+func finsUnsupported(data []byte) bool {
+	return len(data) >= 14 && data[12] == 0x04 && data[13] == 0x01
 }
 
 // finsReqData — data 만 필요한 호출 축약.

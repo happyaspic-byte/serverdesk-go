@@ -27,6 +27,7 @@ type nasStatic struct {
 	Sysname string
 	Disks   []nasDiskStatic
 	Raids   []nasRaidStatic
+	Faults  map[string]map[string]any // Retained until this OID explicitly recovers.
 }
 
 // ucdCPU — ssCpuIdle(%) → 사용률. 범위 밖 값은 파싱 이상으로 버린다.
@@ -58,13 +59,12 @@ func ucdMemPct(total, avail, buf, cache int64) (int64, bool) {
 // synDiskOK — 디스크 상태 1(normal)/2(initialized) 만 정상.
 func synDiskOK(st int64) bool { return st == 1 || st == 2 }
 
-// synRaidText — RAID 상태 코드→텍스트(모르는 코드는 normal 로 뭉개지 않고
-// Python 과 같이 "normal" 기본값 — 프런트 표기 호환).
+// synRaidText — Unrecognized RAID states are not evidence of normal health.
 func synRaidText(st int64) string {
 	if s, ok := synRaidStatusText[st]; ok {
 		return s
 	}
-	return "normal"
+	return "unknown"
 }
 
 // pollNAS — Python poll_nas 이식.
@@ -85,6 +85,9 @@ func (w *Worker) pollNAS(pc *pollCtx, dev DeviceConfig, st *nasStatic) (map[stri
 		if a := stateAlert("down", pc.now); a != nil {
 			m["alerts"] = []any{a}
 		}
+		if st != nil {
+			m["alerts"] = capAlerts(append(m["alerts"].([]any), nasFaultAlerts(st, nil)...))
+		}
 		m["nas"] = nil
 		return d, st
 	}
@@ -96,48 +99,89 @@ func (w *Worker) pollNAS(pc *pollCtx, dev DeviceConfig, st *nasStatic) (map[stri
 		st = w.nasRefreshStatic(pc, ip, comm, st)
 	}
 
+	if st.Faults == nil {
+		st.Faults = map[string]map[string]any{}
+	}
+	// An undiscovered inventory cannot establish disk/RAID health.
+	complete := len(st.Disks) > 0 && len(st.Raids) > 0
+	badHealth := false
+	observed := map[string]bool{}
+	observe := func(oid string, known, healthy bool, name, desc string) {
+		if !known {
+			complete = false
+			return
+		}
+		if healthy {
+			delete(st.Faults, oid)
+			return
+		}
+		badHealth = true
+		observed[oid] = true
+		if name != "" && st.Faults[oid] == nil {
+			st.Faults[oid] = map[string]any{
+				"name": name, "desc": desc, "time": tsKST(pc.now),
+				"severity": "critical", "sev": "critical",
+			}
+		}
+	}
 	disks := []any{}
-	badDisk := false
 	for _, dk := range st.Disks {
 		so := oSynDiskStat + strconv.Itoa(dk.Idx)
 		to := oSynDiskTemp + strconv.Itoa(dk.Idx)
 		di := pc.snmp.call(pc.ctx, ip, comm, []string{so, to}, 2*time.Second)
-		dst := vnumOr(di[so], 1)
-		ok := synDiskOK(dst)
-		if !ok {
-			badDisk = true
+		dst, parsed := vnum(di[so])
+		known := parsed && dst >= 1 && dst <= 5
+		var ok any
+		status := "unknown"
+		if known {
+			ok = synDiskOK(dst)
+			status = "warning"
+			if ok == true {
+				status = "normal"
+			}
 		}
-		status := "warning"
-		if ok {
-			status = "normal"
-		}
+		observe(so, known, ok == true, "DISK_FAULT", dk.Name+" abnormal")
 		disks = append(disks, map[string]any{
 			"name": dk.Name, "status": status, "ok": ok,
 			"model": dk.Model, "tempC": numOrNil(vnumPtr(di[to])),
 		})
 	}
 	raids := []any{}
-	badRaid := false
 	for _, rd := range st.Raids {
 		ro := oSynRaidStat + strconv.Itoa(rd.Idx)
 		ri := pc.snmp.call(pc.ctx, ip, comm, []string{ro}, 2*time.Second)
-		rst := vnumOr(ri[ro], 1)
+		rst, parsed := vnum(ri[ro])
 		stx := synRaidText(rst)
-		ok := rst == 1
-		if rst == 11 || rst == 12 {
-			badRaid = true
+		known := parsed && stx != "unknown"
+		var ok any
+		if known {
+			ok = rst == 1
 		}
+		name := ""
+		if rst == 11 || rst == 12 {
+			name = "RAID_" + strings.ToUpper(stx)
+		}
+		observe(ro, known, rst == 1, name, rd.Name+" "+stx)
 		raids = append(raids, map[string]any{"name": rd.Name, "status": stx, "ok": ok})
 	}
 
-	sysst := vnumOr(r[oSynStatus], 1)
-	power := vnumOr(r[oSynPower], 1)
-	fanS := vnumOr(r[oSynFanSys], 1)
-	fanC := vnumOr(r[oSynFanCPU], 1)
-	fansOK := fanS == 1 && fanC == 1
+	states := map[string]string{}
+	for _, oid := range []string{oSynStatus, oSynPower, oSynFanSys, oSynFanCPU} {
+		n, parsed := vnum(r[oid])
+		known := parsed && (n == 1 || n == 2)
+		states[oid] = "unknown"
+		if known {
+			states[oid] = normFail(n)
+		}
+		observe(oid, known, n == 1, "NAS_HARDWARE_FAULT", oid+" failed")
+	}
+	var fansOK any
+	if states[oSynFanSys] != "unknown" && states[oSynFanCPU] != "unknown" {
+		fansOK = states[oSynFanSys] == "normal" && states[oSynFanCPU] == "normal"
+	}
 
 	status := "op"
-	if sysst != 1 || power != 1 || !fansOK || badDisk || badRaid {
+	if !complete || badHealth || len(st.Faults) > 0 {
 		status = "deg"
 	}
 
@@ -159,6 +203,8 @@ func (w *Worker) pollNAS(pc *pollCtx, dev DeviceConfig, st *nasStatic) (map[stri
 
 	d := baseDevice(dev, "NAS", status, upDays)
 	m := d["meta"].(map[string]any)
+	m["stale"] = !complete
+	m["collection"] = map[string]any{"healthComplete": complete}
 	m["vendor"] = "Synology"
 	m["version"] = st.DSM
 	if cpuPtr != nil {
@@ -185,10 +231,10 @@ func (w *Worker) pollNAS(pc *pollCtx, dev DeviceConfig, st *nasStatic) (map[stri
 	m["nas"] = map[string]any{
 		"model": st.Model, "serial": st.Serial, "dsmVersion": st.DSM,
 		"tempC":        numOrNil(vnumPtr(r[oSynTemp])),
-		"systemStatus": normFail(sysst),
-		"powerStatus":  normFail(power),
-		"systemFan":    normFail(fanS),
-		"cpuFan":       normFail(fanC),
+		"systemStatus": states[oSynStatus],
+		"powerStatus":  states[oSynPower],
+		"systemFan":    states[oSynFanSys],
+		"cpuFan":       states[oSynFanCPU],
 		"fansOk":       fansOK,
 		"upgradeAvailable": func() bool {
 			n, ok := vnum(r[oSynUpgrade])
@@ -202,30 +248,41 @@ func (w *Worker) pollNAS(pc *pollCtx, dev DeviceConfig, st *nasStatic) (map[stri
 	if a := stateAlert(status, pc.now); a != nil {
 		alerts = append(alerts, a)
 	}
-	for _, dk := range disks {
-		dm := dk.(map[string]any)
-		if !dm["ok"].(bool) {
-			// 디스크 이상은 RAID 여분 소진 직전(데이터 손실 전단계) — RAID degraded
-			// 와 같은 급으로 봐야 경고에 묻히지 않는다.
-			alerts = append(alerts, map[string]any{
-				"name": "DISK_FAULT", "desc": dm["name"].(string) + " abnormal",
-				"time": tsKST(pc.now), "severity": "critical", "sev": "critical",
-			})
-		}
-	}
-	for _, rd := range raids {
-		rm := rd.(map[string]any)
-		rst := rm["status"].(string)
-		if !rm["ok"].(bool) && (rst == "degraded" || rst == "crashed") {
-			alerts = append(alerts, map[string]any{
-				"name": "RAID_" + strings.ToUpper(rst),
-				"desc": rm["name"].(string) + " " + rst,
-				"time": tsKST(pc.now), "severity": "critical", "sev": "critical",
-			})
-		}
-	}
+	alerts = append(alerts, nasFaultAlerts(st, observed)...)
 	m["alerts"] = capAlerts(alerts)
 	return d, st
+}
+
+// observedAlert copies retained evidence; current-round authority never mutates
+// activation history or any previously published snapshot.
+func observedAlert(alert map[string]any, observed bool) map[string]any {
+	out := make(map[string]any, len(alert)+1)
+	for key, value := range alert {
+		out[key] = value
+	}
+	out["observed"] = observed
+	return out
+}
+
+// nasFaultAlerts returns unresolved evidence in stable inventory order, even when down.
+func nasFaultAlerts(st *nasStatic, observed map[string]bool) []any {
+	alerts := []any{}
+	for _, dk := range st.Disks {
+		if a := st.Faults[oSynDiskStat+strconv.Itoa(dk.Idx)]; a != nil {
+			alerts = append(alerts, observedAlert(a, observed[oSynDiskStat+strconv.Itoa(dk.Idx)]))
+		}
+	}
+	for _, rd := range st.Raids {
+		if a := st.Faults[oSynRaidStat+strconv.Itoa(rd.Idx)]; a != nil {
+			alerts = append(alerts, observedAlert(a, observed[oSynRaidStat+strconv.Itoa(rd.Idx)]))
+		}
+	}
+	for _, oid := range []string{oSynStatus, oSynPower, oSynFanSys, oSynFanCPU} {
+		if a := st.Faults[oid]; a != nil {
+			alerts = append(alerts, observedAlert(a, observed[oid]))
+		}
+	}
+	return alerts
 }
 
 // normFail — 1=normal / 그 외 failed (Synology MIB 2치 상태).
@@ -268,6 +325,7 @@ func (w *Worker) nasRefreshStatic(pc *pollCtx, ip, comm string, prev *nasStatic)
 		Disks: disks, Raids: raids,
 	}
 	if prev != nil {
+		n.Faults = prev.Faults
 		if len(n.Disks) < len(prev.Disks) {
 			n.Disks = prev.Disks
 		}

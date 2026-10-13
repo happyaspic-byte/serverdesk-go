@@ -8,7 +8,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -21,6 +20,7 @@ import (
 	"time"
 	"unicode"
 
+	"net"
 	"net/http"
 
 	"serverdesk/internal/alerting"
@@ -349,6 +349,15 @@ func main() {
 		return
 	}
 
+	// Reserve the listener before loading or starting persistent collectors. A
+	// second instance must not rewrite the active owner's availability on exit.
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		logServerError(err)
+		os.Exit(1)
+	}
+	defer listener.Close()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var wg sync.WaitGroup
@@ -374,17 +383,9 @@ func main() {
 
 	// 실측 가용성 트래커 — FT 클러스터 + 엣지 장비 상태를 60초 샘플링해 영속.
 	avail := poller.NewAvailTracker(runtimeDir, func() [][2]string {
-		var out [][2]string
 		fleet, _, _ := cache.Snapshot()
-		if fleet != nil {
-			for _, cv := range fleetClusters(fleet) {
-				out = append(out, [2]string{mapStr(cv, "key"), poller.DeriveStatus(cv)})
-			}
-		}
-		for _, e := range edgeMgr.Latest() {
-			out = append(out, [2]string{mapStr(e, "id"), mapStr(e, "status")})
-		}
-		return out
+		edges, edgeStatus := edgeMgr.LatestWithStatus()
+		return availabilityStatuses(fleet, states, edges, edgeStatus)
 	})
 	start(avail.Start)
 	logMsg("info", "avail", "실측 가용성 트래커 시작 경로="+avail.Path())
@@ -441,8 +442,8 @@ func main() {
 					}
 				}
 			}
-			edgeStatus := edgeMgr.CollectorStatus()
-			devices = append(devices, edgeMgr.Latest()...)
+			edges, edgeStatus := edgeMgr.LatestWithStatus()
+			devices = append(devices, edges...)
 			// nil fleet means Cache.Update has not run yet; an empty non-nil
 			// fleet is the valid zero-cluster deployment. Configured edge
 			// workers likewise need one completed round before reconciliation.
@@ -453,20 +454,11 @@ func main() {
 				edgeHosts[device.Key] = true
 				ftReady[device.Key] = edgeReady
 			}
+			ready = edgeDeviceReadiness(edges, edgeStatus, ftReady) && ready
 			ftReady[edgeCollectorConditionHost] = edgeReady
-			signals := notificationSignals(devices)
-			for i := range signals {
-				switch {
-				case edgeHosts[signals[i].Host]:
-					signals[i].SourceUnready = !edgeReady
-				case ftReady[signals[i].Host]:
-					// This cluster's current fast snapshot is authoritative.
-				default:
-					// Unknown and individually unready sources fail closed. The
-					// engine still ingests signals from other ready hosts.
-					signals[i].SourceUnready = true
-				}
-			}
+			signals := alerting.DeviceSignals(devices, &alerting.DeviceSignalReadiness{
+				HostRecoveryReady: ftReady, EdgeHosts: edgeHosts, EdgeWorkerReady: edgeReady,
+			})
 			// A current collector error is itself an authoritative positive
 			// condition even though that host cannot authorize recoveries until
 			// a later successful snapshot. Never label stale device data as down.
@@ -488,6 +480,7 @@ func main() {
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "notification engine initialization failed: %v\n", err)
+		_ = listener.Close()
 		os.Exit(1)
 	}
 	apiSrv.Notifier = notifier
@@ -540,43 +533,55 @@ func main() {
 	// 그레이스풀 셧다운: 워커 정지 → avail flush → 트랩 수신기 닫기.
 	sigCh := make(chan os.Signal, 2)
 	notifyStop(sigCh) // 플랫폼별 시그널 연결은 signal_*.go(Windows 는 Interrupt 만)
+	shutdownDone := make(chan error, 1)
+	shutdown := func() {
+		shutdownDone <- shutdownServer(srv, cancel, &wg, func() error {
+			err := avail.FlushWithError()
+			if trapRx != nil {
+				trapRx.Receiver.Close()
+			}
+			return err
+		}, 20*time.Second, edgeMgr.Wait)
+	}
 	go func() {
-		sig := <-sigCh
-		logMsg("info", "-", fmt.Sprintf("시그널 %v 수신 — graceful shutdown", sig))
-		cancel()
-		_ = srv.Shutdown(context.Background())
+		select {
+		case sig := <-sigCh:
+			logMsg("info", "-", fmt.Sprintf("시그널 %v 수신 — graceful shutdown", sig))
+			shutdown()
+		case <-ctx.Done():
+		}
 	}()
 
 	var serveErr error
 	if transport.tlsEnabled() {
 		logMsg("info", "-", fmt.Sprintf("HTTPS 리스닝 https://%s (fleet/topology/health + webfront)", listen))
-		serveErr = srv.ListenAndServeTLS(transport.certFile, transport.keyFile)
+		serveErr = srv.ServeTLS(listener, transport.certFile, transport.keyFile)
 	} else {
 		logMsg("info", "-", fmt.Sprintf("HTTP 리스닝 http://%s (fleet/topology/health + webfront)", listen))
-		serveErr = srv.ListenAndServe()
+		serveErr = srv.Serve(listener)
 	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
-		if errors.Is(serveErr, syscall.EADDRINUSE) || strings.Contains(serveErr.Error(), "Only one usage of each socket address") {
-			logMsg("error", "-", "HTTP 서버 실패: 포트가 이미 사용 중입니다 — 실행 중인 serverdesk 인스턴스를 확인하세요 (Windows: schtasks /End /TN serverdesk 후 재실행): "+serveErr.Error())
-		} else {
-			logMsg("error", "-", "HTTP 서버 실패: "+serveErr.Error())
-		}
+		logServerError(serveErr)
+		cancel()
+		go shutdown()
+	}
+	if err := <-shutdownDone; err != nil {
+		logMsg("error", "-", fmt.Sprintf("종료 제한시간/저장 대기 실패: %v", err))
+	} else {
+		logMsg("info", "-", "종료 완료")
+	}
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		_ = listener.Close()
 		os.Exit(1)
 	}
-	cancel()
-	// 워커 종료 대기는 짧게 — avcli 콜은 최대 90초 블록될 수 있어 기다리지 않고
-	// 끊는다(Python 도 daemon 스레드라 프로세스 종료 시 잘린다).
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
+}
+
+func logServerError(err error) {
+	if errors.Is(err, syscall.EADDRINUSE) || strings.Contains(err.Error(), "Only one usage of each socket address") {
+		logMsg("error", "-", "HTTP 서버 실패: 포트가 이미 사용 중입니다 — 실행 중인 serverdesk 인스턴스를 확인하세요 (Windows: schtasks /End /TN serverdesk 후 재실행): "+err.Error())
+	} else {
+		logMsg("error", "-", "HTTP 서버 실패: "+err.Error())
 	}
-	avail.Flush()
-	if trapRx != nil {
-		trapRx.Receiver.Close()
-	}
-	logMsg("info", "-", "종료 완료")
 }
 
 func readPassword(in io.Reader) (string, error) {
@@ -660,6 +665,118 @@ func mapStr(m map[string]any, key string) string {
 
 func needsArgvExposureCheck(cfg *config.Config) bool {
 	return cfg != nil && len(cfg.Clusters) > 0
+}
+
+// edgeDeviceReadiness binds per-device recovery permission to its collector snapshot.
+func edgeDeviceReadiness(devices []map[string]any, status poller.EdgeCollectorStatus, hosts map[string]bool) bool {
+	collectorReady := edgeNotificationSourceReady(status)
+	allReady := collectorReady
+	for _, device := range devices {
+		meta, _ := device["meta"].(map[string]any)
+		stale, _ := meta["stale"].(bool)
+		ready := collectorReady && !stale
+		hosts[mapStr(device, "id")] = ready
+		allReady = allReady && ready
+	}
+	return allReady
+}
+
+// availabilityStatuses admits only observed, current status snapshots. Fast-tier
+// status is independent of slow/static collection errors. A fresh edge down
+// snapshot is an observation, unlike an old cached down status.
+func availabilityStatuses(fleet map[string]any, states []*poller.ClusterState, edges []map[string]any, edgeStatus poller.EdgeCollectorStatus) [][2]string {
+	trusted, _ := notificationSourceReadiness(fleet, states, edgeStatus)
+	for _, state := range states {
+		if state == nil {
+			continue
+		}
+		age := state.Age("fast")
+		if state.Cfg == nil || age == nil || *age > float64(state.Cfg.Intervals.Fast*3) || state.TierErr("fast") != "" {
+			trusted[state.Key] = false
+		}
+	}
+	limits := make(map[string]float64, len(states))
+	for _, state := range states {
+		if state != nil && state.Cfg != nil {
+			limits[state.Key] = float64(state.Cfg.Intervals.Fast * 3)
+		}
+	}
+	var out [][2]string
+	for _, cluster := range fleetClusters(fleet) {
+		key := mapStr(cluster, "key")
+		stale, _ := cluster["stale"].(bool)
+		collection, _ := cluster["collection"].(map[string]any)
+		lastSuccess, _ := collection["last_success"].(map[string]any)
+		var observedAt float64
+		switch value := lastSuccess["fast"].(type) {
+		case int64:
+			observedAt = float64(value)
+		case float64:
+			observedAt = value
+		}
+		if trusted[key] && !stale && observedAt > 0 && float64(time.Now().UnixNano())/1e9-observedAt <= limits[key] {
+			out = append(out, [2]string{key, poller.DeriveStatus(cluster)})
+		}
+	}
+	if edgeNotificationSourceReady(edgeStatus) && !edgeStatus.LastRoundAt.IsZero() && time.Since(edgeStatus.LastRoundAt) <= 130*time.Second {
+		edgeDeviceReadiness(edges, edgeStatus, trusted)
+		for _, device := range edges {
+			if trusted[mapStr(device, "id")] {
+				out = append(out, [2]string{mapStr(device, "id"), mapStr(device, "status")})
+			}
+		}
+	}
+	return out
+}
+
+// shutdownServer shares one deadline across HTTP draining, workers and final
+// persistence. File writes cannot be canceled; a timeout reports unfinished work.
+func shutdownServer(srv *http.Server, cancel context.CancelFunc, wg *sync.WaitGroup, persist func() error, budget time.Duration, edgeWait ...func(context.Context) error) error {
+	ctx, stop := context.WithTimeout(context.Background(), budget)
+	defer stop()
+	return shutdownServerContext(ctx, srv, cancel, wg, persist, edgeWait...)
+}
+
+func shutdownServerContext(ctx context.Context, srv *http.Server, cancel context.CancelFunc, wg *sync.WaitGroup, persist func() error, edgeWait ...func(context.Context) error) error {
+	httpDone := make(chan error, 1)
+	go func() { httpDone <- srv.Shutdown(ctx) }()
+	cancel()
+	workersDone := make(chan error, 1)
+	go func() {
+		wg.Wait()
+		var err error
+		for _, wait := range edgeWait {
+			err = errors.Join(err, wait(ctx))
+		}
+		workersDone <- err
+	}()
+	var drainErr error
+	select {
+	case drainErr = <-httpDone:
+	case <-ctx.Done():
+		drainErr = ctx.Err()
+	}
+	if drainErr != nil {
+		_ = srv.Close()
+	}
+	select {
+	case err := <-workersDone:
+		if err != nil {
+			return err
+		}
+	case <-ctx.Done():
+		_ = srv.Close()
+		return ctx.Err()
+	}
+	persisted := make(chan error, 1)
+	go func() { persisted <- persist() }()
+	select {
+	case err := <-persisted:
+		return errors.Join(drainErr, err)
+	case <-ctx.Done():
+		_ = srv.Close()
+		return ctx.Err()
+	}
 }
 
 func edgeNotificationSourceReady(status poller.EdgeCollectorStatus) bool {
@@ -780,85 +897,7 @@ func hasCollectionAge(value any) bool {
 }
 
 func notificationSignals(devices []map[string]any) []alerting.Signal {
-	var out []alerting.Signal
-	for _, device := range devices {
-		host := mapStr(device, "id")
-		if host == "" {
-			host = mapStr(device, "host")
-		}
-		if host == "" {
-			continue
-		}
-		meta, _ := device["meta"].(map[string]any)
-		if strings.EqualFold(mapStr(device, "status"), "down") {
-			description := "Device offline — no node responded to the collector"
-			downSince := mapStr(meta, "downSince")
-			ackTime := normalizeNotificationAckTime(downSince)
-			out = append(out, alerting.Signal{
-				Key: "state:" + host + ":down", Host: host,
-				Description: description,
-				AckKey:      strings.Join([]string{host, "DEVICE_STATE", description, ackTime}, "\x01"),
-				StartedAt:   parseNotificationTime(downSince),
-			})
-		}
-		alerts, _ := meta["alerts"].([]any)
-		for _, raw := range alerts {
-			item, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			severity := strings.ToLower(mapStr(item, "sev"))
-			if severity == "" {
-				severity = strings.ToLower(mapStr(item, "severity"))
-			}
-			name := mapStr(item, "name")
-			if severity != "critical" || name == "DEVICE_STATE" {
-				continue
-			}
-			description := mapStr(item, "desc")
-			if description == "" {
-				description = mapStr(item, "description")
-			}
-			if description == "" {
-				description = name
-			}
-			rawTime := mapStr(item, "time")
-			ackTime := normalizeNotificationAckTime(rawTime)
-			material := strings.Join([]string{host, name, description, ackTime}, "\x00")
-			digest := sha256.Sum256([]byte(material))
-			out = append(out, alerting.Signal{
-				Key: "alert:" + fmt.Sprintf("%x", digest[:16]), Host: host,
-				Description: description, AckKey: strings.Join([]string{host, name, description, ackTime}, "\x01"),
-				StartedAt: parseNotificationTime(rawTime),
-			})
-		}
-	}
-	return out
-}
-
-func normalizeNotificationAckTime(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "no-time"
-	}
-	value = strings.Replace(value, "T", " ", 1)
-	return strings.TrimSuffix(value, "Z")
-}
-
-func parseNotificationTime(value string) time.Time {
-	value = strings.TrimSpace(value)
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		if parsed, err := time.Parse(layout, value); err == nil {
-			return parsed
-		}
-	}
-	kst := time.FixedZone("KST", 9*60*60)
-	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
-		if parsed, err := time.ParseInLocation(layout, value, kst); err == nil {
-			return parsed
-		}
-	}
-	return time.Time{}
+	return alerting.DeviceSignals(devices, nil)
 }
 
 func notificationSilence(ui map[string]any, now time.Time) (map[string]bool, map[string]bool) {

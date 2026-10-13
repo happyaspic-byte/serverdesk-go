@@ -146,20 +146,45 @@ func Get(ctx context.Context, ip string, port int, community string, oids []stri
 		}
 
 		buf := make([]byte, 65535)
-		n, _, readErr := conn.ReadFromUDP(buf)
-		close(stop)
-		conn.Close()
-
-		if readErr != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+		for {
+			n, src, readErr := conn.ReadFromUDP(buf)
+			if readErr != nil {
+				close(stop)
+				conn.Close()
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				lastErr = fmt.Errorf("snmp: %s:%d 응답 대기 실패: %w", ip, port, readErr)
+				break
 			}
-			lastErr = fmt.Errorf("snmp: %s:%d 응답 대기 실패: %w", ip, port, readErr)
-			// UDP 패킷 유실 대비 1~2회 타임아웃 백오프 재전송 루프
-			continue
+			if src.Port != raddr.Port || !src.IP.Equal(raddr.IP) {
+				continue
+			}
+			resp, parseErr := decodeGetResponse(buf[:n])
+			if parseErr != nil || resp.id != reqID || resp.version != 1 || resp.community != community {
+				continue
+			}
+			matched := true
+			for oid := range resp.values {
+				found := false
+				for _, requested := range oids {
+					if oid == requested {
+						found = true
+						break
+					}
+				}
+				if !found {
+					matched = false
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			close(stop)
+			conn.Close()
+			return resp.values, resp.agentError()
 		}
-
-		return parseGetResponse(buf[:n])
 	}
 
 	return nil, lastErr
@@ -168,65 +193,107 @@ func Get(ctx context.Context, ip string, port int, community string, oids []stri
 // parseGetResponse 는 GetResponse-PDU 를 {oid: Value} 맵으로 디코드한다
 // (파이썬 snmp_get 의 응답 파싱부와 동일 구조).
 func parseGetResponse(data []byte) (map[string]Value, error) {
-	top := &reader{b: data}
-	_, seq, err := top.read()
+	r, err := decodeGetResponse(data)
 	if err != nil {
 		return nil, err
+	}
+	return r.values, r.agentError()
+}
+
+type getResponse struct {
+	version, id, status, index int64
+	community                  string
+	values                     map[string]Value
+}
+
+func (r getResponse) agentError() error {
+	if r.status != 0 {
+		return fmt.Errorf("snmp: 에이전트 오류 status=%d index=%d", r.status, r.index)
+	}
+	return nil
+}
+
+func decodeGetResponse(data []byte) (out getResponse, err error) {
+	top := &reader{b: data}
+	seq, err := top.readTag(0x30)
+	if err != nil {
+		return out, err
+	}
+	if top.more() {
+		return out, fmt.Errorf("snmp: trailing message data")
 	}
 	r := &reader{b: seq}
-	if _, _, err = r.read(); err != nil { // version
-		return nil, err
-	}
-	if _, _, err = r.read(); err != nil { // community
-		return nil, err
-	}
-	_, pduB, err := r.read()
+	b, err := r.readTag(tagInt)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
-	p := &reader{b: pduB}
-	if _, _, err = p.read(); err != nil { // request-id
-		return nil, err
+	out.version, err = decInt(b)
+	if err != nil || (out.version != 0 && out.version != 1) {
+		return out, fmt.Errorf("snmp: invalid version")
 	}
-	_, errB, err := p.read() // error-status
+	b, err = r.readTag(tagOctets)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
-	_, idxB, err := p.read() // error-index
+	out.community = string(b)
+	b, err = r.readTag(pduResponse)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
-	_, vbl, err := p.read()
-	if err != nil {
-		return nil, err
+	if r.more() {
+		return out, fmt.Errorf("snmp: trailing envelope data")
 	}
-	out := make(map[string]Value)
-	vr := &reader{b: vbl}
-	for vr.more() {
-		_, vb, err := vr.read()
+	p := &reader{b: b}
+	for _, n := range []*int64{&out.id, &out.status, &out.index} {
+		b, err = p.readTag(tagInt)
 		if err != nil {
-			return nil, err
+			return out, err
+		}
+		*n, err = decInt(b)
+		if err != nil {
+			return out, err
+		}
+	}
+	if out.status < 0 || out.status > 18 || out.index < 0 {
+		return out, fmt.Errorf("snmp: invalid error fields")
+	}
+	b, err = p.readTag(0x30)
+	if err != nil {
+		return out, err
+	}
+	if p.more() {
+		return out, fmt.Errorf("snmp: trailing PDU data")
+	}
+	out.values = make(map[string]Value)
+	vr := &reader{b: b}
+	for vr.more() {
+		vb, err := vr.readTag(0x30)
+		if err != nil {
+			return out, err
 		}
 		one := &reader{b: vb}
-		_, oidB, err := one.mustRead()
+		oidB, err := one.readTag(tagOID)
 		if err != nil {
-			return nil, err
-		}
-		vt, vv, err := one.mustRead()
-		if err != nil {
-			return nil, err
+			return out, err
 		}
 		oid, err := decodeOID(oidB)
 		if err != nil {
-			return nil, err
+			return out, err
 		}
-		out[oid] = decGetValue(vt, vv)
-	}
-	// 에이전트가 error-status 를 올렸으면 부분 결과와 함께 오류를 돌린다 —
-	// 조용히 빈 값을 삼키면 장비 오류(noSuchName 등)를 네트워크 타임아웃과
-	// 구분할 수 없어 운영 디버깅이 어려워진다.
-	if es := decUint(errB); es != 0 {
-		return out, fmt.Errorf("snmp: 에이전트 오류 status=%d index=%d", es, decUint(idxB))
+		vt, vv, err := one.read()
+		if err != nil {
+			return out, err
+		}
+		if one.more() {
+			return out, fmt.Errorf("snmp: trailing varbind data")
+		}
+		if err := validateValue(vt, vv); err != nil {
+			return out, err
+		}
+		if _, duplicate := out.values[oid]; duplicate {
+			return out, fmt.Errorf("snmp: duplicate OID")
+		}
+		out.values[oid] = decGetValue(vt, vv)
 	}
 	return out, nil
 }

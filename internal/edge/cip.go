@@ -1,9 +1,11 @@
 package edge
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"time"
@@ -63,25 +65,70 @@ func buildCIPSendRRData(cip []byte) []byte {
 // parseCIPAttrData — SendRRData 응답에서 CIP 데이터부를 꺼낸다.
 // 오프셋: encap 24 + interface handle 4 + timeout 2 + item count 2 + item hdr 4 = 36.
 // data[2]=general status(0=성공), data[3]=추가 상태 워드 수 — 그 뒤가 실제 값.
+func validCIPFrame(r []byte, command uint16) bool {
+	return len(r) >= 24 && len(r) == 24+int(binary.LittleEndian.Uint16(r[2:4])) &&
+		binary.LittleEndian.Uint16(r[:2]) == command && binary.LittleEndian.Uint32(r[8:12]) == 0 &&
+		bytes.Equal(r[12:20], []byte(cipContext8)) && binary.LittleEndian.Uint32(r[20:24]) == 0
+}
+
+// readCIPFrame consumes exactly one frame, including fragmented TCP delivery.
+func readCIPFrame(conn net.Conn, command uint16, session uint32) ([]byte, error) {
+	header := make([]byte, 24)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return nil, err
+	}
+	n := int(binary.LittleEndian.Uint16(header[2:4]))
+	if n > 2048 {
+		return nil, fmt.Errorf("cip: oversized payload")
+	}
+	r := make([]byte, 24+n)
+	copy(r, header)
+	if _, err := io.ReadFull(conn, r[24:]); err != nil {
+		return nil, err
+	}
+	if !validCIPFrame(r, command) {
+		return nil, fmt.Errorf("cip: invalid response envelope")
+	}
+	handle := binary.LittleEndian.Uint32(r[4:8])
+	if (command == 0x65 && handle == 0) || (command != 0x65 && handle != session) {
+		return nil, fmt.Errorf("cip: invalid session")
+	}
+	return r, nil
+}
+
 func parseCIPAttrData(r []byte) []byte {
-	if len(r) < 44 {
+	if !validCIPFrame(r, 0x6f) || len(r) < 44 {
 		return nil
 	}
-	off := 24 + 4 + 2 + 2 + 4
-	ln := int(binary.LittleEndian.Uint16(r[off+2 : off+4]))
-	end := off + 4 + ln
-	if end > len(r) {
-		end = len(r)
+	if binary.LittleEndian.Uint32(r[24:28]) != 0 || binary.LittleEndian.Uint16(r[30:32]) != 2 ||
+		binary.LittleEndian.Uint16(r[32:34]) != 0 || binary.LittleEndian.Uint16(r[34:36]) != 0 ||
+		binary.LittleEndian.Uint16(r[36:38]) != 0xb2 {
+		return nil
 	}
-	data := r[off+4 : end]
-	if len(data) >= 4 && data[2] == 0 {
-		start := 4 + int(data[3])*2
-		if start > len(data) {
-			return nil
-		}
-		return data[start:]
+	n := int(binary.LittleEndian.Uint16(r[38:40]))
+	if n < 4 || 40+n != len(r) {
+		return nil
 	}
-	return nil
+	data := r[40:]
+	if data[0] != 0x8e || data[1] != 0 || data[2] != 0 {
+		return nil
+	}
+	start := 4 + int(data[3])*2
+	if start > len(data) {
+		return nil
+	}
+	return data[start:]
+}
+
+// bindSocketContext respects parent deadlines and interrupts established I/O.
+func bindSocketContext(ctx context.Context, conn net.Conn, timeout time.Duration) func() {
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = conn.SetDeadline(deadline)
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	return func() { stop() }
 }
 
 // cipReadAttrs — 한 TCP 세션에서 Get_Attribute_Single 여러 건.
@@ -94,16 +141,16 @@ func cipReadAttrs(ctx context.Context, ip string, attrs [][3]byte, timeout time.
 		return out
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	stop := bindSocketContext(ctx, conn, timeout)
+	defer stop()
 
 	// RegisterSession
 	reg := []byte{1, 0, 0, 0} // protocol version 1, options 0
 	if _, err := conn.Write(cipEncap(0x65, 0, reg)); err != nil {
 		return out
 	}
-	rbuf := make([]byte, 2048)
-	n, err := conn.Read(rbuf)
-	if err != nil || n < 28 {
+	rbuf, err := readCIPFrame(conn, 0x65, 0)
+	if err != nil || len(rbuf) != 28 || !bytes.Equal(rbuf[24:], reg) {
 		return out
 	}
 	session := binary.LittleEndian.Uint32(rbuf[4:8])
@@ -113,11 +160,11 @@ func cipReadAttrs(ctx context.Context, ip string, attrs [][3]byte, timeout time.
 		if _, err := conn.Write(cipEncap(0x6F, session, payload)); err != nil {
 			return out
 		}
-		n, err := conn.Read(rbuf)
+		rbuf, err = readCIPFrame(conn, 0x6f, session)
 		if err != nil {
 			return out
 		}
-		out[i] = parseCIPAttrData(rbuf[:n])
+		out[i] = parseCIPAttrData(rbuf)
 	}
 	return out
 }
@@ -140,7 +187,9 @@ type cipIdentity struct {
 // parseCIPIdentity — ListIdentity 응답 파싱. 길이/구조 이상 시 ok=false.
 func parseCIPIdentity(d []byte) (cipIdentity, bool) {
 	var id cipIdentity
-	if len(d) < 63 {
+	if !validCIPFrame(d, 0x63) || len(d) < 63 || binary.LittleEndian.Uint32(d[4:8]) != 0 ||
+		binary.LittleEndian.Uint16(d[24:26]) != 1 || binary.LittleEndian.Uint16(d[26:28]) != 0x0c ||
+		int(binary.LittleEndian.Uint16(d[28:30])) != len(d)-30 || binary.LittleEndian.Uint16(d[30:32]) != 1 {
 		return id, false
 	}
 	idx := 24     // encap 헤더
@@ -165,7 +214,7 @@ func parseCIPIdentity(d []byte) (cipIdentity, bool) {
 	idx += 4
 	nlen := int(d[idx])
 	idx++
-	if !need(nlen) {
+	if !need(nlen) || len(d) > idx+nlen+1 {
 		return id, false
 	}
 	id.Name = trimSpaceASCII(asciiReplace(d[idx : idx+nlen]))
@@ -187,7 +236,8 @@ func cipIdentityReq(ctx context.Context, ip string, timeout time.Duration) *cipI
 		return nil
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	stop := bindSocketContext(ctx, conn, timeout)
+	defer stop()
 	if _, err := conn.Write(cipEncap(0x63, 0, nil)); err != nil {
 		return nil
 	}

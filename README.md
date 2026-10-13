@@ -19,7 +19,7 @@ Stratus everRun / ztC Edge와 엣지 장비(NAS·PLC·프린터·Proxmox·일반
 go build -o serverdesk ./cmd/serverdesk
 ```
 
-툴체인이 리포에 없으면 Go 1.26+ 아무 경로나 PATH 에 두면 된다.
+`go.mod`의 Go 1.26.9를 사용한다(`GOTOOLCHAIN=go1.26.9`). 저장소/고객 패키지에는 툴체인을 번들하지 않는다.
 
 ## 실행
 
@@ -72,7 +72,9 @@ chmod 600 config.local.json                    # Linux/macOS
 
 ## Linux 고객 설치
 
-배포 패키지 디렉터리(`deploy/packaging/`)에서 다음을 실행하거나 프로젝트 루트에서 경로를 지정해 실행한다. 최초 설치는 비대화식으로 고유한 관리자 자격증명을
+Archive checksum/provenance 검증 후 root-owned, non-writable/non-symlink ancestors 아래의 package
+staging 루트에서 다음을 실행한다. 사용자 소유 extraction이나 `/tmp` staging은 거부된다.
+고객 state/vendor tree 전체를 chown하지 않는다. 최초 설치는 비대화식으로 고유한 관리자 자격증명을
 생성해 `/var/lib/serverdesk/initial-login.txt`에 기록한다. 이 파일은 `serverdesk` 서비스
 계정 소유, mode `0600`이므로 안전하게 기록한 뒤 삭제하거나 비밀번호를 교체한다. 재설치와
 업데이트는 기존 `auth.json`과 자격증명을 보존한다.
@@ -95,8 +97,8 @@ sudo systemctl restart serverdesk-net.service
 
 고객 설치의 실행 파일은 `/opt/serverdesk/serverdesk`(root 소유)이고, `config.local.json`,
 `auth.json`, `initial-login.txt`는 `/var/lib/serverdesk`에서 `serverdesk` 서비스 계정 소유,
-mode `0600`으로 관리된다. 장비 비밀은 config에 `secret://NAME` 참조만 남기고 systemd
-`LoadCredential=`로 전달한다. 마이그레이션, credential 드롭인, 네트워크 소유권 및 롤백 절차는
+mode `0600`으로 관리된다. 장비 비밀은 config에 `secret://NAME` 참조만 남긴다. UI enrollment는
+service-owned managed store를 사용하며 systemd `LoadCredential=`는 외부 read-only credential용 선택사항이다. 마이그레이션, credential 드롭인, 네트워크 소유권 및 롤백 절차는
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)를 따른다.
 
 ## Windows 고객 설치
@@ -122,7 +124,9 @@ AVCLI/JRE/MIB는 저작권·라이선스 경계를 지키기 위해 공개 패�
 - 경보 임계값(warn/crit %) 설정 화면 편집 — `PUT /api/admin/thresholds`, 즉시 라이브 반영
 - 설정 백업/복구 — `GET /api/admin/config/export`(자격증명 마스킹) / `POST /api/admin/config/import`
   (빈 자격증명은 기존 값 유지, 장비·수집 변경은 재시작 후 적용)
-- 가용성 CSV — `GET /api/availability.csv` (30일 실측)
+- 표시 메타 edit — `PUT /api/clusters/<key>`는 label/company/factory/site/asset_tag/floor_pos와
+  Edge vendor만 수정. 운영·credential 필드를 보내는 legacy full-form 요청은 400이며 부분 저장하지 않는다.
+- 가용성 CSV — `GET /api/availability.csv` (30일 관측 기반 운영 추정치, SLA 증명 아님)
 - 공개 `/api/health`는 최소 상태만 반환하고, 인증된 `/api/admin/health`는 캐시·수집 티어·
   Edge worker·이벤트 저장 상태를 제공한다. `events.jsonl`은 최근 이력으로 자동 압축된다.
 - 대시보드 경보 Quick Ack — 서버 공유 상태(/ack)로 동기화
@@ -144,7 +148,7 @@ go vet ./... && go test ./...
 Roobicom (루비컴) — https://roobicom.co.kr. 이 저장소는 proprietary이며 공개 사용 허가는
 [`NOTICE`](NOTICE)를 따른다. 제3자 구성요소 고지는 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md),
 릴리스 검증 절차는 [`docs/RELEASE.md`](docs/RELEASE.md)에 있다.
-현재 production-readiness 점수와 남은 현장 검증 항목은
+현재 working-tree 검증 결과와 BLOCKED/NOT_TESTED 현장 게이트는
 [`docs/PRODUCTION-READINESS.md`](docs/PRODUCTION-READINESS.md)에 기록한다. 제품별 지원 범위는
 [`docs/SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md), 출시 현장 시험은
 [`docs/COMMERCIAL-UAT.md`](docs/COMMERCIAL-UAT.md)를 따른다.

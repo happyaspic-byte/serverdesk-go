@@ -209,6 +209,224 @@ func execRequest(srv *Server, method, target string, body any, origin string) (*
 	return rec, res
 }
 
+func TestPLCExplicitPortRejectedWithoutMutation(t *testing.T) {
+	for _, port := range []any{-1, 0, 65536, 9600.5, "9600", "invalid", nil, true} {
+		t.Run(fmt.Sprintf("%v", port), func(t *testing.T) {
+			f := newAdminTestFixture(t, `{"listen":"127.0.0.1:6005","clusters":[],"edge_devices":[],"secret_policy":"require-references"}`)
+			before, err := os.ReadFile(f.cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{"/api/clusters", "/api/clusters/test"} {
+				body := map[string]any{"type": "PLC", "key": "plc-invalid", "mgmt": "127.0.0.1", "fins_port": port}
+				reqBody, _ := json.Marshal(body)
+				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(reqBody)))
+				req.RemoteAddr = "127.0.0.1:4321"
+				ctx, cancel := context.WithCancel(req.Context())
+				cancel() // No network probe may run for invalid input.
+				rec := httptest.NewRecorder()
+				f.srv.ServeHTTP(rec, req.WithContext(ctx))
+				if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "fins_port") {
+					t.Errorf("%s: want 400 fins_port, got %d %s", path, rec.Code, rec.Body.String())
+				}
+			}
+			after, err := os.ReadFile(f.cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Error("invalid port changed config file")
+			}
+			if f.srv.edgeCfgCount() != 0 || len(f.edgeMgr.Devices()) != 0 {
+				t.Error("invalid port changed runtime devices")
+			}
+			if _, err := os.Stat(f.cfgPath + ".bak"); !os.IsNotExist(err) {
+				t.Error("invalid port wrote backup")
+			}
+			if _, err := os.Stat(f.srv.Store.CredentialDirectory()); !os.IsNotExist(err) {
+				t.Error("invalid port provisioned credentials")
+			}
+		})
+	}
+}
+
+func TestPLCValidPortPersistsLoadableConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		port any
+		want int
+	}{
+		{"omitted", nil, 9600}, {"minimum", 1, 1}, {"maximum", 65535, 65535},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAdminTestFixture(t, `{"listen":"127.0.0.1:6005","clusters":[],"edge_devices":[],"secret_policy":"require-references"}`)
+			body := map[string]any{"type": "PLC", "key": "plc-valid", "mgmt": "127.0.0.1"}
+			if tc.port != nil {
+				body["fins_port"] = tc.port
+			}
+			rec, _ := execRequest(f.srv, http.MethodPost, "/api/clusters", body, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("add = %d %s", rec.Code, rec.Body.String())
+			}
+			loaded, err := config.LoadSecure(f.cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(loaded.EdgeDevices) != 1 || loaded.EdgeDevices[0].FinsPort != tc.want {
+				t.Fatalf("persisted devices = %+v", loaded.EdgeDevices)
+			}
+			if got := f.srv.findEdgeCfg("plc-valid"); got == nil || got.FinsPort != tc.want {
+				t.Fatalf("runtime = %+v", got)
+			}
+		})
+	}
+}
+
+func TestEditRejectsUnsupportedOperationalFieldsWithoutPartialSuccess(t *testing.T) {
+	for _, field := range []string{"type", "platform", "admin_user", "admin_pass", "root_pass", "node0", "node0_user", "node0_pass", "node1", "node1_pass", "win_user", "win_pass", "community", "api", "bmc_ip", "bmc_user", "bmc_pass", "model", "tags", "nodes", "vm_ips", "fins_port", "tls_fingerprint"} {
+		t.Run(field, func(t *testing.T) {
+			f := newAdminTestFixture(t, "")
+			before, _ := os.ReadFile(f.cfgPath)
+			rec, res := execRequest(f.srv, http.MethodPut, "/api/clusters/edge-srv1", map[string]any{"label": "must not save", "mgmt": "192.168.1.20", field: "attempted change"}, "")
+			if rec.Code != http.StatusBadRequest || !strings.Contains(fmt.Sprint(res["error"]), field) {
+				t.Errorf("want useful 400, got %d %v", rec.Code, res)
+			}
+			after, _ := os.ReadFile(f.cfgPath)
+			if string(before) != string(after) || f.srv.findEdgeCfg("edge-srv1").Name != "Edge Server 1" {
+				t.Error("rejected edit partially saved metadata")
+			}
+		})
+	}
+}
+
+func TestEditMetadataWithLegacyIdentityReturnsAppliedFields(t *testing.T) {
+	f := newAdminTestFixture(t, "")
+	rec, res := execRequest(f.srv, http.MethodPut, "/api/clusters/edge-srv1", map[string]any{
+		"key": "edge-srv1", "mgmt": "192.168.1.20", "label": " renamed ", "vendor": " HPE ",
+	}, "")
+	if rec.Code != http.StatusOK || res["ok"] != true {
+		t.Fatalf("metadata edit = %d %v", rec.Code, res)
+	}
+	applied, _ := json.Marshal(res["applied"])
+	if string(applied) != `["label","vendor"]` {
+		t.Fatalf("applied = %s", applied)
+	}
+	loaded, err := config.LoadSecure(f.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := loaded.EdgeDevices[0]
+	if d.Name != "renamed" || d.Vendor != "HPE" || d.IP != "192.168.1.20" || d.Community != "public" {
+		t.Fatalf("metadata edit changed operational config: %+v", d)
+	}
+}
+
+func TestEditRejectsLegacyFullForm(t *testing.T) {
+	f := newAdminTestFixture(t, "")
+	before, err := os.ReadFile(f.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, res := execRequest(f.srv, http.MethodPut, "/api/clusters/edge-srv1", map[string]any{
+		"key": "edge-srv1", "mgmt": "192.168.1.20", "label": "must not save", "type": "SRV",
+		"platform": "redfish", "bmc_ip": "192.168.1.99", "bmc_user": "admin", "bmc_pass": " raw secret ",
+		"community": "", "nodes": []any{}, "vm_ips": []any{}, "tags": []any{},
+	}, "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(fmt.Sprint(res["error"]), "bmc_pass") || res["ok"] == true {
+		t.Fatalf("full form must fail explicitly: %d %v", rec.Code, res)
+	}
+	after, err := os.ReadFile(f.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) || f.srv.findEdgeCfg("edge-srv1").Name != "Edge Server 1" {
+		t.Fatal("full form partially saved metadata")
+	}
+}
+
+func TestAddPreservesRawPasswords(t *testing.T) {
+	for _, typ := range []string{"EV", "proxmox", "redfish"} {
+		t.Run(typ, func(t *testing.T) {
+			f := newAdminTestFixture(t, `{"listen":"127.0.0.1:6005","clusters":[],"edge_devices":[],"secret_policy":"require-references"}`)
+			body := map[string]any{"type": "EV", "key": "raw-password", "mgmt": "127.0.0.1", "label": " label ", "admin_user": " admin ", "admin_pass": " admin password ", "root_pass": " root password ", "node0": "127.0.0.2", "node0_user": " root ", "node0_pass": " node password ", "node1": "127.0.0.3"}
+			if typ != "EV" {
+				body["type"] = "SRV"
+				body["platform"] = typ
+			}
+			if typ == "redfish" {
+				body["bmc_ip"] = "127.0.0.2"
+				body["bmc_user"] = " admin "
+				body["bmc_pass"] = " bmc password "
+			}
+			rec, _ := execRequest(f.srv, http.MethodPost, "/api/clusters", body, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("add = %d %s", rec.Code, rec.Body.String())
+			}
+			loaded, err := config.LoadSecure(f.cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if typ == "EV" {
+				c := loaded.Clusters[0]
+				if c.AdminPassword != " admin password " || c.NodeRootPassword != " root password " || c.Nodes[0].RootPassword != " node password " || c.Nodes[1].RootPassword != " node password " {
+					t.Error("FT passwords lost whitespace")
+				}
+				if c.Name != "label" || c.AdminUser != "admin" || c.Nodes[0].RootUser != "root" {
+					t.Error("identifiers were not trimmed")
+				}
+			} else {
+				d := loaded.EdgeDevices[0]
+				if typ == "proxmox" && (d.Password != " admin password " || d.User != "admin") {
+					t.Error("Proxmox password/identifier normalization incorrect")
+				}
+				if typ == "redfish" && (d.BmcPassword != " bmc password " || d.BmcUser != "admin") {
+					t.Error("BMC password/identifier normalization incorrect")
+				}
+				if got := f.srv.findEdgeCfg("raw-password"); got.Password != d.Password || got.BmcPassword != d.BmcPassword {
+					t.Error("runtime password differs from persisted password")
+				}
+			}
+		})
+	}
+}
+
+func TestConnTestPreservesRawPasswords(t *testing.T) {
+	for _, typ := range []string{"proxmox", "redfish"} {
+		t.Run(typ, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				user, pw, ok := r.BasicAuth()
+				if typ == "proxmox" {
+					_ = r.ParseForm()
+					user, pw, ok = r.FormValue("username"), r.FormValue("password"), true
+				}
+				if !ok || user != "admin" || pw != " raw password " {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			ts := httptest.NewUnstartedServer(handler)
+			if typ == "proxmox" {
+				ln, err := net.Listen("tcp", "127.0.0.1:8006")
+				if err != nil {
+					t.Fatal(err)
+				}
+				ts.Listener.Close()
+				ts.Listener = ln
+			}
+			ts.StartTLS()
+			defer ts.Close()
+			u, _ := url.Parse(ts.URL)
+			body := map[string]any{"type": "SRV", "mgmt": " 127.0.0.1 ", "platform": typ, "admin_user": " admin ", "admin_pass": " raw password ", "bmc_ip": u.Host, "bmc_user": " admin ", "bmc_pass": " raw password ", "tls_fingerprint": adminTLSServerFingerprint(t, ts)}
+			f := newAdminTestFixture(t, "")
+			rec, res := execRequest(f.srv, http.MethodPost, "/api/clusters/test", body, "")
+			if rec.Code != http.StatusOK || res["reachable"] != true || res["auth"].(map[string]any)["ok"] != true {
+				t.Fatalf("raw password authentication failed: %d %v", rec.Code, res)
+			}
+		})
+	}
+}
+
 // TestAddDeviceFTCluster 는 FT 클러스터 신규 추가(POST /api/clusters)를 검증한다.
 func TestAddDeviceFTCluster(t *testing.T) {
 	f := newAdminTestFixture(t, "")

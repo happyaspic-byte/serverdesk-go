@@ -21,7 +21,11 @@ func sampleTrap(name string, ts float64) Trap {
 
 // TestStoreRing — 링 한도를 넘으면 오래된 것부터 버리고 파일도 한도를 유지한다.
 func TestStoreRing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "traps.jsonl")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "traps.jsonl")
 	st := NewTrapStore(path, 3)
 	for i := 0; i < 5; i++ {
 		st.Add(sampleTrap("trap", float64(1000+i)))
@@ -93,8 +97,177 @@ func TestStoreLoadMissing(t *testing.T) {
 }
 
 // TestStoreDefaultRing — ring<=0 이면 500(파이썬 기본).
+func TestStorePrivateSanitizedLegacyRewrite(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "traps.jsonl")
+	legacy := `{"ts":1,"src":"127.0.0.1","community":"legacy-secret","trap_oid":"1.3.6.1.6.3.1.1.5.1","_route":"cluster-a"}` + "\n"
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	st := NewTrapStore(path, 10)
+	loaded := st.Load()
+	if len(loaded) != 1 || loaded[0].Community != "" || loaded[0].OID != "1.3.6.1.6.3.1.1.5.1" {
+		t.Errorf("legacy load not sanitized/compatible: %+v", loaded)
+	}
+	tr := sampleTrap("new", 2)
+	tr.Community = "new-secret"
+	st.Add(tr)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "community") || strings.Contains(string(b), "secret") {
+		t.Errorf("persisted community: %s", b)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("file mode=%o", info.Mode().Perm())
+	}
+	if snap := st.Snapshot(); len(snap) != 2 || snap[1].Community != "" {
+		t.Error("store retains community")
+	}
+	nested := filepath.Join(dir, "new-dir", "nested", "traps.jsonl")
+	NewTrapStore(nested, 10).Add(tr)
+	info, err = os.Stat(filepath.Dir(nested))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0700 {
+		t.Errorf("directory mode=%o", info.Mode().Perm())
+	}
+}
+
+func TestStoreRefusesUnsafePathsWithoutChangingHistory(t *testing.T) {
+	for _, kind := range []string{"exposed", "symlink", "parent-symlink", "hardlink", "writable-ancestor", "fixed-temp"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			parent := filepath.Join(dir, "private")
+			if err := os.Mkdir(parent, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(parent, "traps.jsonl")
+			original := []byte(`{"ts":1}` + "\n")
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			st := NewTrapStore(path, 10)
+			st.Load()
+			victim := filepath.Join(dir, "victim")
+			os.WriteFile(victim, []byte("untouched"), 0600)
+			switch kind {
+			case "exposed":
+				os.Chmod(parent, 0755)
+			case "symlink":
+				os.Remove(path)
+				os.Symlink(victim, path)
+			case "parent-symlink":
+				link := filepath.Join(dir, "link")
+				os.Symlink(parent, link)
+				st.path = filepath.Join(link, "traps.jsonl")
+			case "hardlink":
+				os.Remove(path)
+				os.Link(victim, path)
+			case "writable-ancestor":
+				os.Chmod(dir, 0777)
+			case "fixed-temp":
+				os.Symlink(victim, path+".tmp")
+			}
+			st.Add(sampleTrap("new", 2))
+			b, _ := os.ReadFile(victim)
+			if string(b) != "untouched" {
+				t.Fatal("victim overwritten")
+			}
+			if kind == "fixed-temp" {
+				b, _ = os.ReadFile(path)
+				if !strings.Contains(string(b), `"ts":2`) {
+					t.Error("fixed temp should not block safe write")
+				}
+				return
+			}
+			if kind != "symlink" && kind != "hardlink" {
+				b, _ = os.ReadFile(path)
+				if string(b) != string(original) {
+					t.Error("previous file overwritten")
+				}
+			}
+			if len(st.Snapshot()) != 1 {
+				t.Error("failed write changed in-memory good history")
+			}
+		})
+	}
+}
+
+func TestStoreRejectsSymlinkDotDotPath(t *testing.T) {
+	root := t.TempDir()
+	runtime := filepath.Join(root, "runtime")
+	outside := filepath.Join(root, "outside")
+	for _, dir := range []string{runtime, filepath.Join(outside, "child")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	goodPath := filepath.Join(runtime, "traps.jsonl")
+	victim := filepath.Join(outside, "traps.jsonl")
+	good := []byte(`{"ts":1}` + "\n")
+	original := []byte(`{"ts":99}` + "\n")
+	for path, data := range map[string][]byte{goodPath: good, victim: original} {
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(outside, "child"), filepath.Join(runtime, "jump")); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately avoid filepath.Join: it would remove the vulnerable dot-dot.
+	unsafe := runtime + string(os.PathSeparator) + "jump" + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "traps.jsonl"
+	if err := ValidateTrapPath(unsafe); err == nil {
+		t.Error("noncanonical symlink-dotdot path accepted")
+	}
+	for _, path := range []string{unsafe, "jump/../traps.jsonl"} {
+		if _, err := ResolveTrapPath(runtime, path); err == nil {
+			t.Errorf("configured path accepted: %q", path)
+		}
+	}
+	direct := NewTrapStore(unsafe, 10)
+	if got := direct.Load(); len(got) != 0 {
+		t.Errorf("constructor path read victim history: %+v", got)
+	}
+	direct.Add(sampleTrap("new", 2))
+	if len(direct.Snapshot()) != 0 {
+		t.Error("refused constructor write changed history")
+	}
+	st := NewTrapStore(goodPath, 10)
+	st.Load()
+	st.path = unsafe
+	if got := st.Load(); len(got) != 0 {
+		t.Error("unsafe reload accepted")
+	}
+	st.Add(sampleTrap("new", 2))
+	if got := st.Snapshot(); len(got) != 1 || got[0].Ts != 1 {
+		t.Errorf("previous history changed: %+v", got)
+	}
+	for path, want := range map[string][]byte{goodPath: good, victim: original} {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != string(want) {
+			t.Errorf("existing target changed: %q err=%v", path, err)
+		}
+	}
+	for _, path := range []string{goodPath, "traps.jsonl"} {
+		if _, err := ResolveTrapPath(runtime, path); err != nil {
+			t.Errorf("valid path refused: %q %v", path, err)
+		}
+	}
+}
+
 func TestStoreDefaultRing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "traps.jsonl")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "traps.jsonl")
 	st := NewTrapStore(path, 0)
 	for i := 0; i < 505; i++ {
 		st.Add(sampleTrap("trap", float64(i)))

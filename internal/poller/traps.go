@@ -37,7 +37,7 @@ func TrapToRaw(t snmp.Trap) map[string]any {
 		})
 	}
 	return map[string]any{
-		"ts": t.Ts, "src": t.Src, "community": t.Community,
+		"ts": t.Ts, "src": t.Src,
 		"version": t.Version, "pdu": t.PDU, "trap_oid": t.OID,
 		"name": t.Name, "sev": t.Sev, "desc": t.Desc,
 		"varbinds": vbs,
@@ -89,11 +89,11 @@ func StartTrapReceiver(ctx context.Context, enabled bool, bind string, port int,
 	}
 
 	// 영속 저장 + 재시작 재분배
-	if persist == "" {
-		persist = "traps.jsonl"
-	}
-	if !filepath.IsAbs(persist) {
-		persist = filepath.Join(runtimeDir, persist)
+	var err error
+	persist, err = snmp.ResolveTrapPath(runtimeDir, persist)
+	if err != nil {
+		logf("error", "-", "트랩 영속 경로 보호 검사 실패; 수신기 비활성")
+		return nil
 	}
 	store := snmp.NewTrapStore(persist, ring)
 	// Go TrapStore 버퍼도 채운다 — 다음 Add 가 파일 전체를 재작성하므로 버퍼가
@@ -125,6 +125,9 @@ func StartTrapReceiver(ctx context.Context, enabled bool, bind string, port int,
 // 두 포맷을 모두 읽는다: Python 원본(trap_oid + _route)과 Go TrapStore 재작성본
 // (oid, _route 없음). _route 가 없으면 src IP 로 라우팅한다(Python 폭백과 동일).
 func restoreTraps(path string, byKey map[string]*ClusterState, router func(string) *ClusterState) int {
+	if err := snmp.ValidateTrapPath(path); err != nil {
+		return 0
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
@@ -160,6 +163,7 @@ func restoreTraps(path string, byKey map[string]*ClusterState, router func(strin
 			}
 		}
 		delete(rec, "_route")
+		delete(rec, "community")
 		st.AddTrap(rec)
 		restored++
 	}

@@ -4,21 +4,11 @@
 # updates use the exact same validation, rollback, and health-check path.
 set -eu
 
-DST=/opt/serverdesk
-STATE=/var/lib/serverdesk
+[ "$(id -u)" = 0 ] || { echo '[FAIL] run with sudo' >&2; exit 1; }
 INSTALLER=deploy/packaging/install-linux.sh
-
-[ -f "$DST/serverdesk" ] || {
-  echo "[INFO] not installed - run $INSTALLER instead" >&2
-  exit 1
-}
-[ -d "$STATE" ] || {
-  echo "[FAIL] missing state directory: $STATE" >&2
-  exit 1
-}
 if [ ! -f "$INSTALLER" ] || [ -L "$INSTALLER" ]; then
   echo "[FAIL] missing or unsafe installer: $INSTALLER" >&2
   exit 1
 fi
 
-exec sh "$INSTALLER"
+exec sh "$INSTALLER" --update

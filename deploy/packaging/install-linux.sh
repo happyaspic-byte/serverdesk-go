@@ -2,6 +2,36 @@
 # serverdesk Linux installer: sudo sh install-linux.sh  (run from the package folder)
 set -eu
 
+# Elevated helper code must be trusted before it is sourced.
+[ "$(id -u)" = 0 ] || { echo '[FAIL] run with sudo' >&2; exit 1; }
+LOCK_HELPER=deploy/packaging/serverdesk-deployment-lock.sh
+if [ -L "$LOCK_HELPER" ] || [ ! -f "$LOCK_HELPER" ] ||
+  [ "$(realpath "$LOCK_HELPER")" != "$(realpath -s "$LOCK_HELPER")" ] ||
+  [ "$(stat -c '%u:%g:%h' "$LOCK_HELPER")" != 0:0:1 ]; then
+  echo '[FAIL] unsafe deployment lock helper' >&2; exit 1
+fi
+case "$(stat -c '%a' "$LOCK_HELPER")" in
+  644|600|755|700) ;; *) echo '[FAIL] unsafe deployment lock helper permissions' >&2; exit 1 ;;
+esac
+helper_parent=$(dirname "$(realpath -s "$LOCK_HELPER")")
+while :; do
+  [ "$(stat -c '%u:%g' "$helper_parent")" = 0:0 ] || {
+    echo '[FAIL] unsafe deployment lock helper parent owner' >&2; exit 1
+  }
+  case "$(stat -c '%a' "$helper_parent")" in
+    *[2367]?|*[2367]|????) echo '[FAIL] unsafe deployment lock helper parent permissions' >&2; exit 1 ;;
+  esac
+  [ "$helper_parent" = / ] && break
+  helper_parent=$(dirname "$helper_parent")
+done
+. "./$LOCK_HELPER"
+case "${1:-}" in ''|--update) ;; *) echo "usage: $0 [--update]" >&2; exit 2 ;; esac
+if [ "${1:-}" = --update ]; then
+  [ -f /opt/serverdesk/serverdesk ] && [ -d /var/lib/serverdesk ] || {
+    echo '[FAIL] not installed or missing state directory; run installer instead' >&2; exit 1
+  }
+fi
+
 DST=/opt/serverdesk
 STATE=/var/lib/serverdesk
 SERVICE_USER=serverdesk
@@ -10,6 +40,9 @@ NET_UNIT=/etc/systemd/system/serverdesk-net.service
 CONFIG_DIR=/etc/serverdesk
 NET_CONFIG=$CONFIG_DIR/network.env
 NET_HELPER=$DST/serverdesk-network
+INSTALLED_LOCK_HELPER=$DST/serverdesk-deployment-lock
+lock_helper_backup=0
+lock_helper_created=0
 COLLECTOR_PREFLIGHT=deploy/packaging/serverdesk-collector-preflight.sh
 CREDENTIAL_STORE=$STATE/credentials
 MIB_DIR=$DST/mibs
@@ -111,6 +144,12 @@ cleanup_install() {
         rollback_failed=1
       }
     fi
+    if [ "$lock_helper_backup" -eq 1 ]; then
+      sudo cp -a "$INSTALLED_LOCK_HELPER.install-backup" "$INSTALLED_LOCK_HELPER" &&
+        sudo cmp -s "$INSTALLED_LOCK_HELPER.install-backup" "$INSTALLED_LOCK_HELPER" || rollback_failed=1
+    elif [ "$lock_helper_created" -eq 1 ]; then
+      sudo rm -f "$INSTALLED_LOCK_HELPER" || rollback_failed=1
+    fi
     if [ "$binary_created" -eq 1 ] && [ "$binary_backup" -eq 0 ]; then
       sudo rm -f "$DST/serverdesk" || {
         echo "[CRITICAL] rollback could not remove newly installed binary: $DST/serverdesk" >&2
@@ -135,6 +174,13 @@ cleanup_install() {
         echo '[CRITICAL] rollback could not restart the original serverdesk-net service' >&2
         rollback_failed=1
       }
+      # A restored legacy unit recreates only its RuntimeDirectory journal.
+      # Convert immediately, before another stop can erase cleanup authority.
+      sudo sh deploy/packaging/serverdesk-network.sh --config "$NET_CONFIG" \
+        --state /var/lib/serverdesk-net/applied.env migrate || {
+        echo '[CRITICAL] rollback network ownership could not be made persistent; preserve legacy journal and cleanup tooling' >&2
+        rollback_failed=1
+      }
     fi
     if [ "$service_was_active" -eq 1 ]; then
       sudo systemctl restart serverdesk || {
@@ -154,6 +200,7 @@ cleanup_install() {
     if [ "$unit_backup" -eq 1 ]; then sudo rm -f "$UNIT.install-backup" || :; fi
     if [ "$net_unit_backup" -eq 1 ]; then sudo rm -f "$NET_UNIT.install-backup" || :; fi
     if [ "$net_helper_backup" -eq 1 ]; then sudo rm -f "$NET_HELPER.install-backup" || :; fi
+    if [ "$lock_helper_backup" -eq 1 ]; then sudo rm -f "$INSTALLED_LOCK_HELPER.install-backup" || :; fi
   fi
 }
 trap 'cleanup_install' 0
@@ -263,11 +310,13 @@ if [ -e "$DST" ]; then
 fi
 validate_package_target "$DST/serverdesk" 'installed serverdesk binary'
 validate_package_target "$NET_HELPER" 'installed network helper'
+validate_package_target "$INSTALLED_LOCK_HELPER" 'installed deployment lock helper'
 validate_package_target "$UNIT" 'serverdesk service unit'
 validate_package_target "$NET_UNIT" 'serverdesk network service unit'
 for transaction_path in \
   "$DST/.serverdesk.new" "$DST/serverdesk.install-backup" \
   "$DST/.serverdesk-network.new" "$NET_HELPER.install-backup" \
+  "$DST/.serverdesk-deployment-lock.new" "$INSTALLED_LOCK_HELPER.install-backup" \
   "$UNIT.install-backup" "$NET_UNIT.install-backup"; do
   if [ -e "$transaction_path" ] || [ -L "$transaction_path" ]; then
     echo "[FAIL] stale deployment transaction path requires operator inspection: $transaction_path" >&2
@@ -568,6 +617,18 @@ else
   net_helper_created=1
 fi
 
+if [ -f "$INSTALLED_LOCK_HELPER" ]; then
+  sudo cp -a "$INSTALLED_LOCK_HELPER" "$INSTALLED_LOCK_HELPER.install-backup"
+  sudo cmp -s "$INSTALLED_LOCK_HELPER" "$INSTALLED_LOCK_HELPER.install-backup"
+  lock_helper_backup=1
+else
+  lock_helper_created=1
+fi
+
+# Preserve legacy ownership before an old RuntimeDirectory unit can erase it.
+sudo sh deploy/packaging/serverdesk-network.sh --config "$NET_CONFIG" \
+  --state /var/lib/serverdesk-net/applied.env migrate
+
 if sudo systemctl is-enabled --quiet serverdesk; then
   service_was_enabled=1
 fi
@@ -584,11 +645,18 @@ if sudo systemctl is-active --quiet serverdesk-net; then
   sudo systemctl stop serverdesk-net
 fi
 
+# Retry persistent ownership even if the old unit is inactive/failed. Never
+# replace the cleanup helper or unit while owned resources remain unresolved.
+sudo sh deploy/packaging/serverdesk-network.sh \
+  --config /var/lib/serverdesk-net/applied.env --expected-config "$NET_CONFIG" remove
+
 # Stage executable files beside their destination, then atomically rename.
 sudo install -o root -g root -m 755 serverdesk-linux-amd64 "$DST/.serverdesk.new"
 sudo mv -f "$DST/.serverdesk.new" "$DST/serverdesk"
 sudo install -o root -g root -m 755 deploy/packaging/serverdesk-network.sh "$DST/.serverdesk-network.new"
 sudo mv -f "$DST/.serverdesk-network.new" "$NET_HELPER"
+sudo install -o root -g root -m 644 "$LOCK_HELPER" "$DST/.serverdesk-deployment-lock.new"
+sudo mv -f "$DST/.serverdesk-deployment-lock.new" "$INSTALLED_LOCK_HELPER"
 
 if [ ! -e "$STATE/auth.json" ]; then
   auth_created=1
@@ -657,7 +725,7 @@ if [ "$auth_created" -eq 1 ]; then
   echo "[INFO] Initial web credentials are in $STATE/initial-login.txt; securely record and remove or rotate them."
 fi
 sudo rm -f "$DST/serverdesk.install-backup" "$UNIT.install-backup" \
-  "$NET_UNIT.install-backup" "$NET_HELPER.install-backup"
+  "$NET_UNIT.install-backup" "$NET_HELPER.install-backup" "$INSTALLED_LOCK_HELPER.install-backup"
 if [ "$installation_was_existing" -eq 1 ] && [ "$service_was_active" -eq 0 ]; then
   echo "[OK] update passed transient health validation and the previously stopped service remains stopped - health=$HEALTH_URL"
 else

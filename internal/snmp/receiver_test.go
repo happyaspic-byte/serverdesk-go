@@ -3,6 +3,7 @@ package snmp
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,7 +35,11 @@ func sendTrap(t *testing.T, port int, pkt []byte) {
 // TestReceiverEndToEnd — 바인드→수신→디코드→저장→콜백 전체 경로.
 func TestReceiverEndToEnd(t *testing.T) {
 	port := freeUDPPort(t)
-	store := NewTrapStore(filepath.Join(t.TempDir(), "traps.jsonl"), 10)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := NewTrapStore(filepath.Join(dir, "traps.jsonl"), 10)
 	got := make(chan Trap, 1)
 	rx := NewTrapReceiver("127.0.0.1", port, "", testMIBDir, store, func(tr Trap) {
 		got <- tr

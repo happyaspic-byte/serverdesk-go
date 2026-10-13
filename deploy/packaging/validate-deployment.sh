@@ -19,6 +19,7 @@ for script in deploy/packaging/*.sh; do
 done
 
 sh deploy/packaging/validate-commercial-nogo.sh || fail 'commercial NO-GO contract failed'
+python3 -I deploy/packaging/test-remediation.py || fail 'deployment/release behavioral regressions failed'
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
@@ -170,7 +171,7 @@ grep -F -q 'Environment=SERVERDESK_CREDENTIALS_STORE=/var/lib/serverdesk/credent
   deploy/serverdesk.service || fail 'service must configure its writable managed credential store'
 grep -F -q 'CapabilityBoundingSet=CAP_NET_ADMIN' deploy/serverdesk-net.service ||
   fail 'serverdesk-net.service must have only its documented network capability'
-grep -F -q 'ExecStart=/opt/serverdesk/serverdesk-network --config /etc/serverdesk/network.env --state /run/serverdesk-net/applied.env apply' \
+grep -F -q 'ExecStart=/opt/serverdesk/serverdesk-network --config /etc/serverdesk/network.env --state /var/lib/serverdesk-net/applied.env apply' \
   deploy/serverdesk-net.service || fail 'network unit does not use the validated helper'
 grep -q '"secret_policy"[[:space:]]*:[[:space:]]*"require-references"' config.example.json ||
   fail 'installed config template must require secret references'

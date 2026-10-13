@@ -30,6 +30,81 @@ func readyEdgeManagerWithDevices(t *testing.T, devices []edge.DeviceConfig) *Edg
 	return mgr
 }
 
+func TestEdgeSnapshotStatusRemainsBoundAcrossReplacement(t *testing.T) {
+	mgr := readyEdgeManager(t)
+	devices, status := mgr.LatestWithStatus()
+	if len(devices) != 2 || status.LastRoundAt.IsZero() {
+		t.Fatalf("initial snapshot not ready: %v/%v", devices, status)
+	}
+	oldRound := status.LastRoundAt
+	mgr.Latest() // Retain old snapshot for display fallback.
+	pendingEdgeRound(mgr)
+	fallback, replacementStatus := mgr.LatestWithStatus()
+	if len(fallback) != 2 || !replacementStatus.LastRoundAt.IsZero() || replacementStatus.Observed != 0 {
+		t.Fatalf("replacement blessed fallback: %v/%v", fallback, replacementStatus)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mgr.worker.Start(ctx) // Replacement completes after old data/status were acquired.
+	_, current := mgr.LatestWithStatus()
+	if current.LastRoundAt.IsZero() || current.LastRoundAt.Before(oldRound) {
+		t.Fatalf("replacement status=%v", current)
+	}
+	if !replacementStatus.LastRoundAt.IsZero() || status.LastRoundAt != oldRound {
+		t.Fatal("later round mutated acquired snapshot binding")
+	}
+}
+
+func TestEdgeManagerWaitJoinsRespawnedWorkers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Real worker rounds see canceled context; no device I/O.
+	mgr := NewEdgeManager(ctx, []edge.DeviceConfig{{Key: "nas", Kind: "nas", IP: "192.0.2.1"}}, nil)
+	mgr.Add(edge.DeviceConfig{Key: "second", Kind: "nas", IP: "192.0.2.2"})
+	waitCtx, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := mgr.Wait(waitCtx); err != nil {
+		t.Fatalf("workers did not join: %v", err)
+	}
+	mgr.Add(edge.DeviceConfig{Key: "late", Kind: "nas", IP: "192.0.2.3"})
+	if err := mgr.Wait(waitCtx); err != nil {
+		t.Fatalf("closed manager restarted workers: %v", err)
+	}
+}
+
+func TestEdgeManagerWaitDeadline(t *testing.T) {
+	mgr := &EdgeManager{root: context.Background()}
+	mgr.workers.Add(1) // Simulate a collector still unwinding after cancellation.
+	defer mgr.workers.Done()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := mgr.Wait(ctx); err != context.DeadlineExceeded {
+		t.Fatalf("join deadline=%v", err)
+	}
+}
+
+func TestEdgeManagerConcurrentAddAndWait(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mgr := NewEdgeManager(ctx, nil, nil)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			mgr.Add(edge.DeviceConfig{Key: fmt.Sprint(i), Kind: "nas", IP: "192.0.2.1"})
+		}
+	}()
+	waitCtx, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := mgr.Wait(waitCtx); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	if err := mgr.Wait(waitCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func pendingEdgeRound(mgr *EdgeManager) {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()

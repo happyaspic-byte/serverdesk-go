@@ -9,10 +9,12 @@ ConditionPathExists=/etc/serverdesk/network.env
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-RuntimeDirectory=serverdesk-net
-RuntimeDirectoryMode=0700
-ExecStart=/opt/serverdesk/serverdesk-network --config /etc/serverdesk/network.env --state /run/serverdesk-net/applied.env apply
-ExecStop=/opt/serverdesk/serverdesk-network --config /run/serverdesk-net/applied.env remove
+# Ownership survives failed ExecStop and reboot; remove verifies absence before
+# deleting its journal. RuntimeDirectory cleanup must not erase retry authority.
+StateDirectory=serverdesk-net
+StateDirectoryMode=0700
+ExecStart=/opt/serverdesk/serverdesk-network --config /etc/serverdesk/network.env --state /var/lib/serverdesk-net/applied.env apply
+ExecStop=/opt/serverdesk/serverdesk-network --config /var/lib/serverdesk-net/applied.env --expected-config /etc/serverdesk/network.env remove
 TimeoutStartSec=30s
 TimeoutStopSec=30s
 UMask=0077

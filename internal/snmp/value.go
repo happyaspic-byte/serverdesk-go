@@ -67,7 +67,8 @@ type Value struct {
 func decGetValue(tag byte, val []byte) Value {
 	switch tag {
 	case tagInt:
-		return Value{Kind: KindInt, Int: int64(decUint(val))}
+		n, _ := decInt(val)
+		return Value{Kind: KindInt, Int: n}
 	case tagCounter32:
 		return Value{Kind: KindCounter, Int: int64(decUint(val))}
 	case tagGauge32:
@@ -75,7 +76,11 @@ func decGetValue(tag byte, val []byte) Value {
 	case tagTimeTicks:
 		return Value{Kind: KindTimeticks, Int: int64(decUint(val))}
 	case tagCounter64:
-		return Value{Kind: KindCounter64, Int: int64(decUint(val))}
+		n := decUint(val)
+		if n > uint64(1<<63-1) {
+			return Value{Kind: KindBytes, Bytes: append([]byte(nil), val...)}
+		}
+		return Value{Kind: KindCounter64, Int: int64(n)}
 	case tagOctets:
 		if utf8.Valid(val) {
 			return Value{Kind: KindString, Str: string(val)}
@@ -125,8 +130,16 @@ func decVarbindValue(tag byte, val []byte) (any, string, string) {
 			return h, "hex", h
 		}
 		return o, "oid", o
-	case tagInt, tagCounter32, tagGauge32, tagCounter64:
-		n := int64(decUint(val))
+	case tagInt:
+		n, _ := decInt(val)
+		return n, "int", fmt.Sprintf("%d", n)
+	case tagCounter32, tagGauge32, tagCounter64:
+		u := decUint(val)
+		if u > uint64(1<<63-1) {
+			h := fmt.Sprintf("%x", val)
+			return h, "hex", h
+		}
+		n := int64(u)
 		return n, "int", fmt.Sprintf("%d", n)
 	case tagTimeTicks:
 		n := decUint(val)

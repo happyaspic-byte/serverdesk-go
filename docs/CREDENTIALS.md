@@ -19,7 +19,9 @@ full-disk encryption where that threat is in scope.
 
 Windows uses the protected runtime directory's `credentials` child. Values are machine-scoped DPAPI
 blobs and the installer ACL permits only SYSTEM and Administrators. Copying a `.dpapi` file to
-another host does not make it decryptable there.
+another host does not make it decryptable there. This describes the intended storage contract, not
+current Windows runtime/ACL certification; SYSTEM packaging remains a commercial NO-GO.
+See [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Directory contract
 
@@ -51,6 +53,17 @@ generations are removed. If the visible rename succeeds but directory sync repor
 Serverdesk keeps both old and new credential generations and continues with the visible config so
 runtime and disk do not diverge. Cleanup never deletes externally supplied names. Notification
 webhook paths follow the same path and are never returned by the settings API.
+
+## Management edit compatibility
+
+Device add/connection-test APIs preserve password bytes, including leading/trailing whitespace;
+identifier fields are trimmed. `PUT /api/clusters/<key>` is **metadata-only**, not credential rotation:
+`label`, `company`, `factory`, `site`, `asset_tag`, `floor_pos`, plus Edge-only `vendor`.
+Unsupported operational/credential fields return 400 before any partial metadata save. Legacy `key`
+and empty/unchanged `mgmt` identity fields remain accepted; changed management IP is rejected.
+Existing full-form clients must stop sending credentials/type/ports to this endpoint. The UI marks
+connection/credential controls read-only during edit and overlays only response `applied` fields.
+Use the documented config/secret migration path for operational changes and restart collection as required.
 
 ## One-time plaintext migration
 

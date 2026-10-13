@@ -32,12 +32,14 @@ type EdgeCollectorStatus struct {
 // Add/Remove/PatchMeta 에 HTTP 요청 ctx 를 넘기면 요청 종료와 함께
 // 재생성된 워커까지 죽어 스냅샷이 그 상태로 얼어붙는다(실제 관측된 장애).
 type EdgeManager struct {
-	mu      sync.Mutex
-	root    context.Context // 워커 수명 전용 루트(절대 요청 ctx 금지)
-	devices []edge.DeviceConfig
-	worker  *edge.Worker
-	cancel  context.CancelFunc
-	logf    func(level, comp, msg string)
+	mu       sync.Mutex
+	root     context.Context // 워커 수명 전용 루트(절대 요청 ctx 금지)
+	devices  []edge.DeviceConfig
+	worker   *edge.Worker
+	cancel   context.CancelFunc
+	logf     func(level, comp, msg string)
+	workers  sync.WaitGroup
+	stopping bool
 	// lastGood 는 마지막 정상 스냅샷이다. 워커 교체(Add/Remove/PatchMeta) 직후
 	// 새 워커의 첫 라운드가 끝나기 전까지 Latest 가 빈 목록을 반환하면
 	// /api/devices 에서 엣지 장비 전체가 몇 초간 사라졌다 돌아오는 깜빡임이
@@ -60,6 +62,9 @@ func NewEdgeManager(ctx context.Context, devices []edge.DeviceConfig, logf func(
 
 // spawnLocked 은 현재 목록으로 새 워커를 만든다. 호출 전 mu 를 쥐고 있어야 한다.
 func (m *EdgeManager) spawnLocked() {
+	if m.stopping {
+		return
+	}
 	w := edge.NewWorker(append([]edge.DeviceConfig(nil), m.devices...))
 	if m.logf != nil {
 		w.Logf = m.logf
@@ -67,7 +72,11 @@ func (m *EdgeManager) spawnLocked() {
 	wctx, cancel := context.WithCancel(m.root)
 	m.worker = w
 	m.cancel = cancel
-	go w.Start(wctx)
+	m.workers.Add(1)
+	go func() {
+		defer m.workers.Done()
+		w.Start(wctx)
+	}()
 }
 
 // respawnLocked 은 워커를 교체한다(목록 변경 반영).
@@ -98,6 +107,14 @@ func (m *EdgeManager) Devices() []edge.DeviceConfig {
 // 엣지 장비가 화면에서 몇 초간 사라졌다 돌아온다.
 // 최상위 맵은 요청별 사본이다(가용성 주입용). 중첩 값은 읽기 전용이다.
 func (m *EdgeManager) Latest() []map[string]any {
+	devices, _ := m.LatestWithStatus()
+	return devices
+}
+
+// LatestWithStatus binds round data and status while holding the manager's
+// generation lock. Display fallback retains the replacement worker's unready
+// status; old values can never borrow a new generation's observation time.
+func (m *EdgeManager) LatestWithStatus() ([]map[string]any, EdgeCollectorStatus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -106,15 +123,17 @@ func (m *EdgeManager) Latest() []map[string]any {
 		keys[d.Key] = true
 	}
 	var latest []map[string]any
+	status := EdgeCollectorStatus{Configured: len(m.devices)}
 	if m.worker != nil {
-		latest = m.worker.LatestDevices()
+		latest, status.LastRoundAt, status.LastError = m.worker.Snapshot()
+		status.Observed = len(latest)
 	}
 	if len(latest) > 0 {
 		m.lastGood, m.lastGoodAt = latest, time.Now()
 	} else if len(m.lastGood) > 0 && time.Since(m.lastGoodAt) < 130*time.Second {
 		latest = m.lastGood
 	} else {
-		return nil
+		return nil, status
 	}
 
 	out := []map[string]any{}
@@ -124,22 +143,18 @@ func (m *EdgeManager) Latest() []map[string]any {
 			out = append(out, maps.Clone(d))
 		}
 	}
-	return out
+	return out, status
 }
 
 // CollectorStatus reports worker liveness without exposing device identities.
 func (m *EdgeManager) CollectorStatus() EdgeCollectorStatus {
 	m.mu.Lock()
-	worker := m.worker
-	configured := len(m.devices)
-	m.mu.Unlock()
-
-	status := EdgeCollectorStatus{Configured: configured}
-	if worker == nil {
-		return status
+	defer m.mu.Unlock()
+	status := EdgeCollectorStatus{Configured: len(m.devices)}
+	if m.worker != nil {
+		devices, roundAt, lastError := m.worker.Snapshot()
+		status.Observed, status.LastRoundAt, status.LastError = len(devices), roundAt, lastError
 	}
-	status.Observed = len(worker.LatestDevices())
-	status.LastRoundAt, status.LastError = worker.CollectionStatus()
 	return status
 }
 
@@ -322,8 +337,23 @@ func projectedVendor(dev edge.DeviceConfig, retained map[string]any, configured 
 func (m *EdgeManager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stopping = true
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel = nil
+	}
+}
+
+// Wait permanently stops spawning and joins current and canceled replacement
+// workers. Stop serializes the last Add before WaitGroup.Wait can begin.
+func (m *EdgeManager) Wait(ctx context.Context) error {
+	m.Stop()
+	done := make(chan struct{})
+	go func() { m.workers.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

@@ -78,6 +78,22 @@ func TestDetailedHealthIncludesCollectorPersistence(t *testing.T) {
 	}
 }
 
+func TestAvailabilityPersistenceHealthKeepsPublicShape(t *testing.T) {
+	srv := newHealthTestServer(t, nil)
+	srv.Avail = poller.NewAvailTracker(filepath.Join(t.TempDir(), "missing"), nil)
+	srv.Avail.Sample()
+	srv.Avail.Flush()
+	_, detail := healthRequest(t, srv, http.MethodGet, "/api/admin/health")
+	avail, ok := detail["availability"].(map[string]any)
+	if !ok || avail["healthy"] != false || avail["last_error"] == nil || avail["samples"] != float64(1) || detail["status"] != "degraded" {
+		t.Fatalf("availability failure hidden: %v", detail)
+	}
+	_, public := healthRequest(t, srv, http.MethodGet, "/api/health")
+	if len(public) != 3 {
+		t.Fatalf("public health exposed detail: %v", public)
+	}
+}
+
 func TestEventPersistenceFailureDegradesOnlyDetailedOutput(t *testing.T) {
 	root := t.TempDir()
 	badPath := filepath.Join(root, "missing", "events.jsonl")

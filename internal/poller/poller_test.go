@@ -86,6 +86,7 @@ func TestAvailTrackerRoundTrip(t *testing.T) {
 	tr := NewAvailTracker(dir, func() [][2]string {
 		return [][2]string{{"everrun", "op"}, {"nas", "down"}}
 	})
+	tr.Sample() // Establish an observation boundary without charging startup time.
 	for i := 0; i < 5; i++ {
 		tr.last -= 170 // 샘플 간격 시뮬레이션(180 초과면 갭으로 제외되는 계약 경계 아래)
 		tr.Sample()
