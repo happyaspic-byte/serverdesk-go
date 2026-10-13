@@ -2,6 +2,7 @@
 # serverdesk Linux uninstaller:
 #   sudo sh uninstall-linux.sh          # preserve customer state/config/credentials
 #   sudo sh uninstall-linux.sh --full   # remove all Serverdesk-owned data
+# shellcheck source-path=SCRIPTDIR
 set -eu
 
 [ "$(id -u)" = 0 ] || { echo '[FAIL] run with sudo' >&2; exit 1; }
@@ -29,7 +30,16 @@ while :; do
   [ "$helper_parent" = / ] && break
   helper_parent=$(dirname "$helper_parent")
 done
-case "$LOCK_HELPER" in /*) . "$LOCK_HELPER" ;; *) . "./$LOCK_HELPER" ;; esac
+case "$LOCK_HELPER" in
+  /*)
+    # shellcheck source=serverdesk-deployment-lock.sh
+    . "$LOCK_HELPER"
+    ;;
+  *)
+    # shellcheck source=serverdesk-deployment-lock.sh
+    . "./$LOCK_HELPER"
+    ;;
+esac
 
 DST=/opt/serverdesk
 STATE=/var/lib/serverdesk

@@ -51,13 +51,17 @@ esac
 
 check_state_dir() {
   directory=$1
-  [ ! -L "$directory" ] && [ -d "$directory" ] &&
-    [ "$(stat -c '%u:%g:%a' "$directory")" = 0:0:700 ] || fail "unsafe network state directory: $directory"
+  if [ -L "$directory" ] || [ ! -d "$directory" ] ||
+    [ "$(stat -c '%u:%g:%a' "$directory")" != 0:0:700 ]; then
+    fail "unsafe network state directory: $directory"
+  fi
 }
 check_state_file() {
   file=$1
-  [ ! -L "$file" ] && [ -f "$file" ] &&
-    [ "$(stat -c '%u:%g:%a:%h' "$file")" = 0:0:600:1 ] || fail "unsafe network ownership file: $file"
+  if [ -L "$file" ] || [ ! -f "$file" ] ||
+    [ "$(stat -c '%u:%g:%a:%h' "$file")" != 0:0:600:1 ]; then
+    fail "unsafe network ownership file: $file"
+  fi
 }
 legacy=/run/serverdesk-net/applied.env
 if [ "$action" != validate ]; then
@@ -94,7 +98,9 @@ if [ "$action" != validate ]; then
       fail 'remove requires an applied ownership file, not host configuration'
     if [ ! -e "$config" ] && [ ! -L "$config" ]; then
       # A legacy authority must not be silently ignored by a new unit.
-      [ ! -e "$legacy" ] && [ ! -L "$legacy" ] || fail 'legacy ownership requires migration before removal'
+      if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+        fail 'legacy ownership requires migration before removal'
+      fi
       [ -n "$expected_config" ] || fail 'network ownership is unknown; missing journal and expected configuration'
       config=$expected_config
       no_authority=1
@@ -241,7 +247,9 @@ fi
 
 persist_ownership() {
   state_tmp=$state.tmp.$$
-  [ ! -e "$state_tmp" ] && [ ! -L "$state_tmp" ] || fail 'unsafe network ownership temporary file'
+  if [ -e "$state_tmp" ] || [ -L "$state_tmp" ]; then
+    fail 'unsafe network ownership temporary file'
+  fi
   state_interface=
   state_address=
   state_redirect=false
@@ -250,13 +258,15 @@ persist_ownership() {
     state_address=$aux_address
   fi
   if [ "$redirect_owned" -eq 1 ]; then state_redirect=true; fi
-  (umask 077; set -C; {
+  if ! (umask 077; set -C; {
     printf 'SERVERDESK_NET_INTERFACE=%s\n' "$state_interface"
     printf 'SERVERDESK_AUX_ADDRESS=%s\n' "$state_address"
     printf 'SERVERDESK_ENABLE_TRAP_REDIRECT=%s\n' "$state_redirect"
     printf 'SERVERDESK_TRAP_SOURCE_PORT=%s\n' "$source_port"
     printf 'SERVERDESK_TRAP_TARGET_PORT=%s\n' "$target_port"
-  } > "$state_tmp") && mv -f "$state_tmp" "$state" || fail 'failed to persist network ownership; retry cleanup before apply'
+  } > "$state_tmp") || ! mv -f "$state_tmp" "$state"; then
+    fail 'failed to persist network ownership; retry cleanup before apply'
+  fi
 }
 address_present() {
   addresses=$("$ip_bin" -o address show dev "$net_interface") || fail 'failed to inspect auxiliary address'

@@ -1,5 +1,6 @@
 #!/bin/sh
 # serverdesk Linux installer: sudo sh install-linux.sh  (run from the package folder)
+# shellcheck source-path=SCRIPTDIR
 set -eu
 
 # Elevated helper code must be trusted before it is sourced.
@@ -24,12 +25,13 @@ while :; do
   [ "$helper_parent" = / ] && break
   helper_parent=$(dirname "$helper_parent")
 done
+# shellcheck source=serverdesk-deployment-lock.sh
 . "./$LOCK_HELPER"
 case "${1:-}" in ''|--update) ;; *) echo "usage: $0 [--update]" >&2; exit 2 ;; esac
 if [ "${1:-}" = --update ]; then
-  [ -f /opt/serverdesk/serverdesk ] && [ -d /var/lib/serverdesk ] || {
+  if [ ! -f /opt/serverdesk/serverdesk ] || [ ! -d /var/lib/serverdesk ]; then
     echo '[FAIL] not installed or missing state directory; run installer instead' >&2; exit 1
-  }
+  fi
 fi
 
 DST=/opt/serverdesk

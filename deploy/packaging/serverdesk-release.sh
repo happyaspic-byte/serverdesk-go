@@ -27,12 +27,16 @@ case "${1:-}" in
   seal)
     [ "$#" -eq 2 ] || fail 'seal requires directory'
     dist=$2
-    [ -d "$dist" ] && [ ! -L "$dist" ] || fail 'unsafe candidate directory'
+    if [ ! -d "$dist" ] || [ -L "$dist" ]; then
+      fail 'unsafe candidate directory'
+    fi
     [ "$(find "$dist" -mindepth 1 -maxdepth 1 | wc -l)" -eq 4 ] || fail 'candidate must contain exactly two archives and two SBOMs'
     files='{}'
     for name in "serverdesk-$GITHUB_REF_NAME-linux-amd64.tar.gz" "serverdesk-$GITHUB_REF_NAME-windows-amd64.zip" \
       serverdesk-linux-amd64.cdx.json serverdesk-windows-amd64.cdx.json; do
-      [ -f "$dist/$name" ] && [ ! -L "$dist/$name" ] || fail "missing or unsafe candidate file: $name"
+      if [ ! -f "$dist/$name" ] || [ -L "$dist/$name" ]; then
+        fail "missing or unsafe candidate file: $name"
+      fi
       digest=$(sha256sum "$dist/$name")
       digest=${digest%% *}
       files=$(printf '%s' "$files" | jq -c --arg name "$name" --arg digest "$digest" '. + {($name): $digest}')
