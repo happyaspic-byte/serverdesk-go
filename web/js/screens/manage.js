@@ -35,6 +35,8 @@ function platName(t, L) {
 }
 const FT_SET = { EV: 1, EDGE: 1, END: 1, FTS: 1 };
 const isFTType = (t) => !!FT_SET[t];
+const EDIT_FIELDS = ['label', 'company', 'factory', 'site', 'asset_tag', 'floor_pos'];
+const isEditField = (f, key) => EDIT_FIELDS.includes(key) || (key === 'vendor' && !isFTType(f.type));
 
 const ICON_BY_TYPE = {
   EV: 'box', EDGE: 'link', END: 'db', FTS: 'ssd', SRV: 'db',
@@ -128,7 +130,7 @@ function emptyForm() {
     node0: '', node1: '', node0_user: 'root', node0_pass: '', node1_user: 'root', node1_pass: '',
     admin_user: 'admin', admin_pass: '', community: 'public', root_pass: '',
     vms: [{ name: '', ip: '' }],
-    vendor: '', bmc_ip: '', model: '', asset_tag: '', floor_pos: '', api: '', api_orig: '', tags_text: '',
+    vendor: '', bmc_ip: '', model: '', asset_tag: '', floor_pos: '', api: '', tags_text: '',
     win_user: '', win_pass: '',
     tab: 'basic', showPw: {}, err: null, fieldErrors: {},
     testing: false, testResult: null, testErr: null, busy: false,
@@ -839,7 +841,7 @@ const screen = {
     const body = el('div', { class: 'modal-body' }, [
       el('p', { class: 'sc-mng-hint', text: add
         ? L('Credentials are stored only in the poller config on the host.', '자격증명은 호스트의 폴러 설정에만 저장됩니다.')
-        : L('Leave a password blank to keep the current one.', '비밀번호를 비우면 기존 값이 유지됩니다.') }),
+        : L('Only display metadata can be edited here. Change connection settings and credentials in config.local.json, then restart the poller.', '여기서는 표시 메타만 수정할 수 있습니다. 연결 설정·자격증명은 config.local.json 수정 후 폴러를 재시작하세요.') }),
       modalNav,
       grid,
       // datalist 는 grid(단계·탭 전환 시 통째로 교체)가 아니라 모달 공통 영역에 둔다 —
@@ -847,7 +849,7 @@ const screen = {
       // 있든 참조 대상이 DOM에 살아 있게 한다(#354).
       this.datalists(ctx),
     ]);
-    if (!add || step === 3) {
+    if (add && step === 3) {
       body.appendChild(this.elTestErr);
       body.appendChild(this.testArea(f, ctx));
     }
@@ -857,7 +859,7 @@ const screen = {
     const left = add
       ? el('button', { class: 'btn btn--outline', type: 'button', 'data-mng-back': '' },
         [step === 0 ? L('Cancel', '취소') : ('← ' + L('Back', '뒤로'))])
-      : this.testBtn(f, ctx);
+      : el('span', { class: 'field-hint', text: L('Display metadata only', '표시 메타만 수정') });
     const right = el('div', { class: 'btn-group' });
     if (add && step < 3) {
       right.appendChild(el('button', {
@@ -980,7 +982,7 @@ const screen = {
       id: fid,
       class: 'field-input', type: o.type || 'text', 'data-mng-f': k,
       value: f[k] == null ? '' : String(f[k]), placeholder: ph || '',
-      list: o.list || null, disabled: !!o.disabled, autocomplete: 'off',
+      list: o.list || null, disabled: !!o.disabled || (f.mode === 'edit' && !isEditField(f, k)), autocomplete: 'off',
       required: o.req === true, 'aria-required': o.req === true ? 'true' : null,
       'aria-invalid': error ? 'true' : null, 'aria-describedby': described || null,
     }));
@@ -996,15 +998,15 @@ const screen = {
     const fid = 'mng-f-' + k;
     const errId = fid + '-error';
     const error = f.fieldErrors && f.fieldErrors[k];
-    // edit '기존 유지' 행에는 입력이 없다 — for 는 실제 입력을 렌더할 때만 단다.
-    const keep = f.mode === 'edit' && !f.showPw[k];
+    // Credential mutation is not supported by the metadata-only PUT API.
+    const keep = f.mode === 'edit';
     const head = el('label', keep ? { class: 'field-label' } : { class: 'field-label', for: fid }, [label,
       o.req === true ? el('span', { class: 'sc-mng-req', text: L('required', '필수') })
         : (o.req === false ? el('span', { class: 'sc-mng-opt', text: L('optional', '선택') }) : null)]);
     if (keep) {
       return el('div', { class: 'field' }, [head, el('div', { class: 'u-row' }, [
         el('div', { class: 'sc-mng-keep u-flex', text: L('•••••• keep current', '•••••• 기존 유지') }),
-        el('button', { class: 'btn btn--outline btn--sm', type: 'button', 'data-mng-pw': k, text: L('Change', '변경') }),
+        el('span', { class: 'field-hint', text: L('Config file only', '설정 파일에서만 변경') }),
       ])]);
     }
     return el('div', { class: 'field' }, [head, el('input', {
@@ -1058,15 +1060,10 @@ const screen = {
     if (isFTType(t)) {
       const kids = [
         el('label', { class: 'field-label', for: 'mng-f-api', text: L('Transport', '수집 방식') }),
-        el('select', { id: 'mng-f-api', class: 'field-select', 'data-mng-f': 'api' }, [
+        el('select', { id: 'mng-f-api', class: 'field-select', 'data-mng-f': 'api', disabled: f.mode === 'edit' }, [
           ['', L('avcli (auto)', 'avcli (자동)')], ['rest', L('REST API', 'REST API')], ['snmp', L('SNMP only', 'SNMP 전용')],
         ].map(([v, lab]) => el('option', { value: v, selected: f.api === v, text: lab }))),
       ];
-      // edit + 비자동 복원값일 때만 — 'avcli (자동)' 선택이 '자동으로 되돌리기'(빈 값 명시
-      // 전송, buildBody #392)임을 안내한다. 자동 장비에서는 이 선택이 no-op 이라 숨긴다.
-      if (f.mode === 'edit' && f.api) {
-        kids.push(el('div', { class: 'field-hint', text: L('Select "avcli (auto)" to revert to automatic collection.', '"avcli (자동)"을 선택하면 자동 수집으로 되돌아갑니다.') }));
-      }
       grid.appendChild(el('div', { class: 'field' }, kids));
     }
     if (t === 'SRV' || t === 'PLC') {
@@ -1077,7 +1074,7 @@ const screen = {
         // 일반 서버 수집 방식 — SNMP(OS)/Redfish(BMC) 조합 또는 Proxmox API.
         grid.appendChild(el('div', { class: 'field' }, [
           el('label', { class: 'field-label', for: 'mng-f-platform', text: L('Collection', '수집 방식') }),
-          el('select', { id: 'mng-f-platform', class: 'field-select', 'data-mng-f': 'platform' }, [
+          el('select', { id: 'mng-f-platform', class: 'field-select', 'data-mng-f': 'platform', disabled: f.mode === 'edit' }, [
             ['', L('SNMP (OS agent)', 'SNMP (OS 에이전트)')],
             ['redfish', L('Redfish (BMC: iLO/iDRAC/XCC)', 'Redfish (BMC: iLO/iDRAC/XCC)')],
             ['both', L('SNMP + Redfish', 'SNMP + Redfish')],
@@ -1162,14 +1159,14 @@ const screen = {
       const ipId = 'mng-vm-ip-' + i;
       wrap.appendChild(el('div', { class: 'sc-mng-vmrow' }, [
         el('label', { class: 'u-sr-only', for: nameId, text: L('VM name ' + (i + 1), 'VM ' + (i + 1) + ' 이름') }),
-        el('input', { id: nameId, class: 'field-input', 'data-mng-vm': String(i), 'data-mng-vmk': 'name', value: vm.name || '', placeholder: L('VM name', 'VM 이름') }),
+        el('input', { id: nameId, class: 'field-input', 'data-mng-vm': String(i), 'data-mng-vmk': 'name', disabled: f.mode === 'edit', value: vm.name || '', placeholder: L('VM name', 'VM 이름') }),
         el('label', { class: 'u-sr-only', for: ipId, text: L('VM IP ' + (i + 1), 'VM ' + (i + 1) + ' IP') }),
-        el('input', { id: ipId, class: 'field-input', 'data-mng-vm': String(i), 'data-mng-vmk': 'ip', value: vm.ip || '', placeholder: '172.30.1.51', inputmode: 'url' }),
-        el('button', { class: 'sc-mng-act', type: 'button', 'data-mng-vm-del': String(i), title: L('Remove', '삭제'), 'aria-label': L('Remove VM ' + (i + 1), 'VM ' + (i + 1) + ' 삭제') },
+        el('input', { id: ipId, class: 'field-input', 'data-mng-vm': String(i), 'data-mng-vmk': 'ip', disabled: f.mode === 'edit', value: vm.ip || '', placeholder: '172.30.1.51', inputmode: 'url' }),
+        el('button', { class: 'sc-mng-act', type: 'button', 'data-mng-vm-del': String(i), disabled: f.mode === 'edit', title: L('Remove', '삭제'), 'aria-label': L('Remove VM ' + (i + 1), 'VM ' + (i + 1) + ' 삭제') },
           [ctx.util.icon('close', { size: 13 })]),
       ]));
     });
-    wrap.appendChild(el('button', { class: 'btn btn--outline btn--sm sc-mng-vmadd', type: 'button', 'data-mng-vm-add': '', text: '+ ' + L('Add VM', 'VM 추가') }));
+    wrap.appendChild(el('button', { class: 'btn btn--outline btn--sm sc-mng-vmadd', type: 'button', 'data-mng-vm-add': '', disabled: f.mode === 'edit', text: '+ ' + L('Add VM', 'VM 추가') }));
     grid.appendChild(wrap);
   },
 
@@ -1409,15 +1406,11 @@ const screen = {
       // SRV 수집 방식 — 복원하지 않으면 Redfish/Proxmox 장비가 SNMP 로 렌더돼
       // 연결·인증 탭이 엉뚱한 필드(community 등)를 보여준다.
       platform: m.platform || '',
-      // FT 수집 방식(api)도 복원 — 미복원이면 rest/snmp 장비가 항상 'avcli (자동)'으로
-      // 렌더된다(#392). api_orig 는 buildBody 가 '자동으로 되돌리기'(빈 값 명시 전송)와
-      // '기존 유지'(미전송)를 구분하는 기준이다. meta.api가 응답에 있으면 그 값을 복원한다.
-      api: m.api || '', api_orig: m.api || '',
+      // Restore collection settings for read-only display.
+      api: m.api || '',
       vendor: m.vendor || '', bmc_ip: (m.bmc && m.bmc.ip) || '',
       model: (m.plc && m.plc.model) || '', asset_tag: m.assetTag || '', floor_pos: m.floorPos || '',
-      // 자격증명 계정명은 폴리 meta 에 노출되지 않아 복원 불가 — 디폴트('admin'/'root')를
-      // 채워 두면 저장 시 그대로 전송돼 실제 계정을 덮어쓴다. 빈 값 + '기존 유지' placeholder
-      // 로 열고, buildBody 가 edit 모드의 빈 자격증명을 빼는 계약과 맞춘다.
+      // Account names are not exposed in fleet metadata; leave read-only fields empty.
       community: '', admin_user: '', node0_user: '', node1_user: '', win_user: '',
       admin_pass: '', root_pass: '', win_pass: '',
       node0_pass: '', node1_pass: '',
@@ -1487,19 +1480,12 @@ const screen = {
     ctx.store.setState({ wizardStep: Math.min(3, step + 1) });
   },
 
-  /* '필수'(req:true 배지) 인증 필드 검증 — 배지 조건(reqCredFields)과 동일 조건.
-     edit 모드는 '비우면 기존 유지' 계약(buildBody)이라, add 모드와 edit 에서 '변경'으로
-     입력을 연(showPw) 비밀번호 필드만 검사한다. 비어 있는 첫 필드의 오류 문구 또는 null. */
+  /* Add credentials only: edit controls are read-only; passwords remain opaque. */
   reqCredIssue(f, L) {
-    const add = f.mode === 'add';
+    if (f.mode === 'edit') return null;
     for (const [k, pw, en, ko] of reqCredFields(f.type, f.platform)) {
-      // edit 의 미검사는 '기존 유지' placeholder 를 단 필드(비밀번호 미개방·복원 불가
-      // 계정명)에만 해당한다. bmc_ip 는 자격증명이 아니라 openEdit 이 meta.bmc.ip 를
-      // 항상 복원하는 연결 필드라 placeholder 가 없다 — edit 에서 SNMP→redfish/both 로
-      // 바꾸면(SNMP 장비는 복원값 없음) 또는 복원값을 지우면, * 배지만 달린 채 검증 없이
-      // BMC 주소 없는 장비가 저장됐다(#318). 따라서 edit 에서도 항상 검사한다.
-      if (!add && !(k === 'bmc_ip' || (pw && f.showPw && f.showPw[k]))) continue;
-      if (!String(f[k] || '').trim()) return { field: k, message: L(en, ko) };
+      const value = String(f[k] || '');
+      if (!(pw ? value : value.trim())) return { field: k, message: L(en, ko) };
     }
     return null;
   },
@@ -1511,29 +1497,20 @@ const screen = {
 
   /* ── 저장 / 삭제 (REST) ─────────────────────────────────────────────── */
   buildBody(f) {
+    if (f.mode === 'edit') {
+      const fields = EDIT_FIELDS.concat(isFTType(f.type) ? [] : ['vendor']);
+      return Object.fromEntries(fields.map((key) => [key, String(f[key] || '').trim()]));
+    }
     const vmips = (f.vms || [])
       .map((v) => ({ name: String(v.name || '').trim(), ip: String(v.ip || '').trim() }))
       .filter((v) => v.ip);
     const nodes = [f.node0, f.node1].map((x) => String(x || '').trim()).filter(Boolean);
     const body = Object.assign({}, f, { nodes, vm_ips: vmips, tags: f.type === 'PLC' ? parseTags(f.tags_text) : [] });
-    ['tags_text', 'vms', 'showPw', 'err', 'fieldErrors', 'testing', 'testResult', 'testErr', 'busy', '_rev', 'mode', 'origKey', 'api_orig', 'tab'].forEach((k) => { delete body[k]; });
-    // 비밀번호를 비워 두면 "기존 값 유지" 의도(수정 모달 힌트 문구와 동일) — 빈 문자열을 전송하면
-    // 서버가 기존 자격증명을 빈 값으로 덮어쓸 수 있으므로 body에서 제외한다.
+    ['tags_text', 'vms', 'showPw', 'err', 'fieldErrors', 'testing', 'testResult', 'testErr', 'busy', '_rev', 'mode', 'origKey', 'tab'].forEach((k) => { delete body[k]; });
+    // Omit empty optional add credentials; never trim nonempty passwords.
     ['node0_pass', 'node1_pass', 'admin_pass', 'root_pass', 'win_pass', 'bmc_pass'].forEach((k) => {
       if (body[k] === '') delete body[k];
     });
-    // edit 모드에서는 계정명·community·수집 방식(api)·bmc_ip 도 같은 계약 — 폴리가 머지
-    // 의미론이면 빈 값 전송이 기존 설정을 지우므로, 비어 있으면 아예 싣지 않는다(복원된 값·
-    // 새 입력은 전송). bmc_ip 의 빈 값은 '비우면 유지'다 — redfish/both 의 빈 값은
-    // reqCredError(#318)가 이미 차단하므로 여기 도달하는 '' 는 BMC 무관 플랫폼뿐이다.
-    // 예외: api 는 복원값(api_orig)이 있는데 사용자가 'avcli (자동)'을 골라 '' 가 된 경우
-    // '자동으로 되돌리기' 의도다 — 빈 값을 명시 전송해 리셋한다(#392). 이 경우가 아니면
-    // (원래 자동) 종전대로 미전송 = 기존 유지.
-    if (f.mode === 'edit') {
-      ['admin_user', 'node0_user', 'node1_user', 'win_user', 'bmc_user', 'community', 'api', 'bmc_ip'].forEach((k) => {
-        if (body[k] === '' && !(k === 'api' && f.api_orig)) delete body[k];
-      });
-    }
     return body;
   },
 
@@ -1563,7 +1540,7 @@ const screen = {
     const ctx = this.ctx;
     const f = this.form(); if (!f || f.busy) return;
     const L = ctx.L;
-    if (!String(f.mgmt || '').trim()) { this.setValidationError('mgmt', L('Management IP is required', '관리 IP는 필수입니다')); return; }
+    if (f.mode === 'add' && !String(f.mgmt || '').trim()) { this.setValidationError('mgmt', L('Management IP is required', '관리 IP는 필수입니다')); return; }
     if (!String(f.label || '').trim()) { this.setValidationError('label', L('Device name is required', '장비 이름은 필수입니다')); return; }
     const reqIssue = this.reqCredIssue(f, L);
     if (reqIssue) { this.setValidationError(reqIssue.field, reqIssue.message); return; }
@@ -1596,6 +1573,14 @@ const screen = {
       return;
     }
 
+    const applied = f.mode === 'edit' && Array.isArray(res.applied)
+      ? res.applied.filter((key) => isEditField(f, key) && Object.hasOwn(body, key)) : [];
+    if (f.mode === 'edit' && !applied.length) {
+      const message = L('No display metadata was confirmed saved.', '표시 메타 저장이 확인되지 않았습니다.');
+      if (sameForm) this.setForm({ busy: false, err: message });
+      else ctx.showToast(message);
+      return;
+    }
     const st = ctx.store.getState();
     const fleet = (st.fleet || []).slice();
     if (f.mode === 'add') {
@@ -1607,29 +1592,27 @@ const screen = {
       const i = fleet.findIndex((d) => d.id === f.origKey);
       if (i >= 0) {
         const dev = Object.assign({}, fleet[i]);
-        dev.site = String(f.site || '').trim() || DASH;
-        dev.meta = Object.assign({}, dev.meta, {
-          label: f.label, company: f.company, factory: f.factory,
-          mgmt: f.mgmt, assetTag: f.asset_tag, floorPos: String(f.floor_pos || '').trim(),
-          vendor: f.vendor || (dev.meta && dev.meta.vendor) || '',
+        dev.meta = Object.assign({}, dev.meta);
+        // Overlay only metadata the server confirmed applied, never targets.
+        const localEdit = { ts: Date.now() };
+        const metaKeys = { asset_tag: 'assetTag', floor_pos: 'floorPos' };
+        applied.forEach((key) => {
+          if (key === 'site') {
+            dev.site = body[key] || DASH;
+            localEdit.site = dev.site;
+          } else {
+            const metaKey = metaKeys[key] || key;
+            dev.meta[metaKey] = body[key];
+            localEdit[metaKey] = body[key];
+          }
         });
-        if (f.bmc_ip && dev.meta.bmc) dev.meta.bmc = Object.assign({}, dev.meta.bmc, { ip: f.bmc_ip });
-        // PUT 성공 직후 폴러가 변경을 반영하기 전까지 표시 필드를 유지한다.
-        // data.pullPatch(mergeLocalWrites)가 서버 스냅샷 위에 다시 적용한다.
-        dev.meta.localEdit = {
-          ts: Date.now(),
-          site: dev.site,
-          label: dev.meta.label, company: dev.meta.company, factory: dev.meta.factory,
-          mgmt: dev.meta.mgmt, assetTag: dev.meta.assetTag, floorPos: dev.meta.floorPos,
-          vendor: dev.meta.vendor, bmcIp: String(f.bmc_ip || '').trim(),
-        };
+        dev.meta.localEdit = localEdit;
         fleet[i] = dev;
       }
-      // 표시 필드 수정은 lastPoll도 갱신해 다음 폴링 전 화면에 즉시 반영한다.
       ctx.store.setState(sameForm
-        ? { fleet, form: null, wizardStep: 0, lastPoll: Date.now() }
-        : { fleet, lastPoll: Date.now() });
-      ctx.showToast(L('Device saved', '장비를 저장했습니다') + ': ' + f.label);
+        ? { fleet, form: null, wizardStep: 0 }
+        : { fleet });
+      ctx.showToast(L('Display metadata saved', '표시 메타를 저장했습니다') + ': ' + f.label);
     }
     this.modalSig = '';
     this.treeSig = '';
@@ -1680,7 +1663,7 @@ const screen = {
   /* ── 연결 테스트 ──────────────────────────────────────────────────────── */
   async testConnection() {
     const ctx = this.ctx;
-    const f = this.form(); if (!f || f.testing) return;
+    const f = this.form(); if (!f || f.testing || f.mode === 'edit') return;
     const L = ctx.L;
     if (!String(f.mgmt || '').trim()) { this.setForm({ testErr: L('Management IP is required', '관리 IP는 필수입니다'), testResult: null }); return; }
     this.setForm({ testing: true, testErr: null, testResult: null });

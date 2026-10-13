@@ -26,6 +26,8 @@ type cacheSnapshot struct {
 	topoFull   map[string]any
 	typedViews []topology.ClusterView
 	ts         float64
+	topoTS     float64
+	fullTS     float64
 }
 
 // FleetCache 는 fleet/평면 토폴로지/상세 토폴로지의 마지막 성공 스냅샷이다.
@@ -70,11 +72,18 @@ func (c *FleetCache) Update(states []*ClusterState) {
 	clusters := make([]any, 0, len(states))
 	typed := make([]topology.ClusterView, 0, len(states))
 	now := time.Now()
+	ts := float64(now.UnixNano()) / 1e9
+	topologyError := ""
 	for _, s := range states {
 		view, tv, err := safeBuildViews(s, now)
 		if err != nil {
-			logf("error", s.Key, fmt.Sprintf("클러스터 뷰 빌드 실패: %v", err))
-			if prev := staleCluster(prevClusters[s.Key]); prev != nil {
+			topologyError = "cluster view build failed"
+			key := ""
+			if s != nil {
+				key = s.Key
+			}
+			logf("error", key, fmt.Sprintf("클러스터 뷰 빌드 실패: %v", err))
+			if prev := staleCluster(prevClusters[key]); prev != nil {
 				clusters = append(clusters, prev)
 			}
 			continue
@@ -117,6 +126,7 @@ func (c *FleetCache) Update(states []*ClusterState) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
+					topologyError = "flat topology build failed"
 					logf("error", strVal(cm["key"]), fmt.Sprintf("토폴로지 빌드 실패: %v\n%s", r, debug.Stack()))
 					if pt, ok := prevTopo[strVal(cm["key"])]; ok {
 						topoClusters = append(topoClusters, pt)
@@ -127,6 +137,16 @@ func (c *FleetCache) Update(states []*ClusterState) {
 		}()
 	}
 	topo := map[string]any{"generated_at": generatedAt, "clusters": topoClusters}
+	topoTS := ts
+	if topologyError != "" {
+		topoTS = 0
+		if curr != nil && curr.topology != nil {
+			topo["generated_at"] = curr.topology["generated_at"]
+			topoTS = curr.topoTS
+		}
+	}
+	topo["stale"] = anyStale || topologyError != ""
+	topo["last_error"] = topologyError
 
 	// 상세 모델은 계산량이 크고 선택 기능이라 실패해도 평면 그래프에 영향을 주지
 	// 않도록 격리한다(poller.py 와 같은 판단).
@@ -141,13 +161,28 @@ func (c *FleetCache) Update(states []*ClusterState) {
 		topoFull = buildFullTopologyMap(typed, generatedAt)
 	}()
 
-	var finalTopoFull map[string]any
-	if curr != nil {
-		finalTopoFull = curr.topoFull
+	fullError := topologyError
+	if topoFull == nil && fullError == "" {
+		fullError = "full topology build failed"
 	}
-	// 상세 빌드 실패 시 직전본 유지(Python: 새 값이 None 이고 이전도 None 일 때만 덮음).
-	if topoFull != nil || finalTopoFull == nil {
-		finalTopoFull = topoFull
+	finalTopoFull := topoFull
+	fullTS := ts
+	if fullError != "" {
+		fullTS = 0
+		if curr != nil && curr.topoFull != nil {
+			finalTopoFull = curr.topoFull
+			fullTS = curr.fullTS
+		}
+	}
+	if finalTopoFull != nil {
+		// Published maps are immutable; fallback metadata belongs to this update.
+		copyFull := make(map[string]any, len(finalTopoFull)+2)
+		for k, v := range finalTopoFull {
+			copyFull[k] = v
+		}
+		copyFull["stale"] = anyStale || fullError != ""
+		copyFull["last_error"] = fullError
+		finalTopoFull = copyFull
 	}
 
 	newSnap := &cacheSnapshot{
@@ -155,7 +190,9 @@ func (c *FleetCache) Update(states []*ClusterState) {
 		topology:   topo,
 		topoFull:   finalTopoFull,
 		typedViews: typed,
-		ts:         nowFloat(),
+		ts:         ts,
+		topoTS:     topoTS,
+		fullTS:     fullTS,
 	}
 	c.snap.Store(newSnap)
 }
@@ -211,6 +248,16 @@ func (c *FleetCache) Snapshot() (fleet, topo map[string]any, ts float64) {
 	return snap.fleet, snap.topology, snap.ts
 }
 
+// SnapshotTopology returns the flat graph and its last complete build time,
+// independently of the fleet refresh time returned by Snapshot.
+func (c *FleetCache) SnapshotTopology() (map[string]any, float64) {
+	snap := c.snap.Load()
+	if snap == nil {
+		return nil, 0
+	}
+	return snap.topology, snap.topoTS
+}
+
 // SnapshotFull 은 (상세 topology, 갱신 시각)을 돌려준다.
 // RCU 패턴(atomic.Pointer 로드)으로 락 경합 없이 즉시 반환한다.
 func (c *FleetCache) SnapshotFull() (map[string]any, float64) {
@@ -218,7 +265,7 @@ func (c *FleetCache) SnapshotFull() (map[string]any, float64) {
 	if snap == nil {
 		return nil, 0
 	}
-	return snap.topoFull, snap.ts
+	return snap.topoFull, snap.fullTS
 }
 
 // buildFullTopologyMap 은 topology.BuildFullTopology 결과를 맵으로 변환하고

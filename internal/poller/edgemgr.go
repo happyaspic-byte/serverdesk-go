@@ -10,6 +10,8 @@ package poller
 
 import (
 	"context"
+	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,12 +32,14 @@ type EdgeCollectorStatus struct {
 // Add/Remove/PatchMeta 에 HTTP 요청 ctx 를 넘기면 요청 종료와 함께
 // 재생성된 워커까지 죽어 스냅샷이 그 상태로 얼어붙는다(실제 관측된 장애).
 type EdgeManager struct {
-	mu      sync.Mutex
-	root    context.Context // 워커 수명 전용 루트(절대 요청 ctx 금지)
-	devices []edge.DeviceConfig
-	worker  *edge.Worker
-	cancel  context.CancelFunc
-	logf    func(level, comp, msg string)
+	mu       sync.Mutex
+	root     context.Context // 워커 수명 전용 루트(절대 요청 ctx 금지)
+	devices  []edge.DeviceConfig
+	worker   *edge.Worker
+	cancel   context.CancelFunc
+	logf     func(level, comp, msg string)
+	workers  sync.WaitGroup
+	stopping bool
 	// lastGood 는 마지막 정상 스냅샷이다. 워커 교체(Add/Remove/PatchMeta) 직후
 	// 새 워커의 첫 라운드가 끝나기 전까지 Latest 가 빈 목록을 반환하면
 	// /api/devices 에서 엣지 장비 전체가 몇 초간 사라졌다 돌아오는 깜빡임이
@@ -58,6 +62,9 @@ func NewEdgeManager(ctx context.Context, devices []edge.DeviceConfig, logf func(
 
 // spawnLocked 은 현재 목록으로 새 워커를 만든다. 호출 전 mu 를 쥐고 있어야 한다.
 func (m *EdgeManager) spawnLocked() {
+	if m.stopping {
+		return
+	}
 	w := edge.NewWorker(append([]edge.DeviceConfig(nil), m.devices...))
 	if m.logf != nil {
 		w.Logf = m.logf
@@ -65,7 +72,11 @@ func (m *EdgeManager) spawnLocked() {
 	wctx, cancel := context.WithCancel(m.root)
 	m.worker = w
 	m.cancel = cancel
-	go w.Start(wctx)
+	m.workers.Add(1)
+	go func() {
+		defer m.workers.Done()
+		w.Start(wctx)
+	}()
 }
 
 // respawnLocked 은 워커를 교체한다(목록 변경 반영).
@@ -94,58 +105,56 @@ func (m *EdgeManager) Devices() []edge.DeviceConfig {
 // 워커 교체 직후 새 워커의 첫 라운드가 비어 있으면 마지막 정상 스냅샷으로
 // 버틴다(최대 2라운드=130초). 이 폴섭이 없으면 장비 추가/삭제/수정 때마다
 // 엣지 장비가 화면에서 몇 초간 사라졌다 돌아온다.
+// 최상위 맵은 요청별 사본이다(가용성 주입용). 중첩 값은 읽기 전용이다.
 func (m *EdgeManager) Latest() []map[string]any {
+	devices, _ := m.LatestWithStatus()
+	return devices
+}
+
+// LatestWithStatus binds round data and status while holding the manager's
+// generation lock. Display fallback retains the replacement worker's unready
+// status; old values can never borrow a new generation's observation time.
+func (m *EdgeManager) LatestWithStatus() ([]map[string]any, EdgeCollectorStatus) {
 	m.mu.Lock()
-	w := m.worker
+	defer m.mu.Unlock()
+
 	keys := map[string]bool{}
 	for _, d := range m.devices {
 		keys[d.Key] = true
 	}
-	lg, lgAt := m.lastGood, m.lastGoodAt
-	m.mu.Unlock()
+	var latest []map[string]any
+	status := EdgeCollectorStatus{Configured: len(m.devices)}
+	if m.worker != nil {
+		latest, status.LastRoundAt, status.LastError = m.worker.Snapshot()
+		status.Observed = len(latest)
+	}
+	if len(latest) > 0 {
+		m.lastGood, m.lastGoodAt = latest, time.Now()
+	} else if len(m.lastGood) > 0 && time.Since(m.lastGoodAt) < 130*time.Second {
+		latest = m.lastGood
+	} else {
+		return nil, status
+	}
 
-	filter := func(in []map[string]any) []map[string]any {
-		out := []map[string]any{}
-		for _, d := range in {
-			id, _ := d["id"].(string)
-			if keys[id] {
-				out = append(out, d)
-			}
+	out := []map[string]any{}
+	for _, d := range latest {
+		id, _ := d["id"].(string)
+		if keys[id] {
+			out = append(out, maps.Clone(d))
 		}
-		return out
 	}
-
-	var out []map[string]any
-	if w != nil {
-		out = filter(w.LatestDevices())
-	}
-	if len(out) > 0 {
-		m.mu.Lock()
-		m.lastGood, m.lastGoodAt = out, time.Now()
-		m.mu.Unlock()
-		return out
-	}
-	// 폴섭은 워커 교체 직후 공백 구간에서만 — 오래된 스냅샷을 현재값처럼
-	// 계속 낼 수는 없으므로 2라운드(60s×2 + 여유)를 넘기면 빈 채로 둔다.
-	if len(lg) > 0 && time.Since(lgAt) < 130*time.Second {
-		return filter(lg)
-	}
-	return nil
+	return out, status
 }
 
 // CollectorStatus reports worker liveness without exposing device identities.
 func (m *EdgeManager) CollectorStatus() EdgeCollectorStatus {
 	m.mu.Lock()
-	worker := m.worker
-	configured := len(m.devices)
-	m.mu.Unlock()
-
-	status := EdgeCollectorStatus{Configured: configured}
-	if worker == nil {
-		return status
+	defer m.mu.Unlock()
+	status := EdgeCollectorStatus{Configured: len(m.devices)}
+	if m.worker != nil {
+		devices, roundAt, lastError := m.worker.Snapshot()
+		status.Observed, status.LastRoundAt, status.LastError = len(devices), roundAt, lastError
 	}
-	status.Observed = len(worker.LatestDevices())
-	status.LastRoundAt, status.LastError = worker.CollectionStatus()
 	return status
 }
 
@@ -167,22 +176,33 @@ func (m *EdgeManager) Remove(key string) {
 		}
 	}
 	m.devices = append([]edge.DeviceConfig(nil), out...)
+	retained := make([]map[string]any, 0, len(m.lastGood))
+	for _, d := range m.lastGood {
+		if id, _ := d["id"].(string); id != key {
+			retained = append(retained, d)
+		}
+	}
+	m.lastGood = retained
 	m.respawnLocked()
 	m.mu.Unlock()
 }
 
 // PatchMeta 는 표시 메타 변경을 즉시 반영한다. 목록의 설정을 고치고 워커를
-// 교체하며, 교체 완료 전까지는 현재 스냅샷의 meta 를 직접 패치해 다음 GET 부터
-// 새 값이 보이게 한다(Python 의 _LATEST 패치와 같은 의도).
+// 교체하며, 교체 완료 전까지는 마지막 스냅샷의 사본을 패치해 다음 GET 부터
+// 새 값이 보이게 한다. 이미 발행된 스냅샷과 워커의 맵은 변경하지 않는다.
 //
 // config 키 → 엣지 meta 키(카멜) 매핑 — floor_pos 만 이름이 갈린다(floorPos).
 func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	var updated edge.DeviceConfig
+	changed := false
 	for i := range m.devices {
 		if m.devices[i].Key != key {
 			continue
 		}
 		d := &m.devices[i]
+		before := edgeDisplayMeta(*d)
 		for k, v := range fields {
 			switch k {
 			case "label":
@@ -201,21 +221,25 @@ func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 				d.Vendor = v
 			}
 		}
+		updated = *d
+		changed = changed || before != edgeDisplayMeta(updated)
 	}
-	w := m.worker
-	m.respawnLocked()
-	m.mu.Unlock()
-
-	// 스냅샷 즉시 패치(새 워커의 첫 라운드가 완료되기 전까지 유효).
-	if w == nil {
+	// Equivalent recognized fields (including empty overrides that resolve to
+	// the same effective defaults) change nothing: no config write, no cache
+	// refresh, no respawn. Real edits still restart the worker below.
+	if !changed {
 		return
 	}
-	metaKey := map[string]string{
-		"label": "label", "company": "company", "factory": "factory",
-		"site": "site", "vendor": "vendor", "floor_pos": "floorPos",
-		"asset_tag": "assetTag",
+	// Latest 와 같은 잠금 안에서 폴섭을 교체해 이전 워커의 응답이
+	// 방금 편집한 스냅샷을 덮어쓰지 못하게 한다.
+	if m.worker != nil {
+		if latest := m.worker.LatestDevices(); len(latest) > 0 {
+			m.lastGood, m.lastGoodAt = latest, time.Now()
+		}
 	}
-	for _, d := range w.LatestDevices() {
+	values := edgeDisplayMeta(updated)
+	patched := append([]map[string]any(nil), m.lastGood...)
+	for i, d := range patched {
 		if id, _ := d["id"].(string); id != key {
 			continue
 		}
@@ -223,20 +247,113 @@ func (m *EdgeManager) PatchMeta(key string, fields map[string]string) {
 		if meta == nil {
 			continue
 		}
-		for k, v := range fields {
-			if mk, ok := metaKey[k]; ok {
-				meta[mk] = v
+		d = maps.Clone(d)
+		meta = maps.Clone(meta)
+		d["meta"] = meta
+		patched[i] = d
+		for k := range fields {
+			switch k {
+			case "label":
+				meta["label"] = values.label
+			case "company":
+				meta["company"] = values.company
+			case "factory":
+				meta["factory"] = values.factory
+			case "site":
+				d["site"] = values.site
+			case "asset_tag":
+				meta["assetTag"] = values.assetTag
+			case "floor_pos":
+				meta["floorPos"] = values.floorPos
+			case "vendor":
+				meta["vendor"] = projectedVendor(updated, d, values.vendor)
 			}
 		}
 	}
+	m.lastGood = patched
+	m.respawnLocked()
+}
+
+// edgeDisplayMeta follows edge.baseDevice's configured defaults. Both the
+// no-op check and immediate fallback patch use the same effective values.
+type edgeMetaValues struct {
+	label, company, factory, site, assetTag, floorPos, vendor string
+}
+
+func edgeDisplayMeta(d edge.DeviceConfig) edgeMetaValues {
+	values := edgeMetaValues{d.Name, d.Company, d.Factory, d.Site, d.AssetTag, d.FloorPos, d.Vendor}
+	if values.label == "" {
+		values.label = d.Key
+	}
+	if values.company == "" {
+		values.company = "루비컴"
+	}
+	if values.factory == "" {
+		parts := strings.Split(d.IP, ".")
+		if len(parts) > 3 {
+			parts = parts[:3]
+		}
+		values.factory = strings.Join(parts, ".") + ".0/24"
+	}
+	if values.site == "" {
+		values.site = d.IP
+	}
+	return values
+}
+
+// projectedVendor keeps the vendor shown by the retained snapshot's producer
+// path while the configured value is empty. NAS, printer, and PLC hardcode a
+// constant on success and emit the raw configured value when down; proxmox
+// substitutes "Proxmox" for an empty configured vendor; server uses the
+// configured value unless Redfish reports a maker. A configured override
+// projects directly on every path, and the first replacement round replaces
+// the projection with the real producer output.
+func projectedVendor(dev edge.DeviceConfig, retained map[string]any, configured string) string {
+	if configured != "" {
+		return configured
+	}
+	status, _ := retained["status"].(string)
+	if status == "down" {
+		return ""
+	}
+	kind := dev.Kind
+	if kind == "" {
+		kind = dev.Type
+	}
+	switch kind {
+	case "nas":
+		return "Synology"
+	case "printer":
+		return "Samsung Electronics"
+	case "plc":
+		return "OMRON"
+	case "proxmox":
+		return "Proxmox"
+	}
+	return ""
 }
 
 // Stop 은 워커를 멈춘다(그레이스풀 셧다운 경로).
 func (m *EdgeManager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stopping = true
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel = nil
+	}
+}
+
+// Wait permanently stops spawning and joins current and canceled replacement
+// workers. Stop serializes the last Add before WaitGroup.Wait can begin.
+func (m *EdgeManager) Wait(ctx context.Context) error {
+	m.Stop()
+	done := make(chan struct{})
+	go func() { m.workers.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

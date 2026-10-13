@@ -6,7 +6,17 @@
 Linux payload에는 `serverdesk-linux-amd64`, `config.example.json`, `deploy/serverdesk.service`,
 `deploy/serverdesk-net.service`와 이 디렉터리의 `serverdesk-network.sh` /
 `serverdesk-network.env.example`이 모두 포함되어야 한다. 설치·업데이트는 같은 transactional
-installer를 사용한다.
+installer를 사용한다. `serverdesk-deployment-lock.sh`도 필수 payload이며 설치 후
+`/opt/serverdesk/serverdesk-deployment-lock`로 유지하고 제거 시 삭제한다.
+Archive checksum/provenance를 먼저 검증하고 root-owned, non-writable/non-symlink ancestors 아래
+trusted staging에서 sudo로 실행한다. 사용자 소유 extraction은 mutation 전에 거부된다.
+`flock` shared exclusive lock은 validation/rollback/cleanup까지 유지하며 update는 installer로 exec한다.
+Network ownership은 `/var/lib/serverdesk-net/applied.env`에 보존한다. Failed cleanup은 success가
+아니며 helper/unit/journal을 남겨 retry한다. Legacy `/run` journal은 old unit stop 전에 이관한다.
+Rollback 재시작이 재생성한 `/run` journal도 즉시 persistent 위치로 보존한다. Missing journal의
+설정 자원이 남아 있으면 자동 인수/삭제 없이 실패한다. 실제 systemd/network 이관은 미검증이다.
+Stable tag는 candidate-only이며 protected approval environment가 없어 stable promotion은 BLOCKED다.
+[릴리스 경계](../../docs/RELEASE.md), [private trap history 이관](../../docs/DEPLOYMENT.md)을 따른다.
 
 ```bash
 sh deploy/packaging/validate-deployment.sh

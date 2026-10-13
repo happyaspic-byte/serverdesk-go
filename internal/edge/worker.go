@@ -34,6 +34,10 @@ type Worker struct {
 	pve *http.Client
 	rf  *http.Client
 
+	cipIdentity func(context.Context, string, time.Duration) *cipIdentity
+	cipLink     func(context.Context, string) map[string]any
+	cipCounters func(context.Context, string) *cipCounters
+
 	mu          sync.RWMutex
 	latest      []map[string]any
 	static      map[string]any
@@ -48,13 +52,16 @@ type Worker struct {
 // 없는 항목은 걸러낸다 — 폴 수 없는 항목이 매 라운드 down 으로 도배되는 것을 막기 위함.
 func NewWorker(devices []DeviceConfig) *Worker {
 	w := &Worker{
-		SNMPGet: nil,
-		sws:     verifiedClient(5 * time.Second),
-		pve:     verifiedClient(pveHTTPTimeout),
-		rf:      verifiedClient(redfishTimeout),
-		latest:  []map[string]any{},
-		static:  map[string]any{},
-		hist:    map[string]*devHist{},
+		SNMPGet:     nil,
+		cipIdentity: cipIdentityReq,
+		cipLink:     cipEthLink,
+		cipCounters: cipIfCountersReq,
+		sws:         verifiedClient(5 * time.Second),
+		pve:         verifiedClient(pveHTTPTimeout),
+		rf:          verifiedClient(redfishTimeout),
+		latest:      []map[string]any{},
+		static:      map[string]any{},
+		hist:        map[string]*devHist{},
 	}
 	for _, d := range devices {
 		switch d.kind() {
@@ -85,20 +92,26 @@ func (w *Worker) Start(ctx context.Context) {
 // LatestDevices — 마지막 라운드의 플랫 device dict 목록(serverdesk/device@1).
 // 매 라운드 새 맵으로 통째 교첸하므로 반환 슬라이스를 읽기 전용으로 써도 안전하다.
 func (w *Worker) LatestDevices() []map[string]any {
+	devices, _, _ := w.Snapshot()
+	return devices
+}
+
+// Snapshot binds device values to the same completed round and error under one
+// read lock. Maps remain read-only; pollRound replaces them rather than editing.
+func (w *Worker) Snapshot() ([]map[string]any, time.Time, string) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	out := make([]map[string]any, len(w.latest))
 	copy(out, w.latest)
-	return out
+	return out, w.lastRoundAt, w.lastError
 }
 
 // CollectionStatus reports the last fully completed round. Device-level failures still
 // complete a round and remain represented by down snapshots; only a round-level panic
 // sets lastError and leaves lastRoundAt unchanged.
 func (w *Worker) CollectionStatus() (time.Time, string) {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.lastRoundAt, w.lastError
+	_, roundAt, lastError := w.Snapshot()
+	return roundAt, lastError
 }
 
 // safeRound — 라운드 수준 격리: 라운드 전체 패닉도 워커를 죽이지 않는다.

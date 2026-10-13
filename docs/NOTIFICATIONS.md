@@ -61,18 +61,30 @@ because its path may be a bearer token.
   suppress a critical signal from another ready source. Recovery reconciliation
   remains paused while any configured source is uncertain, so stale or failed
   input cannot create a false recovery.
-- Initial critical delivery is suppressed during an active device maintenance
-  window, but not by acknowledgement. Acknowledgement suppresses only the
-  configured 4-hour or 24-hour unacknowledged escalation.
-- A delivered critical gets one recovery notification when the condition clears.
+- Active device maintenance pauses initial critical and escalation delivery, including
+  pending retries. Acknowledgement pauses only the configured 4-hour or 24-hour
+  unacknowledged escalation, not initial critical or recovery delivery. Skipped items
+  consume no attempt and create no backoff/dead-letter entry.
+- Authoritative recovery removes obsolete unsent critical/escalation items. A delivered
+  critical queues a recovery when the condition clears; recovery retries remain valid
+  during maintenance/acknowledgement. Unready source absence is not recovery evidence.
 - Queue and condition state live in
   `runtime_dir/notification-state.json` with atomic replacement. Delivery IDs
   remain stable across restart and are sent as `Idempotency-Key`.
 - Unreadable or corrupt acknowledgement, maintenance, notes, or escalation state
   pauses notification reconciliation instead of treating silence controls as
   empty. The error is exposed in authenticated health and server logs.
-- Each outbound attempt is durably claimed before the request. At most 32 due
-  items are handled per scan and at most 8 requests run concurrently.
+- After acquiring a concurrency slot, the engine refreshes the latest observed
+  maintenance/acknowledgement/source snapshot, then durably claims an eligible item
+  before the request. At most 32 due items are handled per scan and at most 8 requests
+  run concurrently. This is not an atomic transaction with external state and does not
+  cancel a send already started.
+- Delivered/dead-letter dedupe markers remain pinned while their activation is active,
+  including across restart and beyond 30 days. Inactive retention starts at resolution;
+  later delivery extends retention. A recurrence gets a new activation even if its
+  reported start time is unchanged. Legacy JSON without optional `inactive_at` remains
+  readable: known resolution supplies the retention origin, otherwise orphan records
+  use their first reconciliation rather than being immediately pruned.
 - Timeouts, network errors, HTTP 408/429, and 5xx responses use exponential
   backoff capped at one hour. Other 4xx responses are dead-lettered immediately.
   Attempts stop at `retry_max`.

@@ -18,6 +18,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,10 +39,14 @@ type AvailTracker struct {
 	// GetStatuses 는 (장비 id, "op"|"deg"|"down") 목록을 돌려준다.
 	GetStatuses func() [][2]string
 
-	mu    sync.Mutex
-	state map[string]*availRec
-	last  float64
-	n     int
+	mu          sync.Mutex
+	state       map[string]*availRec
+	last        float64
+	seen        map[string]bool // devices observed at the previous sample boundary
+	n           int
+	lastError   string
+	sampleError string
+	status      atomic.Pointer[map[string]any] // immutable last completed health snapshot
 }
 
 type availRec struct {
@@ -61,12 +66,24 @@ func NewAvailTracker(runtimeDir string, getStatuses func() [][2]string) *AvailTr
 		state:       map[string]*availRec{},
 	}
 	if data, err := os.ReadFile(t.path); err == nil {
-		var raw map[string]*availRec
-		if json.Unmarshal(data, &raw) == nil && raw != nil {
-			for id, rec := range raw {
-				if rec != nil && rec.Days != nil {
-					t.state[id] = rec
+		var raw map[string]json.RawMessage
+		if json.Unmarshal(data, &raw) == nil {
+			for id, encoded := range raw {
+				var record struct {
+					Days map[string]json.RawMessage `json:"days"`
 				}
+				if json.Unmarshal(encoded, &record) != nil || record.Days == nil {
+					continue
+				}
+				rec := &availRec{Days: map[string][]float64{}}
+				for day, encodedCell := range record.Days {
+					var cell []*float64
+					if json.Unmarshal(encodedCell, &cell) != nil || len(cell) != 2 || cell[0] == nil || cell[1] == nil || *cell[0] < 0 || *cell[1] < 0 || *cell[1] > *cell[0] {
+						continue
+					}
+					rec.Days[day] = []float64{*cell[0], *cell[1]}
+				}
+				t.state[id] = rec
 			}
 		}
 	}
@@ -78,19 +95,67 @@ func (t *AvailTracker) Path() string { return t.path }
 
 // flush 는 tmp + rename 으로 원자 저장한다. 실패는 경고만 — 저장 실패가
 // 폴러를 죽이면 안 된다.
-func (t *AvailTracker) flush() {
+func (t *AvailTracker) flush() error {
+	defer t.publishStatusLocked()
 	b, err := json.Marshal(t.state)
 	if err != nil {
-		return
+		t.lastError = err.Error()
+		return err
 	}
 	tmp := t.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		t.lastError = err.Error()
 		logf("warn", "avail", fmt.Sprintf("가용성 이력 저장 실패: %v", err))
-		return
+		return err
 	}
 	if err := os.Rename(tmp, t.path); err != nil {
+		t.lastError = err.Error()
 		logf("warn", "avail", fmt.Sprintf("가용성 이력 교체 실패: %v", err))
+		return err
 	}
+	t.lastError = ""
+	return nil
+}
+
+// Status exposes sampler progress and persistence errors without invoking collectors.
+func (t *AvailTracker) Status() map[string]any {
+	if t.mu.TryLock() {
+		defer t.mu.Unlock()
+		t.publishStatusLocked()
+		return t.statusCopy(false)
+	}
+	return t.statusCopy(true)
+}
+
+func (t *AvailTracker) statusCopy(busy bool) map[string]any {
+	out := map[string]any{"samples": 0, "last_sample_at": nil, "last_error": nil, "healthy": true}
+	if previous := t.status.Load(); previous != nil {
+		for key, value := range *previous {
+			out[key] = value
+		}
+	}
+	if busy {
+		out["busy"], out["healthy"] = true, false
+	}
+	return out
+}
+
+// publishStatusLocked never performs I/O; readers can use the prior immutable
+// snapshot while persistence holds the data lock.
+func (t *AvailTracker) publishStatusLocked() {
+	var lastSample, lastError any
+	if t.last != 0 {
+		lastSample = time.Unix(int64(t.last), 0).UTC().Format(time.RFC3339)
+	}
+	message := t.lastError
+	if t.sampleError != "" {
+		message = t.sampleError
+	}
+	if message != "" {
+		lastError = message
+	}
+	snapshot := map[string]any{"samples": t.n, "last_sample_at": lastSample, "last_error": lastError, "healthy": message == ""}
+	t.status.Store(&snapshot)
 }
 
 // Start 는 ctx 종료까지 60초 샘플 루프를 돌고, 끝나면 마지막 flush 를 한다.
@@ -99,6 +164,11 @@ func (t *AvailTracker) Start(ctx context.Context) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
+					t.mu.Lock()
+					t.sampleError = fmt.Sprintf("sample failed: %v", r)
+					t.seen = nil
+					t.publishStatusLocked()
+					t.mu.Unlock()
 					logf("error", "avail", fmt.Sprintf("가용성 샘플 실패: %v\n%s", r, debug.Stack()))
 				}
 			}()
@@ -109,44 +179,54 @@ func (t *AvailTracker) Start(ctx context.Context) {
 		case <-time.After(availSampleSec * time.Second):
 		}
 	}
-	t.mu.Lock()
-	t.flush()
-	t.mu.Unlock()
+	t.Flush()
 }
 
 // Flush 는 즉시 디스크에 저장한다(종료 경로에서 명시 호출용).
 func (t *AvailTracker) Flush() {
+	_ = t.FlushWithError()
+}
+
+// FlushWithError returns this write's failure directly for final shutdown;
+// periodic Flush retains its warning-only policy.
+func (t *AvailTracker) FlushWithError() error {
 	t.mu.Lock()
-	t.flush()
-	t.mu.Unlock()
+	defer t.mu.Unlock()
+	return t.flush()
 }
 
 // Sample 은 현재 장비 상태를 1회 누적한다.
 func (t *AvailTracker) Sample() {
 	now := nowFloat()
-	dt := float64(availSampleSec)
-	if t.last != 0 {
-		dt = now - t.last
-	}
-	t.last = now
-	if dt > availGapCap { // 폴러 미가동 구간 — 관측 제외
-		dt = availSampleSec
-	}
 	day := kstDay(now)
 	var statuses [][2]string
 	if t.GetStatuses != nil {
 		statuses = t.GetStatuses()
 	}
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	dt := now - t.last
+	if t.last == 0 || dt <= 0 || dt > availGapCap {
+		dt = 0
+	}
+	t.last = now
+	seen := make(map[string]bool, len(statuses))
 	for _, s := range statuses {
 		devID, status := s[0], s[1]
+		if devID == "" || (status != "op" && status != "deg" && status != "down") || seen[devID] {
+			continue
+		}
+		seen[devID] = true
+		if !t.seen[devID] || dt == 0 {
+			continue
+		}
 		rec := t.state[devID]
 		if rec == nil {
 			rec = &availRec{Days: map[string][]float64{}}
 			t.state[devID] = rec
 		}
 		cell := rec.Days[day]
-		if cell == nil {
+		if len(cell) != 2 {
 			cell = []float64{0, 0}
 		}
 		cell[0] += dt
@@ -155,12 +235,14 @@ func (t *AvailTracker) Sample() {
 		}
 		rec.Days[day] = cell
 	}
+	t.seen = seen
+	t.sampleError = ""
 	t.n++
+	t.publishStatusLocked()
 	if t.n%availFlushEvery == 0 {
 		t.pruneLocked()
 		t.flush()
 	}
-	t.mu.Unlock()
 }
 
 // pruneLocked 은 35일 넘은 일자 버킷을 버린다.

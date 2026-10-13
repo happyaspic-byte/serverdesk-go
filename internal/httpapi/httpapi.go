@@ -455,6 +455,7 @@ func (s *Server) doGet(w http.ResponseWriter, r *http.Request, path string, qs m
 			s.send(w, r, 200, out)
 			return
 		}
+		topo, ts = s.Cache.SnapshotTopology()
 		if topo == nil {
 			s.send(w, r, 503, map[string]any{"error": "no data yet", "clusters": []any{}})
 			return
@@ -605,6 +606,24 @@ func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
 		bump(edgeSeverity)
 	}
 
+	availabilityStatus := map[string]any{"enabled": false, "healthy": true}
+	if s.Avail != nil {
+		availabilityStatus = s.Avail.Status()
+		availabilityStatus["enabled"] = true
+		if value, ok := availabilityStatus["last_error"].(string); ok {
+			availabilityStatus["last_error"] = config.Mask(value)
+		}
+		lastSample, _ := availabilityStatus["last_sample_at"].(string)
+		last, _ := time.Parse(time.RFC3339, lastSample)
+		if (last.IsZero() && uptime > 180*time.Second) || (!last.IsZero() && time.Since(last) > 180*time.Second) {
+			availabilityStatus["healthy"] = false
+			availabilityStatus["stale"] = true
+		}
+		if healthy, _ := availabilityStatus["healthy"].(bool); !healthy {
+			bump("degraded")
+		}
+	}
+
 	notificationStatus := map[string]any{"enabled": false, "configured": false, "healthy": true}
 	if s.Notifier != nil {
 		notificationStatus = s.Notifier.Status()
@@ -630,6 +649,7 @@ func (s *Server) health(fleet map[string]any, ts float64) map[string]any {
 		"event_store":    eventStatus,
 		"edge_collector": edgeStatus,
 		"notifications":  notificationStatus,
+		"availability":   availabilityStatus,
 		"clusters":       clusters,
 	}
 }

@@ -2,6 +2,8 @@ package edge
 
 import (
 	"testing"
+
+	"serverdesk/internal/snmp"
 )
 
 func TestUCDCPU(t *testing.T) {
@@ -44,8 +46,8 @@ func TestSynRaidText(t *testing.T) {
 	if synRaidText(8) != "parity checking" {
 		t.Fatal("raid 8")
 	}
-	if synRaidText(99) != "normal" {
-		t.Fatal("unknown → normal (Python parity)")
+	if synRaidText(99) != "unknown" {
+		t.Fatal("unknown RAID code must not report normal")
 	}
 }
 
@@ -180,6 +182,98 @@ func TestPollNASDown(t *testing.T) {
 	m := d["meta"].(map[string]any)
 	if v, ok := m["nas"]; !ok || v != nil {
 		t.Fatalf("meta.nas must be nil, got %v ok=%v", v, ok)
+	}
+}
+
+// Missing, NULL, malformed and unrecognized health observations cannot recover a fault.
+func TestPollNASMissingHealth(t *testing.T) {
+	for _, oid := range []string{oSynStatus, oSynPower, oSynFanSys, oSynFanCPU, oSynDiskStat + "0", oSynRaidStat + "0"} {
+		for _, value := range []snmp.Value{{}, vstrv("invalid"), vint(0), vint(99)} {
+			t.Run(oid+"/"+value.Kind.String(), func(t *testing.T) {
+				fake := nasFake()
+				fake["10.0.0.7"][oSynDiskStat+"0"] = vint(1)
+				fake["10.0.0.7"][oSynRaidStat+"0"] = vint(1)
+				fake["10.0.0.7"][oid] = value
+				w, pc := testWorker(fake)
+				d, _ := w.pollNAS(pc, DeviceConfig{Key: "nas1", Kind: "nas", IP: "10.0.0.7"}, nil)
+				meta := d["meta"].(map[string]any)
+				if d["status"] == "op" || d["status"] == "down" || meta["stale"] != true {
+					t.Fatalf("unobserved detail became fresh/healthy/down: status=%v stale=%v", d["status"], meta["stale"])
+				}
+				nas := meta["nas"].(map[string]any)
+				if oid == oSynDiskStat+"0" {
+					disk := nas["disks"].([]any)[0].(map[string]any)
+					if disk["status"] != "unknown" || disk["ok"] != nil {
+						t.Fatalf("disk = %v", disk)
+					}
+				} else if oid == oSynRaidStat+"0" {
+					raid := nas["raid"].([]any)[0].(map[string]any)
+					if raid["status"] != "unknown" || raid["ok"] != nil {
+						t.Fatalf("raid = %v", raid)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPollNASFaultSurvivesMissingDetail(t *testing.T) {
+	fake := nasFake()
+	w, pc := testWorker(fake)
+	dev := DeviceConfig{Key: "nas1", Kind: "nas", IP: "10.0.0.7"}
+	first, st := w.pollNAS(pc, dev, nil)
+	firstAlerts := first["meta"].(map[string]any)["alerts"].([]any)
+	delete(fake[dev.IP], oSynDiskStat+"0")
+	delete(fake[dev.IP], oSynRaidStat+"0")
+	pc.now += 60
+	missing, st := w.pollNAS(pc, dev, st)
+	meta := missing["meta"].(map[string]any)
+	if missing["status"] != "deg" || meta["stale"] != true {
+		t.Fatalf("fault recovery without observation: %v", missing)
+	}
+	alerts := meta["alerts"].([]any)
+	if len(alerts) != 3 {
+		t.Fatalf("lost fault evidence: %v", alerts)
+	}
+	for i := 1; i < 3; i++ {
+		if alerts[i].(map[string]any)["time"] != firstAlerts[i].(map[string]any)["time"] {
+			t.Fatalf("fault activation time changed: %v", alerts)
+		}
+	}
+	fake[dev.IP][oSynDiskStat+"0"] = vint(1)
+	fake[dev.IP][oSynRaidStat+"0"] = vint(1)
+	pc.now += 60
+	recovered, _ := w.pollNAS(pc, dev, st)
+	if recovered["status"] != "op" || recovered["meta"].(map[string]any)["stale"] != false {
+		t.Fatalf("explicit recovery = %v", recovered)
+	}
+	if len(first["meta"].(map[string]any)["alerts"].([]any)) != 3 {
+		t.Fatal("published snapshot mutated")
+	}
+}
+
+func TestPollNASDownRetainsFaultEvidence(t *testing.T) {
+	fake := nasFake()
+	w, pc := testWorker(fake)
+	dev := DeviceConfig{Key: "nas1", Kind: "nas", IP: "10.0.0.7"}
+	_, st := w.pollNAS(pc, dev, nil)
+	delete(fake, dev.IP)
+	pc.now += 60
+	d, _ := w.pollNAS(pc, dev, st)
+	alerts := d["meta"].(map[string]any)["alerts"].([]any)
+	if d["status"] != "down" || len(alerts) != 3 {
+		t.Fatalf("down lost unresolved hardware faults: %v", d)
+	}
+}
+
+func TestPollNASUnknownInventory(t *testing.T) {
+	fake := nasFake()
+	delete(fake["10.0.0.7"], oSynDiskID+"0")
+	delete(fake["10.0.0.7"], oSynRaidName+"0")
+	w, pc := testWorker(fake)
+	d, _ := w.pollNAS(pc, DeviceConfig{Key: "nas1", Kind: "nas", IP: "10.0.0.7"}, nil)
+	if d["status"] != "deg" || d["meta"].(map[string]any)["stale"] != true {
+		t.Fatalf("unknown inventory declared healthy: %v", d)
 	}
 }
 

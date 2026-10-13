@@ -4,11 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"serverdesk/internal/snmp"
 )
+
+func TestWorkerSnapshotBindsDeviceRoundAndStatus(t *testing.T) {
+	w := NewWorker(nil)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := int64(1); i <= 1000; i++ {
+			w.mu.Lock()
+			w.latest = []map[string]any{{"round": i}}
+			w.lastRoundAt = time.Unix(i, 0)
+			w.lastError = ""
+			w.mu.Unlock()
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		devices, roundAt, err := w.Snapshot()
+		if len(devices) > 0 && (devices[0]["round"] != roundAt.Unix() || err != "") {
+			t.Errorf("mixed round: %v/%v/%v", devices, roundAt, err)
+			break
+		}
+	}
+	wg.Wait()
+}
 
 func TestLoadDevices(t *testing.T) {
 	raw := []json.RawMessage{

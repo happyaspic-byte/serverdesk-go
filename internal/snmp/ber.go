@@ -93,6 +93,9 @@ func berUintRaw(n uint64) []byte {
 	for i < 7 && b[i] == 0 {
 		i++
 	}
+	if b[i]&0x80 != 0 {
+		return append([]byte{0}, b[i:]...)
+	}
 	return b[i:]
 }
 
@@ -155,12 +158,18 @@ func decodeOID(b []byte) (string, error) {
 	sb.WriteString(strconv.Itoa(int(b[0]) % 40))
 	var v uint64
 	for _, c := range b[1:] {
+		if v > ^uint64(0)>>7 {
+			return "", fmt.Errorf("snmp: OID subidentifier overflow")
+		}
 		v = (v << 7) | uint64(c&0x7F)
 		if c&0x80 == 0 {
 			sb.WriteByte('.')
 			sb.WriteString(strconv.FormatUint(v, 10))
 			v = 0
 		}
+	}
+	if b[len(b)-1]&0x80 != 0 {
+		return "", errBERTruncated
 	}
 	return sb.String(), nil
 }
@@ -223,4 +232,64 @@ func (r *reader) mustRead() (byte, []byte, error) {
 		return 0, nil, errBERTruncated
 	}
 	return r.read()
+}
+
+// readTag validates structure without changing the public decoder result types.
+func (r *reader) readTag(want byte) ([]byte, error) {
+	tag, val, err := r.read()
+	if err != nil {
+		return nil, err
+	}
+	if tag != want {
+		return nil, fmt.Errorf("snmp: unexpected BER tag %02x", tag)
+	}
+	return val, nil
+}
+
+func decInt(b []byte) (int64, error) {
+	if len(b) == 0 || len(b) > 8 {
+		return 0, fmt.Errorf("snmp: invalid INTEGER length")
+	}
+	var n int64
+	if b[0]&0x80 != 0 {
+		n = -1
+	}
+	for _, c := range b {
+		n = n<<8 | int64(c)
+	}
+	return n, nil
+}
+
+func validateValue(tag byte, b []byte) error {
+	switch tag {
+	case tagInt:
+		_, err := decInt(b)
+		return err
+	case tagCounter32, tagGauge32, tagTimeTicks, tagCounter64:
+		width := 4
+		if tag == tagCounter64 {
+			width = 8
+		}
+		if len(b) == 0 || b[0]&0x80 != 0 {
+			return fmt.Errorf("snmp: invalid unsigned BER value")
+		}
+		if len(b) > 1 && b[0] == 0 {
+			b = b[1:]
+		}
+		if len(b) > width {
+			return fmt.Errorf("snmp: oversized unsigned BER value")
+		}
+	case tagNull, 0x80, 0x81, 0x82:
+		if len(b) != 0 {
+			return fmt.Errorf("snmp: invalid NULL length")
+		}
+	case tagOID:
+		_, err := decodeOID(b)
+		return err
+	case tagIPAddress:
+		if len(b) != 4 {
+			return fmt.Errorf("snmp: invalid IP address length")
+		}
+	}
+	return nil
 }

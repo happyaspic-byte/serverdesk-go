@@ -51,17 +51,17 @@ type Varbind struct {
 // 스키마를 만들어 폴터의 재가공 단계를 없앤다.
 // Sev 와 Severity 는 같은 값이다(프런트가 두 키를 모두 소비).
 type Trap struct {
-	Time      string    `json:"time"`      // "2006-01-02 15:04:05" (수신 호스트 로컬)
-	Ts        float64   `json:"ts"`        // epoch 초(파이썬 time.time 호환)
-	Src       string    `json:"src"`       // 발신 IP
-	Community string    `json:"community"` // 패킷의 community (필터 전 원값)
-	Version   string    `json:"version"`   // "v1" / "v2c"
-	PDU       string    `json:"pdu"`       // "v1-trap" / "v2c-trap" / "inform"
-	OID       string    `json:"oid"`       // 트랩 OID (파이썬 trap_oid)
-	Name      string    `json:"name"`      // MIB 해석 이름 (못 찾으면 "")
-	Sev       string    `json:"sev"`       // critical / warning / info
-	Severity  string    `json:"severity"`  // Sev 와 동일 — 프런트 호환용 별칭
-	Desc      string    `json:"desc"`      // *TrapDescription varbind 우선
+	Time      string    `json:"time"`                // "2006-01-02 15:04:05" (수신 호스트 로컬)
+	Ts        float64   `json:"ts"`                  // epoch 초(파이썬 time.time 호환)
+	Src       string    `json:"src"`                 // 발신 IP
+	Community string    `json:"community,omitempty"` // transient receiver filter; cleared before persistence
+	Version   string    `json:"version"`             // "v1" / "v2c"
+	PDU       string    `json:"pdu"`                 // "v1-trap" / "v2c-trap" / "inform"
+	OID       string    `json:"oid"`                 // 트랩 OID (파이썬 trap_oid)
+	Name      string    `json:"name"`                // MIB 해석 이름 (못 찾으면 "")
+	Sev       string    `json:"sev"`                 // critical / warning / info
+	Severity  string    `json:"severity"`            // Sev 와 동일 — 프런트 호환용 별칭
+	Desc      string    `json:"desc"`                // *TrapDescription varbind 우선
 	Varbinds  []Varbind `json:"varbinds"`
 }
 
@@ -145,20 +145,23 @@ func (d *Decoder) Decode(data []byte, srcIP string) (t Trap, ok bool) {
 
 func (d *Decoder) decode(data []byte, srcIP string) (Trap, error) {
 	top := &reader{b: data}
-	_, seq, err := top.read()
+	seq, err := top.readTag(0x30)
 	if err != nil {
 		return Trap{}, err
+	}
+	if top.more() {
+		return Trap{}, fmt.Errorf("snmp: trailing message data")
 	}
 	r := &reader{b: seq}
-	_, verB, err := r.read()
+	verB, err := r.readTag(tagInt)
 	if err != nil {
 		return Trap{}, err
 	}
-	version := int64(0)
-	if len(verB) > 0 {
-		version = int64(decUint(verB))
+	version, err := decInt(verB)
+	if err != nil || (version != 0 && version != 1) {
+		return Trap{}, fmt.Errorf("snmp: invalid version")
 	}
-	_, commB, err := r.read()
+	commB, err := r.readTag(tagOctets)
 	if err != nil {
 		return Trap{}, err
 	}
@@ -166,6 +169,10 @@ func (d *Decoder) decode(data []byte, srcIP string) (Trap, error) {
 	pduTag, pduB, err := r.read()
 	if err != nil {
 		return Trap{}, err
+	}
+
+	if r.more() || (pduTag == pduV1Trap && version != 0) || (pduTag != pduV1Trap && version != 1) {
+		return Trap{}, fmt.Errorf("snmp: invalid trap envelope")
 	}
 
 	var varbinds []Varbind
@@ -182,18 +189,22 @@ func (d *Decoder) decode(data []byte, srcIP string) (Trap, error) {
 	switch pduTag {
 	case pduV2Trap, pduInform:
 		p := &reader{b: pduB}
-		if _, _, err = p.read(); err != nil { // request-id
-			return Trap{}, err
+		for i := 0; i < 3; i++ {
+			b, err := p.readTag(tagInt)
+			if err != nil {
+				return Trap{}, err
+			}
+			n, err := decInt(b)
+			if err != nil || (i > 0 && n != 0) {
+				return Trap{}, fmt.Errorf("snmp: invalid trap integer")
+			}
 		}
-		if _, _, err = p.read(); err != nil { // error-status
-			return Trap{}, err
-		}
-		if _, _, err = p.read(); err != nil { // error-index
-			return Trap{}, err
-		}
-		_, vbl, err := p.read() // variable-bindings SEQUENCE
+		vbl, err := p.readTag(0x30)
 		if err != nil {
 			return Trap{}, err
+		}
+		if p.more() {
+			return Trap{}, fmt.Errorf("snmp: trailing PDU data")
 		}
 		varbinds, err = d.readVarbinds(vbl)
 		if err != nil {
@@ -206,7 +217,7 @@ func (d *Decoder) decode(data []byte, srcIP string) (Trap, error) {
 		}
 	case pduV1Trap:
 		p := &reader{b: pduB}
-		_, entB, err := p.mustRead() // enterprise OID
+		entB, err := p.readTag(tagOID) // enterprise OID
 		if err != nil {
 			return Trap{}, err
 		}
@@ -214,21 +225,21 @@ func (d *Decoder) decode(data []byte, srcIP string) (Trap, error) {
 		if err != nil {
 			return Trap{}, err
 		}
-		if _, _, err = p.read(); err != nil { // agent-addr
-			return Trap{}, err
+		if addr, e := p.readTag(tagIPAddress); e != nil || len(addr) != 4 { // agent-addr
+			return Trap{}, fmt.Errorf("snmp: invalid agent address")
 		}
-		_, genB, err := p.mustRead() // generic-trap
+		genB, err := p.readTag(tagInt) // generic-trap
 		if err != nil {
 			return Trap{}, err
 		}
-		_, specB, err := p.mustRead() // specific-trap
+		specB, err := p.readTag(tagInt) // specific-trap
 		if err != nil {
 			return Trap{}, err
 		}
-		if _, _, err = p.read(); err != nil { // time-stamp
-			return Trap{}, err
+		if ticks, e := p.readTag(tagTimeTicks); e != nil || validateValue(tagTimeTicks, ticks) != nil { // time-stamp
+			return Trap{}, fmt.Errorf("snmp: invalid timestamp")
 		}
-		_, vbl, err := p.read() // varbinds
+		vbl, err := p.readTag(0x30) // varbinds
 		if err != nil {
 			return Trap{}, err
 		}
@@ -236,13 +247,16 @@ func (d *Decoder) decode(data []byte, srcIP string) (Trap, error) {
 		if err != nil {
 			return Trap{}, err
 		}
-		generic := int64(0)
-		if len(genB) > 0 {
-			generic = int64(decUint(genB))
+		if p.more() {
+			return Trap{}, fmt.Errorf("snmp: trailing PDU data")
 		}
-		specific := uint64(0)
-		if len(specB) > 0 {
-			specific = decUint(specB)
+		generic, err := decInt(genB)
+		if err != nil || generic < 0 || generic > 6 {
+			return Trap{}, fmt.Errorf("snmp: invalid generic trap")
+		}
+		specific, err := decInt(specB)
+		if err != nil || specific < 0 {
+			return Trap{}, fmt.Errorf("snmp: invalid specific trap")
 		}
 		if generic == 6 { // enterpriseSpecific
 			trapOID = fmt.Sprintf("%s.0.%d", enterprise, specific)
@@ -315,12 +329,12 @@ func (d *Decoder) readVarbinds(vbl []byte) ([]Varbind, error) {
 	out := []Varbind{}
 	vr := &reader{b: vbl}
 	for vr.more() {
-		_, vb, err := vr.read()
+		vb, err := vr.readTag(0x30)
 		if err != nil {
 			return nil, err
 		}
 		one := &reader{b: vb}
-		_, oidB, err := one.mustRead()
+		oidB, err := one.readTag(tagOID)
 		if err != nil {
 			return nil, err
 		}
@@ -330,6 +344,12 @@ func (d *Decoder) readVarbinds(vbl []byte) ([]Varbind, error) {
 		}
 		oid, err := decodeOID(oidB)
 		if err != nil {
+			return nil, err
+		}
+		if one.more() {
+			return nil, fmt.Errorf("snmp: trailing varbind data")
+		}
+		if err := validateValue(vt, vv); err != nil {
 			return nil, err
 		}
 		py, kind, disp := decVarbindValue(vt, vv)

@@ -93,6 +93,7 @@ type delivery struct {
 	NextAttempt  time.Time `json:"next_attempt"`
 	Attempts     int       `json:"attempts"`
 	DeliveredAt  time.Time `json:"delivered_at,omitempty"`
+	InactiveAt   time.Time `json:"inactive_at,omitempty"`
 	DeadLetter   bool      `json:"dead_letter,omitempty"`
 	LastError    string    `json:"last_error,omitempty"`
 	LastErrorAt  time.Time `json:"last_error_at,omitempty"`
@@ -284,6 +285,57 @@ func conditionMessage(kind string, c *condition, hours int) string {
 	}
 }
 
+// readPolicy is called without mu held. ScanOnce serializes callbacks, including
+// its pre-send refreshes; Source/Silence callbacks need not support concurrent calls.
+func (e *Engine) readPolicy() (map[string]Signal, map[string]bool, bool, map[string]bool, map[string]bool, error) {
+	var signals []Signal
+	var recoveryReady map[string]bool
+	var sourceReady bool
+	if e.snapshot != nil {
+		signals, recoveryReady, sourceReady = e.snapshot()
+	} else {
+		signals, sourceReady = e.source()
+	}
+	var acked, maintenance map[string]bool
+	if e.silenceWithError != nil {
+		var err error
+		acked, maintenance, err = e.silenceWithError()
+		if err != nil {
+			return nil, recoveryReady, sourceReady, nil, nil, err
+		}
+	} else if e.silence != nil {
+		acked, maintenance = e.silence()
+	}
+	current := make(map[string]Signal, len(signals))
+	for _, signal := range signals {
+		signal.Key = strings.TrimSpace(signal.Key)
+		if signal.Key != "" {
+			current[signal.Key] = signal
+		}
+	}
+	return current, recoveryReady, sourceReady, acked, maintenance, nil
+}
+
+func (e *Engine) deliveryAllowedLocked(item *delivery, current map[string]Signal, recoveryReady map[string]bool, sourceReady bool, acked, maintenance map[string]bool) bool {
+	if item.Kind == "recovery" {
+		return true // only reconciled, delivered initial alarms create recoveries
+	}
+	c := e.state.Conditions[item.ConditionKey]
+	if c == nil || !c.Active || item.ID != deliveryID(c.Key, item.Kind, c.FirstSeen) {
+		return false
+	}
+	host, ackKey, suppressEscalation := c.Host, c.AckKey, c.SuppressEscalation
+	if signal, exists := current[c.Key]; exists {
+		if signal.SourceUnready {
+			return false // explicit uncertainty pauses even a previously authorized retry
+		}
+		host, ackKey, suppressEscalation = signal.Host, signal.AckKey, signal.SuppressEscalation
+	} else if sourceReady || recoveryReady[c.Host] {
+		return false // authoritative absence; never infer recovery from an outage
+	}
+	return !maintenance[host] && (item.Kind != "escalation" || (!suppressEscalation && !acked[ackKey]))
+}
+
 func (e *Engine) ScanOnce(ctx context.Context) {
 	e.scanMu.Lock()
 	defer e.scanMu.Unlock()
@@ -296,40 +348,15 @@ func (e *Engine) ScanOnce(ctx context.Context) {
 	}
 
 	now := e.now().UTC()
-	var signals []Signal
-	var recoveryReady map[string]bool
-	var sourceReady bool
-	if e.snapshot != nil {
-		signals, recoveryReady, sourceReady = e.snapshot()
-	} else {
-		signals, sourceReady = e.source()
-	}
-	acked, maintenance := map[string]bool{}, map[string]bool{}
-	if e.silenceWithError != nil {
-		a, m, err := e.silenceWithError()
-		if err != nil {
-			e.mu.Lock()
-			e.sourceReady = sourceReady
-			e.sourceObserved = true
-			e.silenceFault = "operator acknowledgement/maintenance state is unavailable"
-			e.mu.Unlock()
-			e.logf("error", "notify", "operator acknowledgement/maintenance state read failed; notification delivery paused")
-			return
-		}
-		if a != nil || m != nil {
-			acked, maintenance = a, m
-		}
-	} else if e.silence != nil {
-		if a, m := e.silence(); a != nil || m != nil {
-			acked, maintenance = a, m
-		}
-	}
-	current := make(map[string]Signal, len(signals))
-	for _, signal := range signals {
-		signal.Key = strings.TrimSpace(signal.Key)
-		if signal.Key != "" && (sourceReady || !signal.SourceUnready) {
-			current[signal.Key] = signal
-		}
+	current, recoveryReady, sourceReady, acked, maintenance, err := e.readPolicy()
+	if err != nil {
+		e.mu.Lock()
+		e.sourceReady = sourceReady
+		e.sourceObserved = true
+		e.silenceFault = "operator acknowledgement/maintenance state is unavailable"
+		e.mu.Unlock()
+		e.logf("error", "notify", "operator acknowledgement/maintenance state read failed; notification delivery paused")
+		return
 	}
 
 	e.mu.Lock()
@@ -339,14 +366,44 @@ func (e *Engine) ScanOnce(ctx context.Context) {
 	e.sourceObserved = true
 	// A fleet-wide readiness failure must only block recovery. Otherwise one
 	// failed collector suppresses unrelated critical alarms from every healthy
-	// cluster. current contains only signals whose own source is authoritative.
+	// cluster. current also retains uncertain keys to forbid false recovery.
 	if sourceReady || len(current) > 0 {
 		for key, signal := range current {
+			if signal.SourceUnready {
+				continue // retained evidence prevents recovery, never authorizes activation
+			}
 			c := e.state.Conditions[key]
 			if c == nil || !c.Active {
 				firstSeen := signal.StartedAt.UTC()
 				if firstSeen.IsZero() || firstSeen.After(now) {
 					firstSeen = now
+				}
+				if c != nil && !firstSeen.After(c.LastSeen) {
+					// A resolved condition starts a new activation even when its
+					// collector reuses StartedAt (or the clock has not advanced).
+					firstSeen = now
+					if !firstSeen.After(c.FirstSeen) {
+						firstSeen = c.FirstSeen.Add(time.Nanosecond)
+					}
+				}
+				// A late recovery can outlive its pruned condition. Never reuse
+				// any retained kind's activation ID, even when c is absent.
+				for {
+					collision := false
+					for _, item := range e.state.Deliveries {
+						if item.ConditionKey == key && item.ID == deliveryID(key, item.Kind, firstSeen) {
+							collision = true
+							break
+						}
+					}
+					if !collision {
+						break
+					}
+					if firstSeen.Before(now) {
+						firstSeen = now
+					} else {
+						firstSeen = firstSeen.Add(time.Nanosecond)
+					}
 				}
 				c = &condition{Key: key, FirstSeen: firstSeen, Active: true}
 				e.state.Conditions[key] = c
@@ -395,14 +452,30 @@ func (e *Engine) ScanOnce(ctx context.Context) {
 		}
 	}
 	for id, item := range e.state.Deliveries {
-		stamp := item.CreatedAt
-		if !item.DeliveredAt.IsZero() {
+		c := e.state.Conditions[item.ConditionKey]
+		currentActivation := c != nil && item.ID == deliveryID(c.Key, item.Kind, c.FirstSeen)
+		if item.Kind != "recovery" && item.DeliveredAt.IsZero() && (!currentActivation || !c.Active) {
+			delete(e.state.Deliveries, id) // obsolete alarms must not outlive their activation
+			continue
+		}
+		if currentActivation && c.Active {
+			continue // pin delivered and dead-letter dedupe markers while active
+		}
+		if item.InactiveAt.IsZero() {
+			item.InactiveAt = now
+			if currentActivation {
+				item.InactiveAt = c.LastSeen
+			}
+		}
+		stamp := item.InactiveAt
+		if item.DeliveredAt.After(stamp) {
 			stamp = item.DeliveredAt
 		}
 		if now.Sub(stamp) > retention {
 			delete(e.state.Deliveries, id)
 		}
 	}
+	e.refreshDeliveryErrorLocked()
 	e.state.LastScan = now
 	if err := e.persistLocked(); err != nil {
 		e.markPersistFailureLocked("persist notification queue", err, now)
@@ -413,7 +486,8 @@ func (e *Engine) ScanOnce(ctx context.Context) {
 
 	due := make([]delivery, 0)
 	for _, item := range e.state.Deliveries {
-		if item.DeliveredAt.IsZero() && !item.DeadLetter && !item.NextAttempt.After(now) {
+		if item.DeliveredAt.IsZero() && !item.DeadLetter && !item.NextAttempt.After(now) &&
+			e.deliveryAllowedLocked(item, current, recoveryReady, sourceReady, acked, maintenance) {
 			due = append(due, *item)
 		}
 	}
@@ -425,37 +499,50 @@ func (e *Engine) ScanOnce(ctx context.Context) {
 		e.mu.Unlock()
 		return
 	}
-	for i := range due {
-		if current := e.state.Deliveries[due[i].ID]; current != nil {
-			current.Attempts++
-			due[i].Attempts = current.Attempts
-		}
-	}
-	if err := e.persistLocked(); err != nil { // persist claim before outbound side effect
-		for i := range due {
-			if current := e.state.Deliveries[due[i].ID]; current != nil && current.Attempts > 0 {
-				current.Attempts--
-			}
-		}
-		e.markPersistFailureLocked("persist notification delivery claim", err, now)
-		e.mu.Unlock()
-		e.logf("error", "notify", "notification attempt claim persistence failed; outbound delivery skipped")
-		return
-	}
 	e.mu.Unlock()
 	sem := make(chan struct{}, maxDeliveryConcurrency)
 	var deliveries sync.WaitGroup
+	defer deliveries.Wait()
 	for _, queued := range due {
 		item := queued
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		// Refresh after acquiring a slot, not while waiting for one. The
+		// callbacks run serially here, outside mu. A send uses the latest
+		// observed policy before its durable claim; external transitions after
+		// this check (including already-started requests) cannot be unsent.
+		current, recoveryReady, sourceReady, acked, maintenance, err := e.readPolicy()
+		e.mu.Lock()
+		currentItem := e.state.Deliveries[item.ID]
+		if err != nil {
+			e.silenceFault = "operator acknowledgement/maintenance state is unavailable"
+			e.mu.Unlock()
+			<-sem
+			return
+		}
+		if ctx.Err() != nil || currentItem == nil ||
+			!e.deliveryAllowedLocked(currentItem, current, recoveryReady, sourceReady, acked, maintenance) {
+			e.mu.Unlock()
+			<-sem
+			continue // policy-skipped work consumes neither attempts nor backoff
+		}
+		currentItem.Attempts++
+		if err := e.persistLocked(); err != nil { // durable claim before outbound side effect
+			currentItem.Attempts--
+			e.markPersistFailureLocked("persist notification delivery claim", err, e.now().UTC())
+			e.mu.Unlock()
+			<-sem
+			e.logf("error", "notify", "notification attempt claim persistence failed; outbound delivery skipped")
+			return
+		}
+		e.mu.Unlock()
 		deliveries.Add(1)
 		go func() {
 			defer deliveries.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				return
-			}
+			defer func() { <-sem }()
 			status, sendErr := e.sender.SendWebhook(ctx, cfg.WebhookURL, item.Message, item.ID)
 			finished := e.now().UTC()
 			e.mu.Lock()
@@ -498,7 +585,6 @@ func (e *Engine) ScanOnce(ctx context.Context) {
 			e.mu.Unlock()
 		}()
 	}
-	deliveries.Wait()
 }
 
 func (e *Engine) Test(ctx context.Context, target string) (int, error) {

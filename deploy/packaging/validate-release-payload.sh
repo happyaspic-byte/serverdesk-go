@@ -45,6 +45,7 @@ case "$platform" in
     for path in deploy/packaging/install-linux.sh deploy/packaging/update-linux.sh \
       deploy/packaging/uninstall-linux.sh deploy/packaging/serverdesk-network.sh \
       deploy/packaging/serverdesk-endpoint.sh deploy/packaging/serverdesk-collector-preflight.sh \
+      deploy/packaging/serverdesk-deployment-lock.sh \
       deploy/serverdesk.service deploy/serverdesk-net.service; do
       [ -f "$stage/$path" ] || { echo "missing Linux payload: $path" >&2; exit 1; }
     done

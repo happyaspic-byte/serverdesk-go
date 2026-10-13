@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -591,19 +593,29 @@ type stormSender struct {
 	calls     int
 	active    int
 	maxActive int
+	full      chan struct{}
 }
 
 func (s *stormSender) ValidateNotifyTarget(string) error { return nil }
 
-func (s *stormSender) SendWebhook(context.Context, string, string, string) (int, error) {
+func (s *stormSender) SendWebhook(ctx context.Context, _ string, _ string, _ string) (int, error) {
 	s.mu.Lock()
 	s.calls++
+	firstWave := s.calls <= maxDeliveryConcurrency
 	s.active++
 	if s.active > s.maxActive {
 		s.maxActive = s.active
 	}
+	if s.calls == maxDeliveryConcurrency {
+		close(s.full)
+	}
 	s.mu.Unlock()
-	time.Sleep(5 * time.Millisecond)
+	if firstWave {
+		select {
+		case <-s.full:
+		case <-ctx.Done():
+		}
+	}
 	s.mu.Lock()
 	s.active--
 	s.mu.Unlock()
@@ -616,7 +628,7 @@ func TestAlarmStormUsesBoundedBatchAndConcurrency(t *testing.T) {
 	for i := range signals {
 		signals[i] = Signal{Key: fmt.Sprintf("alert:%03d", i), Host: fmt.Sprintf("node-%03d", i), Description: "critical"}
 	}
-	sender := &stormSender{}
+	sender := &stormSender{full: make(chan struct{})}
 	engine, err := New(Options{
 		StateDir: t.TempDir(), Config: enabledConfig(), Sender: sender,
 		Source: func() ([]Signal, bool) { return signals, true },
@@ -625,7 +637,9 @@ func TestAlarmStormUsesBoundedBatchAndConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.ScanOnce(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	engine.ScanOnce(ctx)
 	sender.mu.Lock()
 	calls, maxActive := sender.calls, sender.maxActive
 	sender.mu.Unlock()
@@ -669,6 +683,476 @@ func TestParallelSuccessDoesNotHidePendingDeliveryFailure(t *testing.T) {
 	if status["healthy"] != false || status["pending"] != 1 ||
 		!strings.Contains(status["last_error"].(string), "failing condition") {
 		t.Fatalf("parallel delivery status = %#v", status)
+	}
+}
+
+func TestPendingDeliveryRechecksLifecycleAcrossRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, change     string
+		wantCalls, wantPending int
+	}{
+		{"initial maintenance", "critical", "maintenance", 1, 1},
+		{"initial ACK", "critical", "ack", 2, 0},
+		{"initial recovery", "critical", "recovery", 1, 0},
+		{"escalation maintenance", "escalation", "maintenance", 2, 1},
+		{"escalation ACK", "escalation", "ack", 2, 1},
+		{"escalation recovery", "escalation", "recovery", 3, 0},
+		{"escalation offline", "escalation", "offline", 3, 0},
+	} {
+		for _, restart := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/restart=%t", tc.name, restart), func(t *testing.T) {
+				now := time.Date(2026, 8, 24, 19, 0, 0, 0, time.UTC)
+				signals := []Signal{{Key: "alert:lifecycle", Host: "node-a", AckKey: "ack-a", Description: "power lost", StartedAt: now.Add(-5 * time.Hour)}}
+				ready := true
+				acked, maintenance := map[string]bool{}, map[string]bool{}
+				sender := &fakeSender{}
+				cfg := enabledConfig()
+				cfg.EscalationHours = 4
+				opts := Options{
+					StateDir: t.TempDir(), Config: cfg, Sender: sender,
+					Source:  func() ([]Signal, bool) { return signals, ready },
+					Silence: func() (map[string]bool, map[string]bool) { return acked, maintenance },
+					Now:     func() time.Time { return now },
+				}
+				engine, err := New(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.kind == "escalation" {
+					engine.ScanOnce(context.Background())
+				}
+				sender.failures = 1
+				engine.ScanOnce(context.Background())
+				failedID := sender.ids[len(sender.ids)-1]
+				switch tc.change {
+				case "maintenance":
+					maintenance["node-a"] = true
+				case "ack":
+					acked["ack-a"] = true
+				case "recovery":
+					signals = nil
+				case "offline":
+					signals, ready = nil, false
+				}
+				if restart {
+					engine, err = New(opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				now = now.Add(2 * time.Second)
+				engine.ScanOnce(context.Background())
+				if len(sender.calls) != tc.wantCalls || engine.Status()["pending"] != tc.wantPending {
+					t.Fatalf("calls=%#v status=%#v", sender.calls, engine.Status())
+				}
+				if tc.change == "recovery" && tc.kind == "escalation" && !strings.Contains(sender.calls[2], "RECOVERED") {
+					t.Fatalf("stale escalation instead of recovery: %#v", sender.calls)
+				}
+				if tc.change == "offline" && engine.Status()["active_conditions"] != 1 {
+					t.Fatalf("offline source falsely recovered: %#v", engine.Status())
+				}
+				if tc.wantPending == 1 {
+					item := engine.state.Deliveries[failedID]
+					if item == nil || item.Attempts != 1 || item.DeadLetter || !item.NextAttempt.Equal(now) {
+						t.Fatalf("paused retry consumed attempt/backoff: %#v", item)
+					}
+					delete(maintenance, "node-a")
+					delete(acked, "ack-a")
+					engine.ScanOnce(context.Background())
+					if len(sender.calls) != tc.wantCalls+1 || sender.ids[len(sender.ids)-1] != failedID {
+						t.Fatalf("paused retry lost identity/backoff: %#v ids=%#v", sender.calls, sender.ids)
+					}
+				}
+			})
+		}
+	}
+}
+
+type slotPolicySender struct {
+	mu      sync.Mutex
+	calls   int
+	block   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *slotPolicySender) ValidateNotifyTarget(string) error { return nil }
+func (s *slotPolicySender) SendWebhook(ctx context.Context, _ string, _ string, _ string) (int, error) {
+	s.mu.Lock()
+	s.calls++
+	block := s.block
+	s.mu.Unlock()
+	if block {
+		s.entered <- struct{}{}
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return 204, nil
+}
+
+func TestQueuedConcurrencySlotRechecksACKWithoutConsumingAttempt(t *testing.T) {
+	now := time.Date(2026, 8, 24, 19, 30, 0, 0, time.UTC)
+	signals := make([]Signal, 9)
+	for i := range signals {
+		signals[i] = Signal{Key: fmt.Sprintf("slot:%d", i), Host: "node-a", AckKey: "ack-a", StartedAt: now.Add(-5 * time.Hour)}
+	}
+	var policyMu sync.Mutex
+	acked := false
+	sender := &slotPolicySender{entered: make(chan struct{}, 9), release: make(chan struct{})}
+	cfg := enabledConfig()
+	cfg.EscalationHours = 4
+	engine, err := New(Options{
+		StateDir: t.TempDir(), Config: cfg, Sender: sender,
+		Source: func() ([]Signal, bool) { return signals, true },
+		Silence: func() (map[string]bool, map[string]bool) {
+			policyMu.Lock()
+			defer policyMu.Unlock()
+			return map[string]bool{"ack-a": acked}, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.ScanOnce(context.Background())
+	sender.mu.Lock()
+	sender.block = true
+	sender.mu.Unlock()
+	done := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() { cancel(); <-done }()
+	go func() { engine.ScanOnce(ctx); close(done) }()
+	for i := 0; i < 8; i++ {
+		select {
+		case <-sender.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("delivery slots did not fill")
+		}
+	}
+	policyMu.Lock()
+	acked = true
+	policyMu.Unlock()
+	close(sender.release)
+	<-done
+	sender.mu.Lock()
+	calls := sender.calls
+	sender.mu.Unlock()
+	if calls != 17 || engine.Status()["pending"] != 1 {
+		t.Fatalf("queued stale escalation sent: calls=%d status=%#v", calls, engine.Status())
+	}
+	for _, item := range engine.state.Deliveries {
+		if item.DeliveredAt.IsZero() && (item.Attempts != 0 || !item.NextAttempt.Equal(now) || item.DeadLetter) {
+			t.Fatalf("policy skip consumed retry: %#v", item)
+		}
+	}
+}
+
+func TestScanCancellationWhileWaitingForSlotJoinsClaims(t *testing.T) {
+	now := time.Date(2026, 8, 24, 19, 35, 0, 0, time.UTC)
+	signals := make([]Signal, 9)
+	for i := range signals {
+		signals[i] = Signal{Key: fmt.Sprintf("cancel:%d", i)}
+	}
+	sender := &slotPolicySender{block: true, entered: make(chan struct{}, 9), release: make(chan struct{})}
+	engine, err := New(Options{
+		StateDir: t.TempDir(), Config: enabledConfig(), Sender: sender,
+		Source: func() ([]Signal, bool) { return signals, true }, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	done := make(chan struct{})
+	defer func() { cancel(); <-done }()
+	go func() { engine.ScanOnce(ctx); close(done) }()
+	for i := 0; i < 8; i++ {
+		select {
+		case <-sender.entered:
+		case <-ctx.Done():
+			t.Fatal("delivery slots did not fill")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled scan did not join deliveries")
+	}
+	if !engine.scanMu.TryLock() {
+		t.Fatal("cancelled scan retained scan mutex")
+	}
+	engine.scanMu.Unlock()
+	sender.mu.Lock()
+	calls := sender.calls
+	sender.mu.Unlock()
+	if calls != 8 {
+		t.Fatalf("cancelled ninth request started: calls=%d", calls)
+	}
+	claims := 0
+	for _, item := range engine.state.Deliveries {
+		claims += item.Attempts
+		if item.Attempts == 1 && (item.LastError == "" || !item.NextAttempt.Equal(now.Add(2*time.Second))) {
+			t.Fatalf("started delivery result not recorded: %#v", item)
+		}
+	}
+	if claims != 8 {
+		t.Fatalf("unsent request durably claimed: claims=%d", claims)
+	}
+}
+
+func TestPartialClaimFailureJoinsStartedDelivery(t *testing.T) {
+	now := time.Date(2026, 8, 24, 19, 40, 0, 0, time.UTC)
+	sender := &blockingTargetSender{entered: make(chan struct{}), release: make(chan struct{})}
+	engine, err := New(Options{
+		StateDir: t.TempDir(), Config: enabledConfig(), Sender: sender,
+		Source: func() ([]Signal, bool) { return []Signal{{Key: "claim:first"}, {Key: "claim:second"}}, true },
+		Now:    func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistCalls := 0
+	failed := make(chan struct{})
+	engine.persistHook = func() error {
+		persistCalls++
+		if persistCalls == 3 {
+			close(failed)
+			return errors.New("second claim failed")
+		}
+		return nil
+	}
+	done := make(chan struct{})
+	defer func() {
+		select {
+		case <-sender.release:
+		default:
+			close(sender.release)
+		}
+		<-done
+	}()
+	go func() { engine.ScanOnce(context.Background()); close(done) }()
+	select {
+	case <-failed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second claim did not fail")
+	}
+	select {
+	case <-done:
+		t.Fatal("scan returned before joining started delivery")
+	default:
+	}
+	close(sender.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scan did not join successful delivery")
+	}
+	if status := engine.Status(); status["delivered_retained"] != 1 || status["pending"] != 1 {
+		t.Fatalf("partial claim lost delivery result: %#v", status)
+	}
+	for _, item := range engine.state.Deliveries {
+		if item.DeliveredAt.IsZero() && item.Attempts != 0 {
+			t.Fatalf("failed claim consumed attempt: %#v", item)
+		}
+	}
+}
+
+func TestRecurrenceWithSameStartedAtGetsNewActivation(t *testing.T) {
+	now := time.Date(2026, 8, 24, 19, 45, 0, 0, time.UTC)
+	signals := []Signal{{Key: "recurring", Host: "node-a", StartedAt: now}}
+	original := signals[0]
+	sender := &fakeSender{}
+	engine, err := New(Options{
+		StateDir: t.TempDir(), Config: enabledConfig(), Sender: sender,
+		Source: func() ([]Signal, bool) { return signals, true }, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.ScanOnce(context.Background())
+	signals = nil
+	engine.ScanOnce(context.Background())
+	signals = []Signal{original}
+	engine.ScanOnce(context.Background())
+	if len(sender.calls) != 3 || sender.ids[2] == sender.ids[0] {
+		t.Fatalf("same StartedAt recurrence deduped: calls=%#v ids=%#v", sender.calls, sender.ids)
+	}
+}
+
+func TestRecurrenceAfterConditionPruningDoesNotReuseRetainedRecovery(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart=%t", restart), func(t *testing.T) {
+			now := time.Date(2026, 8, 24, 22, 0, 0, 0, time.UTC)
+			signal := Signal{Key: "pruned-recurrence", Host: "node-a", StartedAt: now}
+			signals := []Signal{signal}
+			sender := &fakeSender{}
+			opts := Options{
+				StateDir: t.TempDir(), Config: enabledConfig(), Sender: sender,
+				Source: func() ([]Signal, bool) { return signals, true }, Now: func() time.Time { return now },
+			}
+			engine, err := New(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.ScanOnce(context.Background())
+			signals = nil
+			sender.failures = 1
+			engine.ScanOnce(context.Background())
+			now = now.Add(29 * 24 * time.Hour)
+			engine.ScanOnce(context.Background()) // delayed recovery succeeds
+			now = now.Add(2 * 24 * time.Hour)
+			engine.ScanOnce(context.Background())
+			if engine.state.Conditions[signal.Key] != nil || engine.Status()["delivered_retained"] != 1 {
+				t.Fatalf("fixture did not prune condition while retaining late recovery: %#v", engine.Status())
+			}
+			if restart {
+				engine, err = New(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			signals = []Signal{signal}
+			engine.ScanOnce(context.Background())
+			if len(sender.calls) != 4 || sender.ids[3] == sender.ids[0] {
+				t.Fatalf("recurrence reused retained activation: calls=%#v ids=%#v", sender.calls, sender.ids)
+			}
+			signals = nil
+			engine.ScanOnce(context.Background())
+			if len(sender.calls) != 5 || sender.ids[4] == sender.ids[2] || !strings.Contains(sender.calls[4], "RECOVERED") {
+				t.Fatalf("second recovery suppressed by retained marker: calls=%#v ids=%#v", sender.calls, sender.ids)
+			}
+		})
+	}
+}
+
+func TestLegacyDeliveryWithoutInactiveAtUsesResolutionRetention(t *testing.T) {
+	now := time.Date(2026, 8, 24, 22, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	// Version 1 fixture predates inactive_at. The initial delivery is old, but
+	// resolution is recent; migration must not immediately discard its history.
+	fixture := `{
+		"version": 1,
+		"conditions": {"legacy": {"key": "legacy", "host": "node-a", "first_seen": "2026-06-01T00:00:00Z", "last_seen": "2026-08-23T22:00:00Z", "active": false}},
+		"deliveries": {"%s": {"id": "%s", "condition_key": "legacy", "kind": "critical", "created_at": "2026-06-01T00:00:00Z", "next_attempt": "2026-06-01T00:00:00Z", "attempts": 1, "delivered_at": "2026-06-01T00:00:00Z"}}
+	}`
+	id := deliveryID("legacy", "critical", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	if err := os.WriteFile(filepath.Join(dir, "notification-state.json"), []byte(fmt.Sprintf(fixture, id, id)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sender := &fakeSender{}
+	opts := Options{
+		StateDir: dir, Config: enabledConfig(), Sender: sender,
+		Source: func() ([]Signal, bool) { return nil, true }, Now: func() time.Time { return now },
+	}
+	engine, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.ScanOnce(context.Background())
+	if engine.Status()["delivered_retained"] != 1 || len(sender.calls) != 0 {
+		t.Fatalf("legacy inactive history discarded or resent: %#v calls=%#v", engine.Status(), sender.calls)
+	}
+	engine, err = New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(30 * 24 * time.Hour)
+	engine.ScanOnce(context.Background())
+	if engine.Status()["delivered_retained"] != 0 || len(engine.state.Conditions) != 0 || len(sender.calls) != 0 {
+		t.Fatalf("legacy inactive history leaked after restart: %#v calls=%#v", engine.Status(), sender.calls)
+	}
+}
+
+func TestActiveDeliveryDedupeSurvivesRetentionAndRestart(t *testing.T) {
+	for _, deadLetter := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deadLetter=%t", deadLetter), func(t *testing.T) {
+			now := time.Date(2026, 8, 24, 20, 0, 0, 0, time.UTC)
+			sender := &fakeSender{}
+			cfg := enabledConfig()
+			if deadLetter {
+				sender.failures, cfg.RetryMax = 1, 1
+			}
+			cfg.EscalationHours = 4
+			opts := Options{
+				StateDir: t.TempDir(), Config: cfg, Sender: sender,
+				Source: func() ([]Signal, bool) {
+					return []Signal{{Key: "long-lived", Host: "node-a", Description: "critical", StartedAt: now.Add(-5 * time.Hour)}}, true
+				},
+				Now: func() time.Time { return now },
+			}
+			engine, err := New(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.ScanOnce(context.Background())
+			engine.ScanOnce(context.Background())
+			want := len(sender.calls)
+			now = now.Add(31 * 24 * time.Hour)
+			engine.ScanOnce(context.Background())
+			engine, err = New(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.ScanOnce(context.Background())
+			engine.ScanOnce(context.Background())
+			if len(sender.calls) != want {
+				t.Fatalf("active markers expired; calls=%#v", sender.calls)
+			}
+			if deadLetter && engine.Status()["dead_letter"] != 1 {
+				t.Fatalf("active dead letter expired: %#v", engine.Status())
+			}
+		})
+	}
+}
+
+func TestResolvedDeliveryRetentionAndRecurrence(t *testing.T) {
+	now := time.Date(2026, 8, 24, 21, 0, 0, 0, time.UTC)
+	signal := Signal{Key: "recurring", Host: "node-a", AckKey: "ack-a", Description: "critical", StartedAt: now}
+	signals := []Signal{signal}
+	maintenance := map[string]bool{}
+	sender := &fakeSender{}
+	opts := Options{
+		StateDir: t.TempDir(), Config: enabledConfig(), Sender: sender,
+		Source:  func() ([]Signal, bool) { return signals, true },
+		Silence: func() (map[string]bool, map[string]bool) { return map[string]bool{"ack-a": true}, maintenance },
+		Now:     func() time.Time { return now },
+	}
+	engine, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.ScanOnce(context.Background())
+	now = now.Add(31 * 24 * time.Hour)
+	signals, maintenance["node-a"] = nil, true
+	sender.failures = 1
+	engine.ScanOnce(context.Background())
+	now = now.Add(2 * time.Second)
+	engine, err = New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.ScanOnce(context.Background())
+	if len(sender.calls) != 3 || !strings.Contains(sender.calls[2], "RECOVERED") {
+		t.Fatalf("valid recovery retry suppressed: %#v", sender.calls)
+	}
+	if engine.Status()["delivered_retained"] != 2 {
+		t.Fatalf("resolved initial expired before inactive retention: %#v", engine.Status())
+	}
+	delete(maintenance, "node-a")
+	signals = []Signal{signal} // collector reuses its old StartedAt; activation must still be new
+	engine.ScanOnce(context.Background())
+	if len(sender.calls) != 4 || sender.ids[0] == sender.ids[3] || !strings.Contains(sender.calls[3], "CRITICAL") {
+		t.Fatalf("recurrence was deduped against old activation: calls=%#v ids=%#v", sender.calls, sender.ids)
+	}
+	signals = nil
+	engine.ScanOnce(context.Background())
+	now = now.Add(31 * 24 * time.Hour)
+	engine.ScanOnce(context.Background())
+	if engine.Status()["delivered_retained"] != 0 || engine.Status()["active_conditions"] != 0 {
+		t.Fatalf("inactive history not pruned: %#v", engine.Status())
 	}
 }
 

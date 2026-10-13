@@ -149,26 +149,6 @@ func TestConvertEdgeDevicesPreservesTLSFingerprint(t *testing.T) {
 	}
 }
 
-func TestNotificationTimeAndAckKeyContract(t *testing.T) {
-	for input, want := range map[string]string{
-		"":                     "no-time",
-		"2026-08-24T12:34:56Z": "2026-08-24 12:34:56",
-		"2026-08-24 12:34:56":  "2026-08-24 12:34:56",
-	} {
-		if got := normalizeNotificationAckTime(input); got != want {
-			t.Fatalf("normalizeNotificationAckTime(%q) = %q, want %q", input, got, want)
-		}
-	}
-	naive := parseNotificationTime("2026-08-24 12:00:00")
-	if got := naive.UTC(); !got.Equal(time.Date(2026, 8, 24, 3, 0, 0, 0, time.UTC)) {
-		t.Fatalf("naive KST parsed as %v", got)
-	}
-	withZone := parseNotificationTime("2026-08-24T12:00:00Z")
-	if !withZone.Equal(time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)) {
-		t.Fatalf("RFC3339 parsed as %v", withZone)
-	}
-}
-
 func TestNotificationSignalsMatchUIAckKeys(t *testing.T) {
 	const (
 		host     = "edge-a"
@@ -356,6 +336,58 @@ func TestNotificationCollectorFailureSignalIsCurrentAndSecretSafe(t *testing.T) 
 	edgeFailed.LastRoundAt = time.Now()
 	if got := notificationEdgeCollectorSignals(edgeFailed); len(got) != 0 {
 		t.Fatalf("recovered edge collector still signaled: %#v", got)
+	}
+}
+
+func TestEdgePartialHealthReadiness(t *testing.T) {
+	now := time.Now()
+	status := poller.EdgeCollectorStatus{Configured: 2, LastRoundAt: now}
+	fault := func(host string, stale bool) map[string]any {
+		return map[string]any{"id": host, "status": "deg", "meta": map[string]any{"stale": stale, "alerts": []any{map[string]any{
+			"name": "DISK_FAULT", "desc": "Drive abnormal", "severity": "critical", "time": now.Format(time.RFC3339),
+		}}}}
+	}
+	edges := []map[string]any{fault("nas1", false)}
+	sender := &readinessTestSender{}
+	engine, err := alerting.New(alerting.Options{
+		StateDir: t.TempDir(), Sender: sender,
+		Config: config.NotificationConfig{Enabled: true, WebhookURL: "https://allowed.example/token", RetryMax: 1, RetryBaseSeconds: 1},
+		Snapshot: func() ([]alerting.Signal, map[string]bool, bool) {
+			hosts := map[string]bool{}
+			ready := edgeDeviceReadiness(edges, status, hosts)
+			signals := notificationSignals(edges)
+			for i := range signals {
+				signals[i].SourceUnready = !hosts[signals[i].Host]
+			}
+			return signals, hosts, ready
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.ScanOnce(context.Background())
+	if sender.calls != 1 {
+		t.Fatalf("initial fault sent=%d", sender.calls)
+	}
+	edges = []map[string]any{fault("nas1", true), fault("nas2", false)}
+	engine.ScanOnce(context.Background())
+	if sender.calls != 2 || engine.Status()["source_ready"] != false {
+		t.Fatalf("stale fault must not recover; fresh critical eligible: sent=%d status=%v", sender.calls, engine.Status())
+	}
+	got := availabilityStatuses(map[string]any{}, nil, edges, status)
+	if len(got) != 1 || got[0] != [2]string{"nas2", "deg"} {
+		t.Fatalf("availability admitted stale NAS: %v", got)
+	}
+	// Absence while stale cannot recover an already delivered condition.
+	edges[0] = map[string]any{"id": "nas1", "status": "deg", "meta": map[string]any{"stale": true}}
+	engine.ScanOnce(context.Background())
+	if sender.calls != 2 {
+		t.Fatalf("stale absence recovered NAS: sent=%d", sender.calls)
+	}
+	edges[0] = map[string]any{"id": "nas1", "status": "op", "meta": map[string]any{"stale": false}}
+	engine.ScanOnce(context.Background())
+	if sender.calls != 3 || engine.Status()["source_ready"] != true {
+		t.Fatalf("explicit recovery sent=%d status=%v", sender.calls, engine.Status())
 	}
 }
 

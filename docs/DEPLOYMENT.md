@@ -1,9 +1,17 @@
 # Serverdesk production deployment
 
 이 문서는 Linux/systemd 고객 설치의 보안 경계, 장비 credential 이관, 선택적 네트워크 준비,
-검증 및 롤백 절차를 정의한다. 설치·업데이트 스크립트는 프로젝트 루트에서 실행한다.
+검증 및 롤백 절차를 정의한다. 설치·업데이트 스크립트는 검증된 root-owned package staging의 루트에서 실행한다.
+이 문서의 실제 호스트 작업은 운영자 절차이며, 현재 검증은 rootless/static/mock에 한정된다.
 
 ## 1. 설치·업데이트·제거
+
+먼저 `docs/RELEASE.md` 절차로 archive checksum과 repository/tag provenance를 검증한다.
+검증한 package만 root-owned staging directory(예: `/root/serverdesk-package`)에 배치하고
+그 directory에서 실행한다. Sourced deployment lock helper는 root:root 소유, single-link,
+mode 0600/0644/0700/0755여야 하며 모든 parent는 root-owned, group/world non-writable,
+non-symlink여야 한다. 사용자 소유 extraction이나 `/tmp` staging은 mutation 전에 거부한다.
+고객 state/vendor tree 전체를 chown하지 않는다. 이 경계는 checksum/provenance 검증을 대체하지 않는다.
 
 ```bash
 sudo sh deploy/packaging/install-linux.sh
@@ -11,6 +19,12 @@ sudo sh deploy/packaging/update-linux.sh
 sudo sh deploy/packaging/uninstall-linux.sh
 sudo sh deploy/packaging/uninstall-linux.sh --full
 ```
+
+Install/update/uninstall은 root-only이며 `flock`이 없으면 fail closed한다.
+`/run/lock/serverdesk-deploy/transaction.lock`의 shared exclusive lock은 validation부터
+rollback/cleanup 종료까지 유지한다. Lock file은 release 때 삭제하지 않는다.
+`update-linux.sh`는 lock ownership 환경변수 없이 installer `--update`로 exec하여 nested lock을 피한다.
+`serverdesk-deployment-lock` helper는 `/opt/serverdesk`에 설치되며 일반 제거에서도 삭제한다.
 
 `update-linux.sh`는 별도 축약 경로가 아니라 idempotent installer를 재사용한다. installer는 패키지
 자산과 기존 파일 권한을 먼저 검사하고, 실행 중이던 서비스를 멈춘 뒤 바이너리와 두 systemd unit을
@@ -125,6 +139,38 @@ helper는 설정을 shell로 source/eval하지 않고 허용된 key·문자·IPv
 redirect rule에는 `serverdesk-managed-trap-redirect` 소유권 comment를 붙여 중복 생성을 막는다.
 apply 시 새로 만든 주소와 rule만 root-only state에 소유 자원으로 기록하며, 기존 자원은 절대 인수하지
 않는다. 재적용은 기존 소유권을 보존하고 stop/uninstall은 이 state에 기록된 자원만 제거한다.
+Ownership journal은 `/var/lib/serverdesk-net/applied.env`(root:root 0600), parent 0700에 유지한다.
+StateDirectory는 failed stop/reboot에도 보존된다. 삭제나 조회가 실패하면 nonzero로 종료하고
+journal/helper/unit을 보존하여 retry한다. 자원 부재를 실제 조회로 확인한 뒤에만 journal을 지운다.
+Upgrade/reinstall은 old unit을 멈추기 전에 `/run/serverdesk-net/applied.env`를 persistent journal로
+이관한다. 두 journal이 다르면 자동 overwrite하지 않는다. 이미 사라진 legacy journal의 ownership은
+추측할 수 없으므로 operator 확인이 필요하다. Journal이 없으면 expected config의 자원을 조회하며,
+남아 있는 자원을 인수/삭제하지 않고 uninstall을 실패시킨다. Legacy rollback이 old service를 재시작하며
+`/run` journal을 다시 만들면 installer는 즉시 persistent 위치에 복사한다. 이 복사가 실패하면
+rollback 실패로 보고 recovery 정보를 보존한다. 보존된 backup/journal은 운영자가 복구를 확인하기 전
+임의로 지우지 않는다. 실제 systemd migration/network/UAT는 mock 검증과 별개다.
+
+### Legacy trap history 이관
+
+Trap persistence 기본값은 `runtime_dir` 아래 `traps.jsonl`이다. `trap.persist` 상대경로는 runtime 밖으로
+탈출할 수 없고, canonical absolute path는 보호된 private 위치에서만 허용된다. `.`/`..` 성분,
+symlink 경로, hardlink file, service 이외 소유 file, 공개된 immediate parent는 거부하며 daemon은
+기존 경로에 chmod/chown을 적용하지 않는다. Unix immediate parent는 service-owned이고 group/other
+권한이 없어야 한다(새 directory 0700, 새 file 0600). 상위 경로도 검증한다. Windows 경로 검증은
+structural-only이며 ACL 검증/상용 승인을 대신하지 않는다.
+
+공개된 legacy trap 경로를 쓰던 운영자는 다음 순서로 이관한다.
+
+1. 서비스를 멈추고 현재 `runtime_dir`/`trap.persist`, 실제 소유권, symlink/hardlink 여부를 확인한다.
+   기존 이력은 community를 포함할 수 있으므로 내용 출력/공유 없이 접근 제한된 offline backup을 만든다.
+2. 기존 고객 tree 전체의 권한을 바꾸지 말고 서비스 전용 private directory를 별도로 준비한다.
+   검증된 regular, single-link history만 새 위치에 service-owned 0600 사본으로 배치한다.
+   새 경로와 모든 ancestor의 안전성을 확인한다. 예: private runtime 안의 `traps/traps.jsonl`.
+3. `trap.persist`를 새 canonical 경로로 바꾸고 재시작한다. unsafe path 거부 메시지, 이력 복원,
+   새 저장 file의 소유권/권한을 확인한다. 경로 거부는 receiver 비활성화 또는 persistence 거부로 이어질 수 있다.
+4. 새 저장/표시·복원 데이터에서는 community가 제거되지만 기존 disk backup은 자동 정리되지 않는다.
+   성공적인 rewrite 확인 후 legacy file/backup의 보존·폐기는 승인된 비밀 보존 정책에 따른다.
+   이관만으로 이전 노출이 해소되었다고 간주하지 않는다.
 
 ## 5. 배포 전 정적 검증
 

@@ -57,7 +57,8 @@ func finsReq(ctx context.Context, ip string, port int, cmd []byte, sa1 byte, tim
 		return nil, 0
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	stop := bindSocketContext(ctx, conn, timeout)
+	defer stop()
 	t0 := time.Now()
 	if _, err := conn.Write(frame); err != nil {
 		return nil, 0

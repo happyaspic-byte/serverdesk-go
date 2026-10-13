@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -50,8 +51,25 @@ var (
 )
 
 func bodyStr(body map[string]any, key string) string {
+	return strings.TrimSpace(bodyPassword(body, key))
+}
+
+// Passwords are opaque credentials; whitespace is significant.
+func bodyPassword(body map[string]any, key string) string {
 	s, _ := body[key].(string)
-	return strings.TrimSpace(s)
+	return s
+}
+
+func plcPort(body map[string]any) (int, error) {
+	value, present := body["fins_port"]
+	if !present {
+		return 9600, nil
+	}
+	number, ok := value.(float64)
+	if !ok || number < 1 || number > 65535 || math.Trunc(number) != number {
+		return 0, errors.New("fins_port must be an integer number between 1 and 65535")
+	}
+	return int(number), nil
 }
 
 // findClusterState 는 key 의 FT 클러스터 상태를 찾는다.
@@ -460,6 +478,33 @@ func (s *Server) doPut(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 
+	unsupported := []string{}
+	for k := range body {
+		if k == "key" || k == "mgmt" { // Legacy identity fields; mgmt was checked above.
+			continue
+		}
+		allowed := false
+		for _, field := range editFields {
+			if k == field {
+				allowed = true
+				break
+			}
+		}
+		if k == "vendor" && st == nil {
+			allowed = true
+		}
+		if !allowed {
+			unsupported = append(unsupported, k)
+		}
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		s.send(w, r, http.StatusBadRequest, map[string]any{
+			"error": "표시 메타만 수정 가능합니다 — 지원하지 않는 필드: " + strings.Join(unsupported, ", ") + "; config.local.json 수정 후 재시작",
+		})
+		return
+	}
+
 	if st == nil {
 		if _, present := body["vendor"]; present { // 엣지는 vendor 도 표시 필드
 			fields["vendor"] = bodyStr(body, "vendor")
@@ -648,6 +693,12 @@ func (s *Server) doPost(w http.ResponseWriter, r *http.Request, path string) {
 		s.send(w, r, 400, map[string]any{"error": "JSON 본문이 필요합니다"})
 		return
 	}
+	if strings.EqualFold(bodyStr(body, "type"), "PLC") {
+		if _, err := plcPort(body); err != nil {
+			s.send(w, r, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+	}
 	if path == "/api/clusters/test" {
 		s.send(w, r, 200, s.connTest(r.Context(), body))
 		return
@@ -702,11 +753,11 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 		if v := bodyStr(body, "admin_user"); v != "" {
 			entry["admin_user"] = v
 		}
-		if v := bodyStr(body, "admin_pass"); v != "" {
+		if v := bodyPassword(body, "admin_pass"); v != "" {
 			entry["admin_password"] = v
 			config.RegisterSecret(v)
 		}
-		if v := bodyStr(body, "root_pass"); v != "" {
+		if v := bodyPassword(body, "root_pass"); v != "" {
 			entry["node_root_password"] = v
 			config.RegisterSecret(v)
 		}
@@ -720,9 +771,9 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 			if v := bodyStr(body, fmt.Sprintf("node%d_user", i)); v != "" {
 				nd["ssh_user"] = v
 			}
-			np := bodyStr(body, fmt.Sprintf("node%d_pass", i))
+			np := bodyPassword(body, fmt.Sprintf("node%d_pass", i))
 			if np == "" && i == 1 {
-				np = bodyStr(body, "node0_pass")
+				np = bodyPassword(body, "node0_pass")
 			}
 			if np != "" {
 				nd["root_password"] = np
@@ -773,7 +824,12 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 		}
 		entry["community"] = comm
 	case "plc":
-		entry["fins_port"] = int(bodyNum(body, "fins_port", 9600))
+		port, err := plcPort(body)
+		if err != nil {
+			s.send(w, r, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		entry["fins_port"] = port
 		if tags, ok := body["tags"].([]any); ok && len(tags) > 0 {
 			entry["tags"] = tags
 		}
@@ -782,7 +838,7 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 		if user == "" {
 			user = "root@pam"
 		}
-		pw := bodyStr(body, "admin_pass")
+		pw := bodyPassword(body, "admin_pass")
 		if pw == "" {
 			s.send(w, r, 400, map[string]any{"error": "Proxmox API 비밀번호가 필요합니다"})
 			return
@@ -792,7 +848,7 @@ func (s *Server) addDevice(w http.ResponseWriter, r *http.Request, body map[stri
 	default: // server — SNMP·Redfish 중 1개 이상
 		bmcIP := bodyStr(body, "bmc_ip")
 		bmcUser := bodyStr(body, "bmc_user")
-		bmcPW := bodyStr(body, "bmc_pass")
+		bmcPW := bodyPassword(body, "bmc_pass")
 		if comm != "" {
 			entry["community"] = comm
 		}
@@ -911,7 +967,13 @@ func (s *Server) connTest(ctx context.Context, body map[string]any) map[string]a
 	}
 	if typ == "PLC" {
 		out["transport"] = "fins"
-		port := int(bodyNum(body, "fins_port", 9600))
+		port, err := plcPort(body)
+		if err != nil {
+			out["ok"] = false
+			out["error"] = err.Error()
+			setAuthErr(err.Error())
+			return out
+		}
 		sa1 := byte(int(bodyNum(body, "fins_src_node", 84)))
 		okResp, rtt := finsProbe(ctx, ip, port, []byte{0x06, 0x01}, sa1)
 		out["reachable"] = okResp
@@ -927,7 +989,7 @@ func (s *Server) connTest(ctx context.Context, body map[string]any) map[string]a
 		if user == "" {
 			user = "root@pam"
 		}
-		pw := bodyStr(body, "admin_pass")
+		pw := bodyPassword(body, "admin_pass")
 		code, err := pveTicket(ctx, ip, user, pw, fp)
 		switch {
 		case err == nil:
@@ -971,7 +1033,7 @@ func (s *Server) connTest(ctx context.Context, body map[string]any) map[string]a
 		} else {
 			out["transport"] = t + "+redfish"
 		}
-		code, err := redfishGet(ctx, bmcIP, bmcUser, bodyStr(body, "bmc_pass"), "/redfish/v1/Systems", fp)
+		code, err := redfishGet(ctx, bmcIP, bmcUser, bodyPassword(body, "bmc_pass"), "/redfish/v1/Systems", fp)
 		switch {
 		case err == nil:
 			out["reachable"] = true

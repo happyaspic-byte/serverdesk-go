@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -17,6 +18,77 @@ import (
 	"testing"
 	"time"
 )
+
+func TestBinaryBindFailurePreservesAvailabilityFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("process integration test")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "serverdesk")
+	if output, err := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, output)
+	}
+	authPath := filepath.Join(dir, "auth.json")
+	if output, err := exec.Command(bin, "-auth", authPath, "-init-auth").CombinedOutput(); err != nil {
+		t.Fatalf("init auth: %v\n%s", err, output)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.Mkdir(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	availabilityPath := filepath.Join(runtimeDir, "availability.json")
+	original := []byte("{\n  \"owner\": {\"days\": {\"2026-10-12\": [1200, 300]}}\n}\n")
+	if err := os.WriteFile(availabilityPath, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := json.Marshal(map[string]any{"listen": listener.Addr().String(), "secret_policy": "require-references", "avcli_bin": "/bin/true", "runtime_dir": runtimeDir, "snmp_enabled": false, "trap": map[string]any{"enabled": false}, "clusters": []any{}, "edge_devices": []any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, cfg, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, bin, "-c", configPath, "-auth", authPath, "-allow-argv-exposure").CombinedOutput()
+	if err == nil {
+		t.Fatal("occupied listener unexpectedly accepted")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("bind failure hung: %s", output)
+	}
+	after, err := os.ReadFile(availabilityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, original) {
+		t.Fatalf("bind failure rewrote active owner's availability: %s", after)
+	}
+	var persisted map[string]struct {
+		Days map[string][]float64 `json:"days"`
+	}
+	if err := json.Unmarshal(after, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	cell := persisted["owner"].Days["2026-10-12"]
+	if len(cell) != 2 || cell[0] != 1200 || cell[1] != 300 {
+		t.Fatalf("owner measurement changed: %v", cell)
+	}
+	if !strings.Contains(string(output), "포트가 이미 사용 중") {
+		t.Fatalf("bind diagnostic lost: %s", output)
+	}
+	onceCtx, onceCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer onceCancel()
+	if output, err := exec.CommandContext(onceCtx, bin, "-c", configPath, "-auth", authPath, "-allow-argv-exposure", "-once").CombinedOutput(); err != nil {
+		t.Fatalf("--once attempted listener binding: %v\n%s", err, output)
+	}
+}
 
 // TestBinaryAuthenticationLifecycle exercises the shipped process boundary rather than an
 // in-memory handler: credential initialization, startup, public health, login, authenticated API,
