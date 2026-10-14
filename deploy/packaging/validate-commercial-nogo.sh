@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fail closed while the Windows packaged task still runs as SYSTEM.
+# Fail closed until Windows LocalService packaging has completed real Windows Server UAT.
 # Does not require getent, systemd, or a Windows host.
 set -eu
 
@@ -12,18 +12,22 @@ fail() {
   exit 1
 }
 
-grep -F "UserId 'SYSTEM'" deploy/packaging/windows-deployment-common.ps1 >/dev/null ||
-  fail "expected packaged Windows task principal UserId 'SYSTEM' on this branch (or update this contract with LocalService + UAT evidence)"
+grep -F "UserId 'NT AUTHORITY\\LOCAL SERVICE'" deploy/packaging/windows-deployment-common.ps1 >/dev/null ||
+  fail "expected packaged Windows task principal UserId 'NT AUTHORITY\\LOCAL SERVICE' on this branch"
+
+if grep -F "UserId 'SYSTEM'" deploy/packaging/windows-deployment-common.ps1 >/dev/null; then
+  fail "packaged Windows task must not register as UserId 'SYSTEM'"
+fi
 
 grep -F 'Current automatic NO-GO — Windows' docs/COMMERCIAL-UAT.md >/dev/null ||
-  fail 'SYSTEM Windows task is packaged but COMMERCIAL-UAT.md lost the Windows NO-GO banner'
+  fail 'Windows UAT is not yet certified but COMMERCIAL-UAT.md lost the Windows NO-GO banner'
 
 if grep -Ei 'Windows Server[^\n]*[Cc]ertified' docs/SUPPORT-MATRIX.md >/dev/null; then
-  fail 'SUPPORT-MATRIX must not mark Windows Server certified while the task runs as SYSTEM'
+  fail 'SUPPORT-MATRIX must not mark Windows Server certified before real Windows Server UAT passes'
 fi
 
 if grep -Ei 'paid support|certified product' docs/SUPPORT-MATRIX.md | grep -Ei 'everRun|ztC Edge' | grep -Eiv 'not certified|Pilot|None' >/dev/null; then
   fail 'SUPPORT-MATRIX must not advertise paid/certified Stratus support without a Gate A–B evidence sheet'
 fi
 
-echo "[OK] Windows SYSTEM packaging remains a documented commercial NO-GO"
+echo "[OK] Windows LocalService packaging remains gated on real Windows Server UAT"

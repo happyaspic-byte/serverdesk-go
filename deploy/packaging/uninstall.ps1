@@ -2,8 +2,11 @@ param([switch]$Full)
 
 # serverdesk Windows uninstaller. Default preserves customer state and diagnostics.
 $ErrorActionPreference = 'Stop'
-$dst = 'C:\serverdesk'
-$commonPath = "$dst\windows-deployment-common.ps1"
+$programDir = Join-Path $env:ProgramFiles 'Serverdesk'
+$dataDir = Join-Path $env:ProgramData 'Serverdesk'
+$legacyRoot = 'C:\serverdesk'
+$dst = $programDir
+$commonPath = Join-Path $programDir 'windows-deployment-common.ps1'
 if (Test-Path -LiteralPath $commonPath -PathType Leaf) {
     $cursor = [IO.Path]::GetFullPath($commonPath)
     while (-not [string]::IsNullOrWhiteSpace($cursor)) {
@@ -28,7 +31,9 @@ foreach ($transactionPath in @("$dst\.update-transaction", "$dst\.install-in-pro
     "$dst\serverdesk.exe.install-backup", "$dst\.serverdesk.update-new",
     "$dst\serverdesk.exe.bak.new", "$dst\config.local.json.update.tmp",
     "$dst\update.ps1.update-new", "$dst\uninstall.ps1.update-new",
-    "$dst\windows-deployment-common.ps1.update-new")) {
+    "$dst\windows-deployment-common.ps1.update-new",
+    "$dataDir\.update-transaction", "$dataDir\.install-in-progress",
+    "$dataDir\config.local.json.update.tmp")) {
     if (Test-Path -LiteralPath $transactionPath) {
         throw "A deployment transaction/recovery path is present. Inspect it before uninstalling: $transactionPath"
     }
@@ -52,14 +57,16 @@ if (Get-Command Assert-ServerdeskManagedTask -ErrorAction SilentlyContinue) {
 } elseif ($null -ne $installedTask) {
     $actions = @($installedTask.Actions)
     $principal = [string]$installedTask.Principal.UserId
-    if ($principal -notin @('SYSTEM', 'S-1-5-18', 'NT AUTHORITY\SYSTEM') -or $actions.Count -ne 1) {
+    if ($principal -notin @('SYSTEM', 'S-1-5-18', 'NT AUTHORITY\SYSTEM',
+        'LOCAL SERVICE', 'S-1-5-19', 'NT AUTHORITY\LOCAL SERVICE') -or $actions.Count -ne 1) {
         throw 'Refusing to remove an unrecognized serverdesk scheduled task.'
     }
     $action = $actions[0]
     $executeName = [IO.Path]::GetFileName([string]$action.Execute)
     $arguments = ([string]$action.Arguments).Trim()
     $workingDirectory = ([string]$action.WorkingDirectory).TrimEnd('\')
-    $knownAction = ($executeName -ieq 'powershell.exe' -and $workingDirectory -ieq $dst -and
+    $knownAction = ($executeName -ieq 'serverdesk.exe' -and $workingDirectory -ieq $dst) -or
+        ($executeName -ieq 'powershell.exe' -and $workingDirectory -ieq $dst -and
             $arguments -ieq '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\serverdesk\run-serverdesk.ps1') -or
         ($executeName -ieq 'cmd.exe' -and $workingDirectory -ieq $dst -and
             $arguments -ieq '/d /c run-serverdesk.cmd') -or
@@ -102,6 +109,8 @@ if ($remainingRules.Count -ne 0) { throw 'Managed firewall-rule removal could no
 if ($Full) {
     Set-Location $env:TEMP
     if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }
+    if (Test-Path -LiteralPath $dataDir) { Remove-Item -LiteralPath $dataDir -Recurse -Force }
+    if (Test-Path -LiteralPath $legacyRoot) { Remove-Item -LiteralPath $legacyRoot -Recurse -Force }
     foreach ($setup in @('C:\serverdesk-setup.exe', 'C:\serverdesk-setup.download')) {
         if (Test-Path -LiteralPath $setup) { Remove-Item -LiteralPath $setup -Force }
     }
